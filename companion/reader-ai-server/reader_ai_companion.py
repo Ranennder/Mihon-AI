@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import mimetypes
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -119,40 +121,75 @@ class ReaderAiServer(ThreadingHTTPServer):
         super().__init__(server_address, ReaderAiRequestHandler)
         self.config = config
         self.processing_slots = threading.Semaphore(config.max_workers)
+        self._workspace_root_owner = tempfile.TemporaryDirectory(prefix="mihon-ai-server-")
+        self._workspace_root = Path(self._workspace_root_owner.name)
+        self._workspaces: queue.SimpleQueue[Path] = queue.SimpleQueue()
+        for worker_index in range(max(1, config.max_workers)):
+            workspace = self._workspace_root / f"worker-{worker_index}"
+            workspace.mkdir(parents=True, exist_ok=True)
+            self._workspaces.put(workspace)
 
     def process_image(self, body: bytes, input_format: str, output_format: str, model_name: str) -> ProcessedImage:
         with self.processing_slots:
-            if self.config.mode == "mock_copy":
-                return ProcessedImage(body, output_format)
+            with self._borrow_workspace() as workspace:
+                return self._process_image_in_workspace(workspace, body, input_format, output_format, model_name)
 
-            native_scale = _resolve_model_scale(
-                model_name=model_name,
-                default_scale=self.config.scale,
-            )
-            target_scale = max(1, int(self.config.scale))
+    def _process_image_in_workspace(
+        self,
+        workspace: Path,
+        body: bytes,
+        input_format: str,
+        output_format: str,
+        model_name: str,
+    ) -> ProcessedImage:
+        if self.config.mode == "mock_copy":
+            return ProcessedImage(body, output_format)
 
-            if _requires_chunked_upscale(
-                body=body,
-                native_scale=native_scale,
-                target_scale=target_scale,
-            ):
-                return _run_chunked_subprocess(
-                    config=self.config,
-                    body=body,
-                    requested_output_format=output_format,
-                    model_name=model_name,
-                    native_scale=native_scale,
-                    target_scale=target_scale,
-                )
+        native_scale = _resolve_model_scale(
+            model_name=model_name,
+            default_scale=self.config.scale,
+        )
+        target_scale = max(1, int(self.config.scale))
 
-            return _run_subprocess(
+        if _requires_chunked_upscale(
+            body=body,
+            native_scale=native_scale,
+            target_scale=target_scale,
+        ):
+            return _run_chunked_subprocess(
                 config=self.config,
+                workspace=workspace,
                 body=body,
-                input_format=input_format,
                 requested_output_format=output_format,
                 model_name=model_name,
-                scale=native_scale,
+                native_scale=native_scale,
+                target_scale=target_scale,
             )
+
+        return _run_subprocess(
+            config=self.config,
+            workspace=workspace,
+            body=body,
+            input_format=input_format,
+            requested_output_format=output_format,
+            model_name=model_name,
+            scale=native_scale,
+        )
+
+    @contextlib.contextmanager
+    def _borrow_workspace(self) -> Any:
+        workspace = self._workspaces.get()
+        try:
+            yield workspace
+        finally:
+            _clear_workspace_files(workspace)
+            self._workspaces.put(workspace)
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self._workspace_root_owner.cleanup()
 
     def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
         _, exc, _ = sys.exc_info()
@@ -305,6 +342,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
 def _run_subprocess(
     config: Config,
+    workspace: Path,
     body: bytes,
     input_format: str,
     requested_output_format: str,
@@ -328,6 +366,7 @@ def _run_subprocess(
     try:
         return _run_subprocess_once(
             config=config,
+            workspace=workspace,
             binary=binary,
             model_dir=model_dir,
             body=body,
@@ -344,6 +383,7 @@ def _run_subprocess(
         ):
             return _run_subprocess_once(
                 config=config,
+                workspace=workspace,
                 binary=binary,
                 model_dir=model_dir,
                 body=body,
@@ -357,6 +397,7 @@ def _run_subprocess(
 
 def _run_subprocess_once(
     config: Config,
+    workspace: Path,
     binary: Path,
     model_dir: Path,
     body: bytes,
@@ -365,55 +406,54 @@ def _run_subprocess_once(
     model_name: str,
     scale: int,
 ) -> ProcessedImage:
-    with tempfile.TemporaryDirectory(prefix="mihon-ai-") as temp_dir:
-        temp_root = Path(temp_dir)
-        input_path = temp_root / f"input.{_sanitize_extension(input_format)}"
-        output_path = temp_root / f"output.{_sanitize_extension(output_format)}"
-        input_path.write_bytes(body)
+    _clear_workspace_files(workspace)
+    input_path = workspace / f"input.{_sanitize_extension(input_format)}"
+    output_path = workspace / f"output.{_sanitize_extension(output_format)}"
+    input_path.write_bytes(body)
 
-        command = [
-            str(binary),
-            "-i",
-            str(input_path),
-            "-o",
-            str(output_path),
-            "-s",
-            str(scale),
-            "-t",
-            str(config.tile_size),
-            "-m",
-            str(model_dir),
-            "-f",
-            output_format,
-            "-g",
-            str(config.gpu_id),
-            "-j",
-            config.jobs,
-        ]
-        if model_name and _supports_model_name_flag(binary):
-            command.extend(["-n", model_name])
+    command = [
+        str(binary),
+        "-i",
+        str(input_path),
+        "-o",
+        str(output_path),
+        "-s",
+        str(scale),
+        "-t",
+        str(config.tile_size),
+        "-m",
+        str(model_dir),
+        "-f",
+        output_format,
+        "-g",
+        str(config.gpu_id),
+        "-j",
+        config.jobs,
+    ]
+    if model_name and _supports_model_name_flag(binary):
+        command.extend(["-n", model_name])
 
-        completed = subprocess.run(
-            command,
-            cwd=str(binary.parent),
-            capture_output=True,
-            timeout=config.timeout_seconds,
-            check=False,
-        )
-        details = _subprocess_details(completed)
+    completed = subprocess.run(
+        command,
+        cwd=str(binary.parent),
+        capture_output=True,
+        timeout=config.timeout_seconds,
+        check=False,
+    )
+    details = _subprocess_details(completed)
 
-        if completed.returncode != 0:
-            raise RuntimeError(f"Upscale process failed: {details}")
+    if completed.returncode != 0:
+        raise RuntimeError(f"Upscale process failed: {details}")
 
-        produced_output_path = _resolve_produced_output_path(output_path, output_format)
-        if produced_output_path is None or produced_output_path.stat().st_size == 0:
-            reason = details or "empty output file"
-            raise RuntimeError(f"Upscale process did not produce a valid {output_format} image: {reason}")
+    produced_output_path = _resolve_produced_output_path(output_path, output_format)
+    if produced_output_path is None or produced_output_path.stat().st_size == 0:
+        reason = details or "empty output file"
+        raise RuntimeError(f"Upscale process did not produce a valid {output_format} image: {reason}")
 
-        return ProcessedImage(
-            bytes=produced_output_path.read_bytes(),
-            output_format=_sanitize_extension(produced_output_path.suffix) if produced_output_path != output_path else output_format,
-        )
+    return ProcessedImage(
+        bytes=produced_output_path.read_bytes(),
+        output_format=_sanitize_extension(produced_output_path.suffix) if produced_output_path != output_path else output_format,
+    )
 
 
 def _resolve_produced_output_path(output_path: Path, requested_output_format: str) -> Path | None:
@@ -442,6 +482,13 @@ def _subprocess_details(completed: subprocess.CompletedProcess[bytes]) -> str:
     stderr = completed.stderr.decode("utf-8", errors="replace").strip()
     stdout = completed.stdout.decode("utf-8", errors="replace").strip()
     return stderr or stdout or f"exit code {completed.returncode}"
+
+
+def _clear_workspace_files(workspace: Path) -> None:
+    for pattern in ("input.*", "output.*", "output.*.*"):
+        for path in workspace.glob(pattern):
+            if path.is_file():
+                path.unlink(missing_ok=True)
 
 
 def _should_retry_with_png(message: str) -> bool:
@@ -551,6 +598,7 @@ def _decode_jpeg_size(body: bytes) -> ImageSize | None:
 
 def _run_chunked_subprocess(
     config: Config,
+    workspace: Path,
     body: bytes,
     requested_output_format: str,
     model_name: str,
@@ -586,6 +634,7 @@ def _run_chunked_subprocess(
 
             processed_chunk = _run_subprocess_once(
                 config=config,
+                workspace=workspace,
                 binary=binary,
                 model_dir=model_dir,
                 body=chunk_bytes,
