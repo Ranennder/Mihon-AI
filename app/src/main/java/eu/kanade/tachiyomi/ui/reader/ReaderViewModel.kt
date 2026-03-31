@@ -871,15 +871,19 @@ class ReaderViewModel @JvmOverloads constructor(
         currentIndex: Int,
     ) {
         val prefetchPlan = buildWholeChapterUpscalePlan(pages, currentIndex)
-        val retainedPages = ((prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
-            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
-        )).distinct()
+        val retainedPages = (
+            (prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
+                anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+            )
+            ).distinct()
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
-        (prefetchPlan + loadedCompanionUpscalePages(
-            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
-        ).map { page ->
-            PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
-        }).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
+        (
+            prefetchPlan + loadedCompanionUpscalePages(
+                anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+            ).map { page ->
+                PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
+            }
+            ).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
             readerPageUpscaler.schedulePrefetch(request.page, priority, request.lane)
         }
     }
@@ -890,15 +894,19 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
-        val retainedPages = ((prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
-            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
-        )).distinct()
+        val retainedPages = (
+            (prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
+                anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+            )
+            ).distinct()
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
-        (prefetchPlan + loadedCompanionUpscalePages(
-            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
-        ).map { page ->
-            PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
-        }).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
+        (
+            prefetchPlan + loadedCompanionUpscalePages(
+                anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+            ).map { page ->
+                PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
+            }
+            ).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
             readerPageUpscaler.schedulePrefetch(request.page, priority, request.lane)
         }
     }
@@ -1045,7 +1053,9 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = pages[nextIndex],
-                            lane = if (hasUncachedAfterAnchor && !hasUncachedBeforeAnchor && ((nextIndex - anchorIndex) % 2 == 0)) {
+                            lane = if (hasUncachedAfterAnchor && !hasUncachedBeforeAnchor &&
+                                ((nextIndex - anchorIndex) % 2 == 0)
+                            ) {
                                 ReaderPageUpscaler.REMOTE_SECONDARY_LANE
                             } else {
                                 ReaderPageUpscaler.REMOTE_PRIMARY_LANE
@@ -1059,7 +1069,9 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = pages[previousIndex],
-                            lane = if (hasUncachedBeforeAnchor && !hasUncachedAfterAnchor && ((anchorIndex - previousIndex) % 2 == 0)) {
+                            lane = if (hasUncachedBeforeAnchor && !hasUncachedAfterAnchor &&
+                                ((anchorIndex - previousIndex) % 2 == 0)
+                            ) {
                                 ReaderPageUpscaler.REMOTE_SECONDARY_LANE
                             } else {
                                 ReaderPageUpscaler.REMOTE_PRIMARY_LANE

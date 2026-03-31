@@ -86,7 +86,8 @@ class QuickSrPageUpscaler(
                 val inputBytes = ByteArray(INPUT_BUFFER_BYTES)
                 val outputTilePixels = IntArray(DOWNSCALED_OUTPUT_SIZE * DOWNSCALED_OUTPUT_SIZE)
 
-                val totalTiles = ceilDiv(sourceBitmap.width, CORE_TILE_SIZE) * ceilDiv(sourceBitmap.height, CORE_TILE_SIZE)
+                val totalTiles =
+                    ceilDiv(sourceBitmap.width, CORE_TILE_SIZE) * ceilDiv(sourceBitmap.height, CORE_TILE_SIZE)
                 var processedTiles = 0
                 var sourceY = 0
                 while (sourceY < sourceBitmap.height) {
@@ -230,10 +231,18 @@ class QuickSrPageUpscaler(
         init {
             interpreter.allocateTensors()
 
-            check(interpreter.getInputTensor(0).shape().contentEquals(intArrayOf(1, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, MODEL_CHANNELS))) {
+            check(
+                interpreter.getInputTensor(
+                    0,
+                ).shape().contentEquals(intArrayOf(1, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, MODEL_CHANNELS)),
+            ) {
                 "Unexpected QuickSR input tensor shape"
             }
-            check(interpreter.getOutputTensor(0).shape().contentEquals(intArrayOf(1, MODEL_OUTPUT_SIZE, MODEL_OUTPUT_SIZE, MODEL_CHANNELS))) {
+            check(
+                interpreter.getOutputTensor(
+                    0,
+                ).shape().contentEquals(intArrayOf(1, MODEL_OUTPUT_SIZE, MODEL_OUTPUT_SIZE, MODEL_CHANNELS)),
+            ) {
                 "Unexpected QuickSR output tensor shape"
             }
             check(interpreter.getInputTensor(0).dataType() == DataType.UINT8) {
@@ -266,15 +275,33 @@ class QuickSrPageUpscaler(
                 val bottomRow = bottomY * OUTPUT_ROW_STRIDE
                 for (outputX in 0 until DOWNSCALED_OUTPUT_SIZE) {
                     val left = (HIGH_RES_MARGIN_SIZE + outputX * DOWNSCALE_FACTOR) * MODEL_CHANNELS
-                    val red = averageChannel(topRow + left, topRow + left + MODEL_CHANNELS, bottomRow + left, bottomRow + left + MODEL_CHANNELS, 0)
-                    val green = averageChannel(topRow + left, topRow + left + MODEL_CHANNELS, bottomRow + left, bottomRow + left + MODEL_CHANNELS, 1)
-                    val blue = averageChannel(topRow + left, topRow + left + MODEL_CHANNELS, bottomRow + left, bottomRow + left + MODEL_CHANNELS, 2)
+                    val red = averageChannel(
+                        topRow + left,
+                        topRow + left + MODEL_CHANNELS,
+                        bottomRow + left,
+                        bottomRow + left + MODEL_CHANNELS,
+                        0,
+                    )
+                    val green = averageChannel(
+                        topRow + left,
+                        topRow + left + MODEL_CHANNELS,
+                        bottomRow + left,
+                        bottomRow + left + MODEL_CHANNELS,
+                        1,
+                    )
+                    val blue = averageChannel(
+                        topRow + left,
+                        topRow + left + MODEL_CHANNELS,
+                        bottomRow + left,
+                        bottomRow + left + MODEL_CHANNELS,
+                        2,
+                    )
 
                     destinationTile[destIndex++] =
                         (0xFF shl 24) or
-                            (red shl 16) or
-                            (green shl 8) or
-                            blue
+                        (red shl 16) or
+                        (green shl 8) or
+                        blue
                 }
             }
         }

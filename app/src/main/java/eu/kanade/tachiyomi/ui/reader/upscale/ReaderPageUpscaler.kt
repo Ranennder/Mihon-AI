@@ -6,12 +6,12 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -22,8 +22,8 @@ import okio.Buffer
 import okio.BufferedSource
 import tachiyomi.core.common.util.system.logcat
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
@@ -102,7 +102,10 @@ class ReaderPageUpscaler(
             val processedBytes = runCatching {
                 when (backendMode) {
                     ReaderPreferences.AiBackendMode.GPU -> ncnnPageUpscaler.upscaleSource(source)
-                    ReaderPreferences.AiBackendMode.CPU, ReaderPreferences.AiBackendMode.NPU -> anime4xPageUpscaler.upscaleSource(source)
+                    ReaderPreferences.AiBackendMode.CPU,
+                    ReaderPreferences.AiBackendMode.NPU,
+                    ->
+                        anime4xPageUpscaler.upscaleSource(source)
                     ReaderPreferences.AiBackendMode.REMOTE -> remotePageUpscaler.upscaleSource(source)
                 }
             }
@@ -112,7 +115,10 @@ class ReaderPageUpscaler(
             if (processedBytes == null) {
                 lastFailureMessage = when (backendMode) {
                     ReaderPreferences.AiBackendMode.GPU -> ncnnPageUpscaler.consumeLastErrorMessage()
-                    ReaderPreferences.AiBackendMode.CPU, ReaderPreferences.AiBackendMode.NPU -> anime4xPageUpscaler.consumeLastErrorMessage()
+                    ReaderPreferences.AiBackendMode.CPU,
+                    ReaderPreferences.AiBackendMode.NPU,
+                    ->
+                        anime4xPageUpscaler.consumeLastErrorMessage()
                     ReaderPreferences.AiBackendMode.REMOTE -> remotePageUpscaler.consumeLastErrorMessage()
                 } ?: "AI upscale did not produce an output image"
                 if (!fallbackToSourceOnFailure) {
@@ -306,7 +312,17 @@ class ReaderPageUpscaler(
         }
         return File(
             File(cacheRoot, mangaId.toString()),
-            "$chapterId/${backend}-${page.index.toString().padStart(3, '0')}-$pageRole.$extension",
+            buildString {
+                append(chapterId)
+                append('/')
+                append(backend)
+                append('-')
+                append(page.index.toString().padStart(3, '0'))
+                append('-')
+                append(pageRole)
+                append('.')
+                append(extension)
+            },
         )
     }
 

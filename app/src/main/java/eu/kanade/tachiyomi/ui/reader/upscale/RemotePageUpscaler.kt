@@ -40,7 +40,8 @@ class RemotePageUpscaler(
 
         val baseUrlResolution = discovery.resolveBaseUrl()
         if (baseUrlResolution == null) {
-            lastErrorMessage = "Remote AI companion was not found on local Wi-Fi. Set the server URL manually if needed."
+            lastErrorMessage =
+                "Remote AI companion was not found on local Wi-Fi. Set the server URL manually if needed."
             return null
         }
 

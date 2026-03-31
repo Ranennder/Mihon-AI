@@ -211,9 +211,9 @@ class UpscaleDebugActivity : Activity() {
 
                 destinationTile[destIndex++] =
                     (0xFF shl 24) or
-                        (red shl 16) or
-                        (green shl 8) or
-                        blue
+                    (red shl 16) or
+                    (green shl 8) or
+                    blue
             }
         }
 
@@ -260,9 +260,9 @@ class UpscaleDebugActivity : Activity() {
 
                 destinationTile[index] =
                     (0xFF shl 24) or
-                        (red shl 16) or
-                        (green shl 8) or
-                        blue
+                    (red shl 16) or
+                    (green shl 8) or
+                    blue
             }
         }
     }
@@ -299,7 +299,8 @@ class UpscaleDebugActivity : Activity() {
         private const val DOWNSCALED_OUTPUT_SIZE = MODEL_OUTPUT_SIZE / 2
         private const val OUTPUT_MARGIN_SIZE = INPUT_PADDING * TARGET_SCALE
         private const val INPUT_BUFFER_BYTES = MODEL_INPUT_SIZE * MODEL_INPUT_SIZE * MODEL_CHANNELS * Float.SIZE_BYTES
-        private const val OUTPUT_BUFFER_BYTES = MODEL_OUTPUT_SIZE * MODEL_OUTPUT_SIZE * MODEL_CHANNELS * Float.SIZE_BYTES
+        private const val OUTPUT_BUFFER_BYTES =
+            MODEL_OUTPUT_SIZE * MODEL_OUTPUT_SIZE * MODEL_CHANNELS * Float.SIZE_BYTES
         private const val INFERENCE_THREADS = 4
 
         const val EXTRA_INPUT_PATH = "input_path"
