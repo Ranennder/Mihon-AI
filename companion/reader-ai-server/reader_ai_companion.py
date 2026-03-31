@@ -10,6 +10,7 @@ import locale
 import mimetypes
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,20 @@ CHUNK_OVERLAP_INPUT_PIXELS = 32
 LOG_FILE_NAME = "companion.log"
 _LOG_LOCK = threading.Lock()
 _LOG_FILE_HANDLE: Any | None = None
+_CONSOLE_STYLING_ENABLED = False
+_LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\]\s+(.*)$")
+_LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
+_PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
+_ANSI_RESET = "\x1b[0m"
+_ANSI_DIM = "\x1b[2m"
+_ANSI_BOLD = "\x1b[1m"
+_ANSI_RED = "\x1b[91m"
+_ANSI_GREEN = "\x1b[92m"
+_ANSI_YELLOW = "\x1b[93m"
+_ANSI_BLUE = "\x1b[94m"
+_ANSI_MAGENTA = "\x1b[95m"
+_ANSI_CYAN = "\x1b[96m"
+_ANSI_WHITE = "\x1b[97m"
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -876,6 +891,121 @@ def _emit_log_line(message: str) -> None:
     _emit_log_text(message + "\n")
 
 
+def _enable_console_styling() -> None:
+    global _CONSOLE_STYLING_ENABLED
+    console = getattr(sys, "__stdout__", None) or sys.stdout
+    if not getattr(console, "isatty", lambda: False)():
+        _CONSOLE_STYLING_ENABLED = False
+        return
+    if os.name != "nt":
+        _CONSOLE_STYLING_ENABLED = True
+        return
+    try:
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)
+        if handle in (0, -1):
+            _CONSOLE_STYLING_ENABLED = False
+            return
+        mode = ctypes.c_uint()
+        if not ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            _CONSOLE_STYLING_ENABLED = False
+            return
+        enable_virtual_terminal_processing = 0x0004
+        processed_output = 0x0001
+        new_mode = mode.value | enable_virtual_terminal_processing | processed_output
+        _CONSOLE_STYLING_ENABLED = bool(
+            ctypes.windll.kernel32.SetConsoleMode(handle, new_mode)
+        )
+    except Exception:
+        _CONSOLE_STYLING_ENABLED = False
+
+
+def _ansi(text: str, *styles: str) -> str:
+    if not _CONSOLE_STYLING_ENABLED:
+        return text
+    return "".join(styles) + text + _ANSI_RESET
+
+
+def _request_style(request_id: str) -> str:
+    palette = (_ANSI_CYAN, _ANSI_MAGENTA, _ANSI_BLUE, _ANSI_GREEN, _ANSI_YELLOW)
+    return palette[sum(ord(char) for char in request_id) % len(palette)]
+
+
+def _build_progress_bar(percent: float, width: int = 24) -> str:
+    bounded = max(0.0, min(100.0, percent))
+    filled = int(round((bounded / 100.0) * width))
+    return "[" + ("=" * filled) + ("-" * (width - filled)) + "]"
+
+
+def _progress_style(percent: float) -> str:
+    if percent >= 95.0:
+        return _ANSI_GREEN
+    if percent >= 60.0:
+        return _ANSI_CYAN
+    if percent >= 30.0:
+        return _ANSI_BLUE
+    return _ANSI_YELLOW
+
+
+def _format_console_body(body: str) -> str:
+    progress_match = _PROGRESS_RE.fullmatch(body)
+    if progress_match is not None:
+        percent_text = progress_match.group("percent")
+        percent_value = float(percent_text.replace(",", "."))
+        style = _progress_style(percent_value)
+        return (
+            _ansi(_build_progress_bar(percent_value), _ANSI_BOLD, style)
+            + " "
+            + _ansi(f"{percent_text}%", _ANSI_BOLD, style)
+        )
+    lowered = body.lower()
+    if "upscale error" in lowered or "failed" in lowered or "traceback" in lowered:
+        return _ansi(body, _ANSI_BOLD, _ANSI_RED)
+    if body.startswith("Mihon AI companion listening") or lowered.startswith("processed ") or " was closed" in lowered:
+        return _ansi(body, _ANSI_BOLD, _ANSI_GREEN)
+    if "accepted upscale request" in lowered:
+        return _ansi(body, _ANSI_BOLD, _ANSI_CYAN)
+    if "force-closing" in lowered or "client disconnected" in lowered or "vanished while closing" in lowered:
+        return _ansi(body, _ANSI_BOLD, _ANSI_YELLOW)
+    if body.startswith("Mode:") or body.startswith("Binary:") or body.startswith("Model dir:") or body.startswith("Live logs:") or body.startswith("Console logging:"):
+        return _ansi(body, _ANSI_WHITE)
+    if body.startswith("[") and ("queuec=" in lowered or "fp16-" in lowered or "subgroup=" in lowered or "bug" in lowered):
+        return _ansi(body, _ANSI_MAGENTA)
+    if "has alpha channel !" in lowered:
+        return _ansi(body, _ANSI_YELLOW)
+    return body
+
+
+def _format_console_message(message: str) -> str:
+    if not _CONSOLE_STYLING_ENABLED:
+        return message
+    formatted_lines: list[str] = []
+    for line in message.splitlines(keepends=True):
+        newline = "\n" if line.endswith("\n") else ""
+        line_body = line[:-1] if newline else line
+        if not line_body:
+            formatted_lines.append(line)
+            continue
+        timestamp_text: str | None = None
+        request_id: str | None = None
+        body = line_body
+        timestamp_match = _LOG_TIMESTAMP_RE.match(body)
+        if timestamp_match is not None:
+            timestamp_text = timestamp_match.group(1)
+            body = timestamp_match.group(2)
+        request_match = _LOG_REQUEST_RE.match(body)
+        if request_match is not None:
+            request_id = request_match.group(1)
+            body = request_match.group(2)
+        prefix_parts: list[str] = []
+        if timestamp_text is not None:
+            prefix_parts.append(_ansi(f"[{timestamp_text}]", _ANSI_DIM))
+        if request_id is not None:
+            prefix_parts.append(_ansi(f"[{request_id}]", _ANSI_BOLD, _request_style(request_id)))
+        prefix = (" ".join(prefix_parts) + " ") if prefix_parts else ""
+        formatted_lines.append(prefix + _format_console_body(body) + newline)
+    return "".join(formatted_lines)
+
+
 def _write_console_direct(message: str) -> bool:
     if os.name != "nt":
         return False
@@ -900,16 +1030,20 @@ def _write_console_direct(message: str) -> bool:
 def _emit_log_text(message: str) -> None:
     with _LOG_LOCK:
         console = getattr(sys, "__stdout__", None) or sys.stdout
-        wrote_to_console = _write_console_direct(message)
+        console_message = _format_console_message(message)
+        stream_message = (
+            console_message if getattr(console, "isatty", lambda: False)() else message
+        )
+        wrote_to_console = _write_console_direct(stream_message)
         if not wrote_to_console:
             try:
                 encoding = getattr(console, "encoding", None) or "utf-8"
-                os.write(1, message.encode(encoding, errors="replace"))
+                os.write(1, stream_message.encode(encoding, errors="replace"))
                 wrote_to_console = True
             except OSError:
                 pass
         if console is not None and not wrote_to_console:
-            console.write(message)
+            console.write(stream_message)
             console.flush()
         if _LOG_FILE_HANDLE is not None:
             _LOG_FILE_HANDLE.write(message)
@@ -1050,6 +1184,7 @@ def main() -> int:
         sys.stdout.reconfigure(line_buffering=True, write_through=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True, write_through=True)
+    _enable_console_styling()
     try:
         log_path = _configure_output_tee()
 
