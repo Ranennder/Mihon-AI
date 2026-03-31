@@ -915,6 +915,136 @@ def _emit_log_text(message: str) -> None:
             _LOG_FILE_HANDLE.flush()
 
 
+def _run_hidden_windows_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run(command, **kwargs)
+
+
+def _find_listening_process_id(port: int) -> int | None:
+    if os.name != "nt":
+        return None
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        (
+            f"$pid = Get-NetTCPConnection -LocalPort {port} -State Listen "
+            "-ErrorAction SilentlyContinue | Select-Object -First 1 "
+            "-ExpandProperty OwningProcess; "
+            'if ($pid) { Write-Output $pid }'
+        ),
+    ]
+    try:
+        result = _run_hidden_windows_command(command)
+    except OSError:
+        return None
+    pid_text = result.stdout.strip()
+    return int(pid_text) if pid_text.isdigit() else None
+
+
+def _show_duplicate_instance_dialog(port: int, pid: int) -> bool:
+    if os.name != "nt":
+        return False
+    forced_action = os.environ.get("MIHON_AI_DUPLICATE_ACTION", "").strip().lower()
+    if forced_action == "close":
+        return True
+    if forced_action == "cancel":
+        return False
+    text = (
+        f"Another Mihon AI companion is already using port {port}.\n\n"
+        f"Running process ID: {pid}\n\n"
+        "Press OK to close the old copy and continue.\n"
+        "Press Cancel to keep it running and exit this one."
+    )
+    flags = 0x00000001 | 0x00000030 | 0x00040000  # OK/Cancel + warning + topmost
+    return ctypes.windll.user32.MessageBoxW(None, text, "Mihon AI Companion", flags) == 1
+
+
+def _show_duplicate_close_failed_dialog(port: int, pid: int, details: str) -> None:
+    if os.name != "nt":
+        return
+    text = (
+        f"Couldn't close the old Mihon AI companion on port {port}.\n\n"
+        f"Process ID: {pid}\n"
+        f"Details: {details}"
+    )
+    flags = 0x00000000 | 0x00000010 | 0x00040000  # OK + error + topmost
+    ctypes.windll.user32.MessageBoxW(None, text, "Mihon AI Companion", flags)
+
+
+def _wait_for_port_release(port: int, timeout_seconds: float = 5.0) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if _find_listening_process_id(port) is None:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _close_existing_instance(port: int, pid: int) -> bool:
+    if not _show_duplicate_instance_dialog(port, pid):
+        _emit_log_line(
+            f"Startup canceled because an existing companion on port {port} "
+            f"(pid={pid}) was kept running."
+        )
+        return False
+    _emit_log_line(f"Closing previous companion instance on port {port} (pid={pid})")
+    try:
+        result = _run_hidden_windows_command(["taskkill", "/PID", str(pid), "/T", "/F"])
+    except OSError as exc:
+        _emit_log_line(f"Failed to close previous companion instance: {exc}")
+        _show_duplicate_close_failed_dialog(port, pid, str(exc))
+        return False
+    if result.returncode != 0:
+        if _wait_for_port_release(port, timeout_seconds=1.0):
+            _emit_log_line(
+                f"Previous companion instance on port {port} vanished while closing"
+            )
+            return True
+        details = result.stdout.strip() or result.stderr.strip() or f"exit code {result.returncode}"
+        _emit_log_line(f"Failed to close previous companion instance: {details}")
+        _show_duplicate_close_failed_dialog(port, pid, details)
+        return False
+    if not _wait_for_port_release(port):
+        details = "port stayed busy after taskkill"
+        _emit_log_line(f"Failed to close previous companion instance: {details}")
+        _show_duplicate_close_failed_dialog(port, pid, details)
+        return False
+    _emit_log_line(f"Previous companion instance on port {port} was closed")
+    return True
+
+
+def _is_address_in_use_error(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) == 10048 or exc.errno == 10048
+
+
+def _create_server_with_duplicate_resolution(config: Config) -> ReaderAiServer | None:
+    current_pids = {os.getpid(), os.getppid()}
+    duplicate_pid = _find_listening_process_id(config.port)
+    if duplicate_pid is not None and duplicate_pid not in current_pids:
+        if not _close_existing_instance(config.port, duplicate_pid):
+            return None
+    try:
+        return ReaderAiServer((config.host, config.port), config)
+    except OSError as exc:
+        if not _is_address_in_use_error(exc):
+            raise
+        duplicate_pid = _find_listening_process_id(config.port)
+        if duplicate_pid is None or duplicate_pid in current_pids:
+            raise
+        if not _close_existing_instance(config.port, duplicate_pid):
+            return None
+        return ReaderAiServer((config.host, config.port), config)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mihon AI remote companion server")
     parser.add_argument("--config", default=DEFAULT_CONFIG_NAME)
@@ -941,47 +1071,51 @@ def main() -> int:
         sys.stdout.reconfigure(line_buffering=True, write_through=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True, write_through=True)
-    log_path = _configure_output_tee()
-
-    args = _parse_args()
-    config_path = _resolve_config_path(args.config)
-    config = Config.load(
-        config_path,
-        overrides={
-            "host": args.host,
-            "port": args.port,
-            "token": args.token,
-            "mode": args.mode,
-            "binary": args.binary,
-            "model_dir": args.model_dir,
-            "model_name": args.model_name,
-            "output_format": args.output_format,
-            "scale": args.scale,
-            "tile_size": args.tile_size,
-            "gpu_id": args.gpu_id,
-            "jobs": args.jobs,
-            "timeout_seconds": args.timeout_seconds,
-            "max_workers": args.max_workers,
-            "max_request_megabytes": args.max_request_megabytes,
-        },
-    )
-
-    server = ReaderAiServer((config.host, config.port), config)
-    _emit_log_line(f"Mihon AI companion listening on http://{config.host}:{config.port}")
-    _emit_log_line(f"Mode: {config.mode}")
-    _emit_log_line(f"Binary: {config.binary}")
-    _emit_log_line(f"Model dir: {config.model_dir}")
-    _emit_log_line(f"Live logs: enabled -> {log_path}")
-    _emit_log_line("Console logging: win32 direct + fd fallback")
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        _emit_log_text("\nShutting down...\n")
+        log_path = _configure_output_tee()
+
+        args = _parse_args()
+        config_path = _resolve_config_path(args.config)
+        config = Config.load(
+            config_path,
+            overrides={
+                "host": args.host,
+                "port": args.port,
+                "token": args.token,
+                "mode": args.mode,
+                "binary": args.binary,
+                "model_dir": args.model_dir,
+                "model_name": args.model_name,
+                "output_format": args.output_format,
+                "scale": args.scale,
+                "tile_size": args.tile_size,
+                "gpu_id": args.gpu_id,
+                "jobs": args.jobs,
+                "timeout_seconds": args.timeout_seconds,
+                "max_workers": args.max_workers,
+                "max_request_megabytes": args.max_request_megabytes,
+            },
+        )
+
+        server = _create_server_with_duplicate_resolution(config)
+        if server is None:
+            return 1
+        _emit_log_line(f"Mihon AI companion listening on http://{config.host}:{config.port}")
+        _emit_log_line(f"Mode: {config.mode}")
+        _emit_log_line(f"Binary: {config.binary}")
+        _emit_log_line(f"Model dir: {config.model_dir}")
+        _emit_log_line(f"Live logs: enabled -> {log_path}")
+        _emit_log_line("Console logging: win32 direct + fd fallback")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            _emit_log_text("\nShutting down...\n")
+        finally:
+            server.server_close()
+        return 0
     finally:
-        server.server_close()
         if _LOG_FILE_HANDLE is not None:
             _LOG_FILE_HANDLE.close()
-    return 0
 
 
 if __name__ == "__main__":
