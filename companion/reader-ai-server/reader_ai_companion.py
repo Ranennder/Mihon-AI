@@ -74,6 +74,9 @@ _ANSI_BLUE = "\x1b[94m"
 _ANSI_MAGENTA = "\x1b[95m"
 _ANSI_CYAN = "\x1b[96m"
 _ANSI_WHITE = "\x1b[97m"
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_INLINE_PROGRESS_ACTIVE = False
+_INLINE_PROGRESS_VISIBLE_LENGTH = 0
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -925,6 +928,10 @@ def _ansi(text: str, *styles: str) -> str:
     return "".join(styles) + text + _ANSI_RESET
 
 
+def _visible_text_length(text: str) -> int:
+    return len(_ANSI_ESCAPE_RE.sub("", text))
+
+
 def _request_style(request_id: str) -> str:
     palette = (_ANSI_CYAN, _ANSI_MAGENTA, _ANSI_BLUE, _ANSI_GREEN, _ANSI_YELLOW)
     return palette[sum(ord(char) for char in request_id) % len(palette)]
@@ -1006,6 +1013,32 @@ def _format_console_message(message: str) -> str:
     return "".join(formatted_lines)
 
 
+def _format_inline_progress_message(message: str) -> str | None:
+    stripped = message.rstrip("\r\n")
+    if not stripped or "\n" in stripped or "\r" in stripped:
+        return None
+    timestamp_text: str | None = None
+    request_id: str | None = None
+    body = stripped
+    timestamp_match = _LOG_TIMESTAMP_RE.match(body)
+    if timestamp_match is not None:
+        timestamp_text = timestamp_match.group(1)
+        body = timestamp_match.group(2)
+    request_match = _LOG_REQUEST_RE.match(body)
+    if request_match is not None:
+        request_id = request_match.group(1)
+        body = request_match.group(2)
+    if _PROGRESS_RE.fullmatch(body) is None:
+        return None
+    prefix_parts: list[str] = []
+    if timestamp_text is not None:
+        prefix_parts.append(_ansi(f"[{timestamp_text}]", _ANSI_DIM))
+    if request_id is not None:
+        prefix_parts.append(_ansi(f"[{request_id}]", _ANSI_BOLD, _request_style(request_id)))
+    prefix = (" ".join(prefix_parts) + " ") if prefix_parts else ""
+    return prefix + _format_console_body(body)
+
+
 def _write_console_direct(message: str) -> bool:
     if os.name != "nt":
         return False
@@ -1027,24 +1060,63 @@ def _write_console_direct(message: str) -> bool:
         return False
 
 
+def _write_console_stream(console: Any, message: str) -> None:
+    wrote_to_console = _write_console_direct(message)
+    if not wrote_to_console:
+        try:
+            encoding = getattr(console, "encoding", None) or "utf-8"
+            os.write(1, message.encode(encoding, errors="replace"))
+            wrote_to_console = True
+        except OSError:
+            pass
+    if console is not None and not wrote_to_console:
+        console.write(message)
+        console.flush()
+
+
+def _clear_inline_progress(console: Any) -> None:
+    global _INLINE_PROGRESS_ACTIVE
+    global _INLINE_PROGRESS_VISIBLE_LENGTH
+    if not _INLINE_PROGRESS_ACTIVE:
+        return
+    if _CONSOLE_STYLING_ENABLED:
+        _write_console_stream(console, "\r\x1b[2K")
+    else:
+        _write_console_stream(
+            console,
+            "\r" + (" " * _INLINE_PROGRESS_VISIBLE_LENGTH) + "\r",
+        )
+    _INLINE_PROGRESS_ACTIVE = False
+    _INLINE_PROGRESS_VISIBLE_LENGTH = 0
+
+
+def _write_inline_progress(console: Any, message: str) -> None:
+    global _INLINE_PROGRESS_ACTIVE
+    global _INLINE_PROGRESS_VISIBLE_LENGTH
+    visible_length = _visible_text_length(message)
+    if _CONSOLE_STYLING_ENABLED:
+        payload = "\r\x1b[2K" + message
+    else:
+        padding = max(0, _INLINE_PROGRESS_VISIBLE_LENGTH - visible_length)
+        payload = "\r" + message + (" " * padding)
+    _write_console_stream(console, payload)
+    _INLINE_PROGRESS_ACTIVE = True
+    _INLINE_PROGRESS_VISIBLE_LENGTH = visible_length
+
+
 def _emit_log_text(message: str) -> None:
     with _LOG_LOCK:
         console = getattr(sys, "__stdout__", None) or sys.stdout
-        console_message = _format_console_message(message)
-        stream_message = (
-            console_message if getattr(console, "isatty", lambda: False)() else message
-        )
-        wrote_to_console = _write_console_direct(stream_message)
-        if not wrote_to_console:
-            try:
-                encoding = getattr(console, "encoding", None) or "utf-8"
-                os.write(1, stream_message.encode(encoding, errors="replace"))
-                wrote_to_console = True
-            except OSError:
-                pass
-        if console is not None and not wrote_to_console:
-            console.write(stream_message)
-            console.flush()
+        console_is_tty = getattr(console, "isatty", lambda: False)()
+        if console_is_tty:
+            inline_progress = _format_inline_progress_message(message)
+            if inline_progress is not None:
+                _write_inline_progress(console, inline_progress)
+            else:
+                _clear_inline_progress(console)
+                _write_console_stream(console, _format_console_message(message))
+        else:
+            _write_console_stream(console, message)
         if _LOG_FILE_HANDLE is not None:
             _LOG_FILE_HANDLE.write(message)
             _LOG_FILE_HANDLE.flush()
