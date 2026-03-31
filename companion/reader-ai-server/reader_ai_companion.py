@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import json
 import itertools
 import mimetypes
@@ -874,10 +875,39 @@ def _emit_log_line(message: str) -> None:
     _emit_log_text(message + "\n")
 
 
+def _write_console_direct(message: str) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        handle = ctypes.windll.kernel32.GetStdHandle(-11)
+        if handle in (0, -1):
+            return False
+        normalized_message = message.replace("\r\n", "\n").replace("\n", "\r\n")
+        written = ctypes.c_ulong()
+        success = ctypes.windll.kernel32.WriteConsoleW(
+            handle,
+            normalized_message,
+            len(normalized_message),
+            ctypes.byref(written),
+            None,
+        )
+        return bool(success)
+    except Exception:
+        return False
+
+
 def _emit_log_text(message: str) -> None:
     with _LOG_LOCK:
         console = getattr(sys, "__stdout__", None) or sys.stdout
-        if console is not None:
+        wrote_to_console = _write_console_direct(message)
+        if not wrote_to_console:
+            try:
+                encoding = getattr(console, "encoding", None) or "utf-8"
+                os.write(1, message.encode(encoding, errors="replace"))
+                wrote_to_console = True
+            except OSError:
+                pass
+        if console is not None and not wrote_to_console:
             console.write(message)
             console.flush()
         if _LOG_FILE_HANDLE is not None:
@@ -942,6 +972,7 @@ def main() -> int:
     _emit_log_line(f"Binary: {config.binary}")
     _emit_log_line(f"Model dir: {config.model_dir}")
     _emit_log_line(f"Live logs: enabled -> {log_path}")
+    _emit_log_line("Console logging: win32 direct + fd fallback")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
