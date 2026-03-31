@@ -1,86 +1,160 @@
 <div align="center">
 
-<a href="https://mihon.app">
-    <img src="./.github/assets/logo.png" alt="Mihon logo" title="Mihon logo" width="80"/>
-</a>
+<img src="./.github/assets/logo.png" alt="Mihon AI logo" title="Mihon AI logo" width="96"/>
 
-# Mihon [App](#)
+# Mihon AI
 
-### Full-featured reader
-Discover and read manga, webtoons, comics, and more – easier than ever on your Android device.
+AI-enhanced Android reader for manga, manhwa, and webtoons.
 
-[![Discord server](https://img.shields.io/discord/1195734228319617024.svg?label=&labelColor=6A7EC2&color=7389D8&logo=discord&logoColor=FFFFFF)](https://discord.gg/mihon)
-[![GitHub downloads](https://img.shields.io/github/downloads/mihonapp/mihon/total?label=downloads&labelColor=27303D&color=0D1117&logo=github&logoColor=FFFFFF&style=flat)](https://mihon.app/download)
+Built as a focused fork of Mihon with a smoother AI reading flow, a standalone Windows companion, and a stable upstream base.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mihonapp/mihon/build.yml?labelColor=27303D)](https://github.com/mihonapp/mihon/actions/workflows/build_push.yml)
-[![License: Apache-2.0](https://img.shields.io/github/license/mihonapp/mihon?labelColor=27303D&color=0877d2)](/LICENSE)
-[![Translation status](https://img.shields.io/weblate/progress/mihon?labelColor=27303D&color=946300)](https://hosted.weblate.org/engage/mihon/)
+[![Latest release](https://img.shields.io/github/v/release/Ranennder/Mihon-AI?label=Release&labelColor=111827&color=2563eb)](https://github.com/Ranennder/Mihon-AI/releases)
+[![Base](https://img.shields.io/badge/Base-Mihon%200.19.7-4b5563)](https://github.com/mihonapp/mihon/releases/tag/v0.19.7)
+[![Android](https://img.shields.io/badge/Android-8.0%2B-16a34a)](https://developer.android.com/about/versions/oreo)
+[![License](https://img.shields.io/github/license/Ranennder/Mihon-AI?labelColor=111827&color=0f766e)](./LICENSE)
+
+[Releases](https://github.com/Ranennder/Mihon-AI/releases) | [Windows Companion](./companion/reader-ai-server/README.md) | [License](./LICENSE)
+
+</div>
+
+## What Mihon AI adds
+
+Mihon AI keeps the core Mihon reading experience, but adds an AI-focused reader workflow for people who mainly read manga, manhwa, and webtoons on a phone.
+
+Highlights:
+
+- Top-bar `AI` toggle inside the reader.
+- `Remote PC` mode with a standalone Windows companion `.exe`.
+- Local network auto-discovery for the companion when the URL field is left empty.
+- On-device `GPU` mode for quick testing and fully offline usage.
+- `Fast` and `Detailed` remote upscale models.
+- Reader-side caching, chapter prefetch, and nearest-page prioritization for smoother scrolling.
+- Separate Mihon AI app versioning while still tracking stable Mihon releases.
+
+## Current base
+
+This project is currently based on stable [Mihon `v0.19.7`](https://github.com/mihonapp/mihon/releases/tag/v0.19.7).
+
+The goal is to stay on Mihon stable releases instead of following unreleased upstream commits by default.
 
 ## Download
 
-[![Mihon Stable](https://img.shields.io/github/release/mihonapp/mihon.svg?maxAge=3600&label=Stable&labelColor=06599d&color=043b69)](https://mihon.app/download)
-[![Mihon Beta](https://img.shields.io/github/v/release/mihonapp/mihon-preview.svg?maxAge=3600&label=Beta&labelColor=2c2c47&color=1c1c39)](https://mihon.app/download)
+Download the latest APKs from the [Releases page](https://github.com/Ranennder/Mihon-AI/releases).
 
-*Requires Android 8.0 or higher.*
+If you are not sure which APK to install:
 
-## Features
+- Choose `arm64` for almost all modern Android phones.
+- Use `universal` only if you specifically need the all-in-one build.
 
-<div align="left">
+Requires Android 8.0 or higher.
 
-* Local reading of content.
-* A configurable reader with multiple viewers, reading directions and other settings.
-* Tracker support: [MyAnimeList](https://myanimelist.net/), [AniList](https://anilist.co/), [Kitsu](https://kitsu.app/), [MangaUpdates](https://mangaupdates.com), [Shikimori](https://shikimori.one), and [Bangumi](https://bgm.tv/) support.
-* Categories to organize your library.
-* Light and dark themes.
-* Schedule updating your library for new chapters.
-* Create backups locally to read offline or to your desired cloud service.
-* Plus much more...
+## Remote PC quick start
 
-</div>
+`Remote PC` is the recommended mode if you want better quality and less heat on the phone.
+
+1. Install the latest `Mihon AI` APK on your phone.
+2. Download the latest standalone `MihonAiCompanion.exe` from Releases.
+3. Run the companion on your Windows PC.
+4. Make sure the phone and the PC are on the same local network.
+5. In reader AI settings, select `Remote PC`.
+6. Leave the server URL empty to let Mihon AI auto-discover the companion.
+7. Turn on `AI` from the reader top bar.
+
+Notes:
+
+- The companion listens on port `8765`.
+- URL auto-discovery works only inside the same LAN.
+- If you prefer, you can still enter the server URL manually.
+
+## AI modes
+
+### Remote PC
+
+Best overall quality and the smoothest daily setup once the companion is running.
+
+- `Fast`: closer to the original remote model, lighter and quicker.
+- `Detailed`: better at shadows, line detail, and textured areas, but heavier.
+
+### GPU
+
+Runs directly on the phone.
+
+- Good for quick testing or fully local reading.
+- Still considered beta.
+- Can heat the phone noticeably during long sessions.
+
+## Companion
+
+The Windows companion lives in [companion/reader-ai-server](./companion/reader-ai-server).
+
+It accepts page images from the app, runs local upscaling on the PC, and returns the processed image back to the phone. Current release builds are intended to be usable as a standalone `.exe`.
+
+Companion docs:
+
+- [Windows companion README](./companion/reader-ai-server/README.md)
+
+## Build from source
+
+### Android app
+
+```bash
+git clone git@github.com:Ranennder/Mihon-AI.git
+cd Mihon-AI
+./gradlew assembleDebug
+```
+
+On Windows use:
+
+```bat
+.\gradlew.bat assembleDebug
+```
+
+On Windows, it is safer to build from an ASCII-only path such as `C:\projects\Mihon-AI` instead of a OneDrive path with non-ASCII characters.
+
+### Windows companion
+
+```bat
+cd companion\reader-ai-server
+build_windows_exe.bat
+```
+
+## Roadmap direction
+
+Mihon AI is intentionally focused. The main direction is:
+
+- better remote upscaling quality for manga, manhwa, and webtoons
+- smoother reader behavior under fast scrolling
+- simple companion setup for normal users
+- staying close enough to Mihon stable to keep the base reliable
 
 ## Contributing
 
-[Code of conduct](./CODE_OF_CONDUCT.md) · [Contributing guide](./CONTRIBUTING.md)
+Issues and pull requests are welcome.
 
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
+If you are reporting a bug, include:
 
-Before reporting a new issue, take a look at the [FAQ](https://mihon.app/docs/faq/general), the [changelog](https://mihon.app/changelogs/) and the already opened [issues](https://github.com/mihonapp/mihon/issues); if you got any questions, join our [Discord server](https://discord.gg/mihon).
+- device model
+- Android version
+- whether you used `GPU` or `Remote PC`
+- whether the issue happened in pager or webtoon mode
+- logs or screenshots if available
 
+## Credits
 
-### Repositories
+- Based on [Mihon](https://github.com/mihonapp/mihon)
+- Uses the Mihon open source codebase under the Apache 2.0 license
+- Remote AI workflow is built around local GPU upscaling runtimes and a Windows companion
 
-[![mihonapp/website - GitHub](https://github-readme-stats.vercel.app/api/pin/?username=mihonapp&repo=website&bg_color=161B22&text_color=c9d1d9&title_color=0877d2&icon_color=0877d2&border_radius=8&hide_border=true&description_lines_count=2)](https://github.com/mihonapp/website/)
-[![mihonapp/bitmap.kt - GitHub](https://github-readme-stats.vercel.app/api/pin/?username=mihonapp&repo=bitmap.kt&bg_color=161B22&text_color=c9d1d9&title_color=0877d2&icon_color=0877d2&border_radius=8&hide_border=true&description_lines_count=2)](https://github.com/mihonapp/bitmap.kt/)
+## Disclaimer
 
-### Credits
+This application is not affiliated with any content provider and hosts no content.
 
-Thank you to all the people who have contributed!
+## License
 
-<a href="https://github.com/mihonapp/mihon/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=mihonapp/mihon" alt="Mihon app contributors" title="Mihon app contributors" width="800"/>
-</a>
+```text
+Copyright 2015 Javier Tomas
+Copyright 2024 Mihon Open Source Project
+Copyright 2026 Ranennder
 
-### Disclaimer
-
-The developer(s) of this application does not have any affiliation with the content providers available, and this application hosts zero content.
-
-### License
-
-<pre>
-Copyright © 2015 Javier Tomás
-Copyright © 2024 Mihon Open Source Project
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-</pre>
-
-</div>
+Licensed under the Apache License, Version 2.0
+```
