@@ -83,8 +83,8 @@ Notes:
 
 `Remote PC` currently ships with two model profiles:
 
-- `Fast`: lighter and closer to the original remote workflow.
-- `Detailed`: better at shadows, line detail, and textured areas, but heavier.
+- `Fast`: quicker to process and easier on network/cache. Best for normal daily reading and smoother scrolling.
+- `Detailed`: slower and heavier, but usually keeps shadows, textures, and fine linework better.
 
 ## Companion
 
