@@ -950,24 +950,6 @@ def _find_listening_process_id(port: int) -> int | None:
     return int(pid_text) if pid_text.isdigit() else None
 
 
-def _show_duplicate_instance_dialog(port: int, pid: int) -> bool:
-    if os.name != "nt":
-        return False
-    forced_action = os.environ.get("MIHON_AI_DUPLICATE_ACTION", "").strip().lower()
-    if forced_action == "close":
-        return True
-    if forced_action == "cancel":
-        return False
-    text = (
-        f"Another Mihon AI companion is already using port {port}.\n\n"
-        f"Running process ID: {pid}\n\n"
-        "Press OK to close the old copy and continue.\n"
-        "Press Cancel to keep it running and exit this one."
-    )
-    flags = 0x00000001 | 0x00000030 | 0x00040000  # OK/Cancel + warning + topmost
-    return ctypes.windll.user32.MessageBoxW(None, text, "Mihon AI Companion", flags) == 1
-
-
 def _show_duplicate_close_failed_dialog(port: int, pid: int, details: str) -> None:
     if os.name != "nt":
         return
@@ -990,13 +972,9 @@ def _wait_for_port_release(port: int, timeout_seconds: float = 5.0) -> bool:
 
 
 def _close_existing_instance(port: int, pid: int) -> bool:
-    if not _show_duplicate_instance_dialog(port, pid):
-        _emit_log_line(
-            f"Startup canceled because an existing companion on port {port} "
-            f"(pid={pid}) was kept running."
-        )
-        return False
-    _emit_log_line(f"Closing previous companion instance on port {port} (pid={pid})")
+    _emit_log_line(
+        f"Force-closing previous companion instance on port {port} (pid={pid})"
+    )
     try:
         result = _run_hidden_windows_command(["taskkill", "/PID", str(pid), "/T", "/F"])
     except OSError as exc:
