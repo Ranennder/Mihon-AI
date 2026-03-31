@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import itertools
 import mimetypes
 import os
 import queue
@@ -109,6 +110,12 @@ class ProcessedImage:
 
 
 @dataclass(frozen=True)
+class SubprocessRunResult:
+    returncode: int
+    details: str
+
+
+@dataclass(frozen=True)
 class ImageSize:
     width: int
     height: int
@@ -124,18 +131,30 @@ class ReaderAiServer(ThreadingHTTPServer):
         self._workspace_root_owner = tempfile.TemporaryDirectory(prefix="mihon-ai-server-")
         self._workspace_root = Path(self._workspace_root_owner.name)
         self._workspaces: queue.SimpleQueue[Path] = queue.SimpleQueue()
+        self._request_sequence = itertools.count(1)
         for worker_index in range(max(1, config.max_workers)):
             workspace = self._workspace_root / f"worker-{worker_index}"
             workspace.mkdir(parents=True, exist_ok=True)
             self._workspaces.put(workspace)
 
-    def process_image(self, body: bytes, input_format: str, output_format: str, model_name: str) -> ProcessedImage:
+    def process_image(
+        self,
+        request_id: str,
+        body: bytes,
+        input_format: str,
+        output_format: str,
+        model_name: str,
+    ) -> ProcessedImage:
         with self.processing_slots:
             with self._borrow_workspace() as workspace:
-                return self._process_image_in_workspace(workspace, body, input_format, output_format, model_name)
+                return self._process_image_in_workspace(request_id, workspace, body, input_format, output_format, model_name)
+
+    def next_request_id(self) -> str:
+        return f"req-{next(self._request_sequence):05d}"
 
     def _process_image_in_workspace(
         self,
+        request_id: str,
         workspace: Path,
         body: bytes,
         input_format: str,
@@ -158,6 +177,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         ):
             return _run_chunked_subprocess(
                 config=self.config,
+                request_id=request_id,
                 workspace=workspace,
                 body=body,
                 requested_output_format=output_format,
@@ -168,6 +188,7 @@ class ReaderAiServer(ThreadingHTTPServer):
 
         return _run_subprocess(
             config=self.config,
+            request_id=request_id,
             workspace=workspace,
             body=body,
             input_format=input_format,
@@ -270,8 +291,10 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
+        request_id = self.server.next_request_id()
         self.log_message(
-            "Accepted upscale request: %d bytes input=%s output=%s model=%s from %s",
+            "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s from %s",
+            request_id,
             body_size,
             input_format,
             output_format,
@@ -282,19 +305,20 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         started_at = time.perf_counter()
         body = self.rfile.read(body_size)
         try:
-            processed_image = self.server.process_image(body, input_format, output_format, model_name)
+            processed_image = self.server.process_image(request_id, body, input_format, output_format, model_name)
         except subprocess.TimeoutExpired as exc:
-            self.log_message("Upscale timeout after %s seconds", exc.timeout)
+            self.log_message("[%s] Upscale timeout after %s seconds", request_id, exc.timeout)
             self._send_text(HTTPStatus.GATEWAY_TIMEOUT, f"Upscale process timed out after {exc.timeout} seconds")
             return
         except Exception as exc:  # noqa: BLE001
-            self.log_message("Upscale error: %s", exc)
+            self.log_message("[%s] Upscale error: %s", request_id, exc)
             self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
             return
 
         elapsed = time.perf_counter() - started_at
         self.log_message(
-            "Processed %d bytes into %d bytes in %.2fs via %s (%s -> %s)",
+            "[%s] Processed %d bytes into %d bytes in %.2fs via %s (%s -> %s)",
+            request_id,
             len(body),
             len(processed_image.bytes),
             elapsed,
@@ -342,6 +366,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
 def _run_subprocess(
     config: Config,
+    request_id: str,
     workspace: Path,
     body: bytes,
     input_format: str,
@@ -366,6 +391,7 @@ def _run_subprocess(
     try:
         return _run_subprocess_once(
             config=config,
+            request_id=request_id,
             workspace=workspace,
             binary=binary,
             model_dir=model_dir,
@@ -383,6 +409,7 @@ def _run_subprocess(
         ):
             return _run_subprocess_once(
                 config=config,
+                request_id=request_id,
                 workspace=workspace,
                 binary=binary,
                 model_dir=model_dir,
@@ -397,6 +424,7 @@ def _run_subprocess(
 
 def _run_subprocess_once(
     config: Config,
+    request_id: str,
     workspace: Path,
     binary: Path,
     model_dir: Path,
@@ -433,14 +461,13 @@ def _run_subprocess_once(
     if model_name and _supports_model_name_flag(binary):
         command.extend(["-n", model_name])
 
-    completed = subprocess.run(
-        command,
-        cwd=str(binary.parent),
-        capture_output=True,
+    completed = _run_logged_subprocess(
+        request_id=request_id,
+        command=command,
+        cwd=binary.parent,
         timeout=config.timeout_seconds,
-        check=False,
     )
-    details = _subprocess_details(completed)
+    details = completed.details
 
     if completed.returncode != 0:
         raise RuntimeError(f"Upscale process failed: {details}")
@@ -478,10 +505,49 @@ def _sanitize_extension(value: str) -> str:
     return value if value in {"jpg", "jpeg", "png", "webp"} else "png"
 
 
-def _subprocess_details(completed: subprocess.CompletedProcess[bytes]) -> str:
-    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-    stdout = completed.stdout.decode("utf-8", errors="replace").strip()
-    return stderr or stdout or f"exit code {completed.returncode}"
+def _run_logged_subprocess(
+    request_id: str,
+    command: list[str],
+    cwd: Path,
+    timeout: int,
+) -> SubprocessRunResult:
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    output_lines: list[str] = []
+
+    def reader() -> None:
+        if process.stdout is None:
+            return
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
+            sys.stdout.write(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}\n")
+            sys.stdout.flush()
+
+    reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
+    reader_thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        reader_thread.join(timeout=1)
+        raise
+
+    reader_thread.join(timeout=1)
+    if process.stdout is not None:
+        process.stdout.close()
+    details = "\n".join(output_lines).strip() or f"exit code {returncode}"
+    return SubprocessRunResult(returncode=returncode, details=details)
 
 
 def _clear_workspace_files(workspace: Path) -> None:
@@ -598,6 +664,7 @@ def _decode_jpeg_size(body: bytes) -> ImageSize | None:
 
 def _run_chunked_subprocess(
     config: Config,
+    request_id: str,
     workspace: Path,
     body: bytes,
     requested_output_format: str,
@@ -634,6 +701,7 @@ def _run_chunked_subprocess(
 
             processed_chunk = _run_subprocess_once(
                 config=config,
+                request_id=f"{request_id}/chunk-{(core_top // chunk_input_height) + 1}",
                 workspace=workspace,
                 binary=binary,
                 model_dir=model_dir,
@@ -817,6 +885,11 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True, write_through=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
     args = _parse_args()
     config_path = _resolve_config_path(args.config)
     config = Config.load(
