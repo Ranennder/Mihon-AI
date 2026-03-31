@@ -51,12 +51,10 @@ class GetApplicationRelease(
         // Removes prefixes like "r" or "v"
         val newVersion = versionTag.replace("[^\\d.]".toRegex(), "")
         return if (isPreview) {
-            // Preview builds: based on releases in "mihonapp/mihon-preview" repo
-            // tagged as something like "r1234"
+            // Preview builds use monotonic tags like "r1234"
             newVersion.toInt() > commitCount
         } else {
-            // Release builds: based on releases in "mihonapp/mihon" repo
-            // tagged as something like "v0.1.2"
+            // Release builds use semantic version tags like "v0.1.2"
             val oldVersion = versionName.replace("[^\\d.]".toRegex(), "")
 
             val newSemVer = newVersion.split(".").map { it.toInt() }

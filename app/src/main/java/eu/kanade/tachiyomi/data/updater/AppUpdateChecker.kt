@@ -39,6 +39,6 @@ class AppUpdateChecker {
     }
 }
 
-const val GITHUB_REPO = "Ranennder/mihonAI"
+const val GITHUB_REPO = "Ranennder/Mihon-AI"
 
 val RELEASE_URL = "https://github.com/$GITHUB_REPO/releases"

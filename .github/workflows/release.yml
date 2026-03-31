@@ -10,7 +10,6 @@ concurrency:
 
 jobs:
   get_tag:
-    if: github.repository == 'mihonapp/mihon'
     name: Extract tag name
     runs-on: 'ubuntu-24.04'
     outputs:
@@ -22,7 +21,6 @@ jobs:
         run: echo "tag=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_OUTPUT
 
   build:
-    if: github.repository == 'mihonapp/mihon'
     name: Build
     runs-on: 'ubuntu-24.04'
     needs: get_tag
@@ -58,25 +56,24 @@ jobs:
         run: |
           set -e
 
-          mv app/build/outputs/apk/release/app-universal-release-unsigned-signed.apk mihon-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-arm64-v8a-release-unsigned-signed.apk mihon-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-armeabi-v7a-release-unsigned-signed.apk mihon-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-x86-release-unsigned-signed.apk mihon-x86-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-x86_64-release-unsigned-signed.apk mihon-x86_64-${{ needs.get_tag.outputs.tag }}.apk
+          mv app/build/outputs/apk/release/app-universal-release-unsigned-signed.apk mihon-ai-${{ needs.get_tag.outputs.tag }}.apk
+          mv app/build/outputs/apk/release/app-arm64-v8a-release-unsigned-signed.apk mihon-ai-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
+          mv app/build/outputs/apk/release/app-armeabi-v7a-release-unsigned-signed.apk mihon-ai-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
+          mv app/build/outputs/apk/release/app-x86-release-unsigned-signed.apk mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
+          mv app/build/outputs/apk/release/app-x86_64-release-unsigned-signed.apk mihon-ai-x86_64-${{ needs.get_tag.outputs.tag }}.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: mihon
+          name: mihon-ai
           path: |
-            mihon-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-x86-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-x86_64-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-x86_64-${{ needs.get_tag.outputs.tag }}.apk
 
   build_foss:
-    if: github.repository == 'mihonapp/mihon'
     name: Build (FOSS)
     runs-on: ubuntu-24.04
     needs: get_tag
@@ -114,16 +111,15 @@ jobs:
         run: |
           set -e
 
-          mv app/build/outputs/apk/foss/app-universal-foss-unsigned-signed.apk mihon-${{ needs.get_tag.outputs.tag }}-foss.apk
+          mv app/build/outputs/apk/foss/app-universal-foss-unsigned-signed.apk mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: mihon-foss
-          path: mihon-${{ needs.get_tag.outputs.tag }}-foss.apk
+          name: mihon-ai-foss
+          path: mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
 
   release:
-    if: github.repository == 'mihonapp/mihon'
     name: Create GitHub Release
     runs-on: ubuntu-24.04
     needs: [get_tag, build, build_foss]
@@ -139,16 +135,16 @@ jobs:
         with:
           failOnError: false
           name: |
-            mihon
-            mihon-foss
+            mihon-ai
+            mihon-ai-foss
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           tag_name: ${{ needs.get_tag.outputs.tag }}
-          name: Mihon ${{ needs.get_tag.outputs.tag }}
+          name: Mihon AI ${{ needs.get_tag.outputs.tag }}
           body: |
-            Check out the [past release notes](https://github.com/mihonapp/mihon/releases) if you're upgrading from an earlier version. Consider [becoming a patron](https://www.patreon.com/mihon/membership) to help keep Mihon improving!
+            Android reader with AI upscaling for manga, manhwa, and webtoons.
 
             <!-->
 
@@ -158,14 +154,14 @@ jobs:
 
             > [!TIP]
             >
-            > ### If you are unsure which version to download then go with `mihon-${{ needs.get_tag.outputs.tag }}.apk`
+            > ### If you are unsure which version to download then go with `mihon-ai-${{ needs.get_tag.outputs.tag }}.apk`
           files: |
-            mihon-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-${{ needs.get_tag.outputs.tag }}-foss.apk
-            mihon-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-x86-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-x86_64-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
+            mihon-ai-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
+            mihon-ai-x86_64-${{ needs.get_tag.outputs.tag }}.apk
           draft: true
           prerelease: false
-          token: ${{ secrets.MIHON_BOT_TOKEN }}
+          token: ${{ github.token }}

@@ -16,7 +16,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalUriHandler
 import cafe.adriel.voyager.core.model.rememberScreenModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -34,13 +33,11 @@ import kotlinx.coroutines.launch
 import mihon.feature.migration.dialog.MigrateMangaDialog
 import mihon.feature.migration.list.MigrationListScreen
 import mihon.presentation.core.util.collectAsLazyPagingItems
-import tachiyomi.core.common.Constants
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.LoadingScreen
-import tachiyomi.source.local.LocalSource
 
 data class MigrateSourceSearchScreen(
     private val currentManga: Manga,
@@ -55,7 +52,6 @@ data class MigrateSourceSearchScreen(
             return
         }
 
-        val uriHandler = LocalUriHandler.current
         val navigator = LocalNavigator.currentOrThrow
         val scope = rememberCoroutineScope()
 
@@ -116,8 +112,8 @@ data class MigrateSourceSearchScreen(
                         ),
                     )
                 },
-                onHelpClick = { uriHandler.openUri(Constants.URL_HELP) },
-                onLocalSourceHelpClick = { uriHandler.openUri(LocalSource.HELP_URL) },
+                onHelpClick = null,
+                onLocalSourceHelpClick = null,
                 onMangaClick = openMigrateDialog,
                 onMangaLongClick = { navigator.push(MangaScreen(it.id, true)) },
             )

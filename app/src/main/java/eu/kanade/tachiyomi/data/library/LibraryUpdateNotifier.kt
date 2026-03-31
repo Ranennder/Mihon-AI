@@ -18,7 +18,6 @@ import eu.kanade.presentation.util.formatChapterNumber
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.download.Downloader
-import eu.kanade.tachiyomi.data.notification.NotificationHandler
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.source.UnmeteredSource
@@ -134,7 +133,6 @@ class LibraryUpdateNotifier(
             )
             setSmallIcon(R.drawable.ic_warning_white_24dp)
             setTimeoutAfter(Downloader.WARNING_NOTIF_TIMEOUT_MS)
-            setContentIntent(NotificationHandler.openUrl(context, HELP_WARNING_URL))
         }
     }
 
@@ -375,11 +373,6 @@ class LibraryUpdateNotifier(
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-    }
-
-    companion object {
-        const val HELP_WARNING_URL =
-            "https://mihon.app/docs/faq/library#why-am-i-warned-about-large-bulk-updates-and-downloads"
     }
 }
 

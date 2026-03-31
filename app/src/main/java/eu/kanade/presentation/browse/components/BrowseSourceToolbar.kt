@@ -33,7 +33,7 @@ fun BrowseSourceToolbar(
     onDisplayModeChange: (LibraryDisplayMode) -> Unit,
     navigateUp: () -> Unit,
     onWebViewClick: () -> Unit,
-    onHelpClick: () -> Unit,
+    onHelpClick: (() -> Unit)?,
     onSettingsClick: () -> Unit,
     onSearch: (String) -> Unit,
     scrollBehavior: TopAppBarScrollBehavior? = null,
@@ -68,12 +68,14 @@ fun BrowseSourceToolbar(
                             ),
                         )
                         if (isLocalSource) {
-                            add(
-                                AppBar.OverflowAction(
-                                    title = stringResource(MR.strings.label_help),
-                                    onClick = onHelpClick,
-                                ),
-                            )
+                            onHelpClick?.let {
+                                add(
+                                    AppBar.OverflowAction(
+                                        title = stringResource(MR.strings.label_help),
+                                        onClick = it,
+                                    ),
+                                )
+                            }
                         } else {
                             add(
                                 AppBar.OverflowAction(

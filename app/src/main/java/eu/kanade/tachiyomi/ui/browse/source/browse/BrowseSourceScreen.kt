@@ -31,7 +31,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalUriHandler
 import cafe.adriel.voyager.core.model.rememberScreenModel
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -56,7 +55,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
 import mihon.feature.migration.dialog.MigrateMangaDialog
 import mihon.presentation.core.util.collectAsLazyPagingItems
-import tachiyomi.core.common.Constants
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.i18n.MR
@@ -64,7 +62,6 @@ import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.LoadingScreen
-import tachiyomi.source.local.LocalSource
 
 data class BrowseSourceScreen(
     val sourceId: Long,
@@ -103,10 +100,7 @@ data class BrowseSourceScreen(
 
         val scope = rememberCoroutineScope()
         val haptic = LocalHapticFeedback.current
-        val uriHandler = LocalUriHandler.current
         val snackbarHostState = remember { SnackbarHostState() }
-
-        val onHelpClick = { uriHandler.openUri(LocalSource.HELP_URL) }
         val onWebViewClick = f@{
             val source = screenModel.source as? HttpSource ?: return@f
             navigator.push(
@@ -137,7 +131,7 @@ data class BrowseSourceScreen(
                         onDisplayModeChange = { screenModel.displayMode = it },
                         navigateUp = navigateUp,
                         onWebViewClick = onWebViewClick,
-                        onHelpClick = onHelpClick,
+                        onHelpClick = null,
                         onSettingsClick = { navigator.push(SourcePreferencesScreen(sourceId)) },
                         onSearch = screenModel::search,
                     )
@@ -218,8 +212,8 @@ data class BrowseSourceScreen(
                 snackbarHostState = snackbarHostState,
                 contentPadding = paddingValues,
                 onWebViewClick = onWebViewClick,
-                onHelpClick = { uriHandler.openUri(Constants.URL_HELP) },
-                onLocalSourceHelpClick = onHelpClick,
+                onHelpClick = null,
+                onLocalSourceHelpClick = null,
                 onMangaClick = { navigator.push((MangaScreen(it.id, true))) },
                 onMangaLongClick = { manga ->
                     scope.launchIO {

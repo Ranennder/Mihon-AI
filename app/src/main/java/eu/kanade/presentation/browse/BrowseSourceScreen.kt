@@ -23,6 +23,7 @@ import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.source.Source
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.flow.StateFlow
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.library.model.LibraryDisplayMode
@@ -45,8 +46,8 @@ fun BrowseSourceContent(
     snackbarHostState: SnackbarHostState,
     contentPadding: PaddingValues,
     onWebViewClick: () -> Unit,
-    onHelpClick: () -> Unit,
-    onLocalSourceHelpClick: () -> Unit,
+    onHelpClick: (() -> Unit)?,
+    onLocalSourceHelpClick: (() -> Unit)?,
     onMangaClick: (Manga) -> Unit,
     onMangaLongClick: (Manga) -> Unit,
 ) {
@@ -86,31 +87,43 @@ fun BrowseSourceContent(
                 else -> stringResource(MR.strings.no_results_found)
             },
             actions = if (source is LocalSource) {
-                persistentListOf(
-                    EmptyScreenAction(
-                        stringRes = MR.strings.local_source_help_guide,
-                        icon = Icons.AutoMirrored.Outlined.HelpOutline,
-                        onClick = onLocalSourceHelpClick,
-                    ),
-                )
+                buildList {
+                    onLocalSourceHelpClick?.let {
+                        add(
+                            EmptyScreenAction(
+                                stringRes = MR.strings.local_source_help_guide,
+                                icon = Icons.AutoMirrored.Outlined.HelpOutline,
+                                onClick = it,
+                            ),
+                        )
+                    }
+                }.toPersistentList()
             } else {
-                persistentListOf(
-                    EmptyScreenAction(
-                        stringRes = MR.strings.action_retry,
-                        icon = Icons.Outlined.Refresh,
-                        onClick = mangaList::refresh,
-                    ),
-                    EmptyScreenAction(
-                        stringRes = MR.strings.action_open_in_web_view,
-                        icon = Icons.Outlined.Public,
-                        onClick = onWebViewClick,
-                    ),
-                    EmptyScreenAction(
-                        stringRes = MR.strings.label_help,
-                        icon = Icons.AutoMirrored.Outlined.HelpOutline,
-                        onClick = onHelpClick,
-                    ),
-                )
+                buildList {
+                    add(
+                        EmptyScreenAction(
+                            stringRes = MR.strings.action_retry,
+                            icon = Icons.Outlined.Refresh,
+                            onClick = mangaList::refresh,
+                        ),
+                    )
+                    add(
+                        EmptyScreenAction(
+                            stringRes = MR.strings.action_open_in_web_view,
+                            icon = Icons.Outlined.Public,
+                            onClick = onWebViewClick,
+                        ),
+                    )
+                    onHelpClick?.let {
+                        add(
+                            EmptyScreenAction(
+                                stringRes = MR.strings.label_help,
+                                icon = Icons.AutoMirrored.Outlined.HelpOutline,
+                                onClick = it,
+                            ),
+                        )
+                    }
+                }.toPersistentList()
             },
         )
 

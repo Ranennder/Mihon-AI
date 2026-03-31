@@ -650,6 +650,7 @@
     <string name="pref_advanced_summary">Выгрузка журнала сбоев, оптимизация батареи</string>
     <string name="crash_screen_title">Ой, ошибочка вышла!</string>
     <string name="crash_screen_description">%s столкнулось с непредвиденной ошибкой. Мы рекомендуем поделиться журналом сбоев в нашем Discord-сервере в ветке поддержки.</string>
+    <string name="crash_screen_description_report">%s столкнулось с непредвиденной ошибкой. Сохраните журнал сбоев и приложите его к баг-репорту.</string>
     <string name="unknown_title">Неизвестное название</string>
     <string name="invalid_location">Недопустимое расположение: %s</string>
     <string name="error_user_agent_string_invalid">Недопустимый параметр user agent</string>
@@ -721,6 +722,7 @@
     <string name="library_sync_complete">Синхронизация библиотеки завершена</string>
     <string name="syncing_library">Синхронизация библиотеки</string>
     <string name="information_cloudflare_help">Нажмите здесь, чтобы получить помощь с Cloudflare</string>
+    <string name="information_cloudflare_notice">Защита Cloudflare может мешать загрузке в WebView.</string>
     <string name="download_cache_invalidated">Пересоздаётся индекс загрузок</string>
     <string name="create_backup_file_error">Не удалось создать файл резервной копии</string>
     <string name="track_activity_name">Вход в сервис отслеживания</string>

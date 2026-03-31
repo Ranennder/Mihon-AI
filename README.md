@@ -6,10 +6,9 @@
 
 Android reader with AI upscaling for manga, manhwa, and webtoons.
 
-Built on stable Mihon with a dedicated AI workflow for higher-quality pages.
+Focused on higher-quality pages with a dedicated AI reading workflow.
 
 [![Latest release](https://img.shields.io/github/v/release/Ranennder/Mihon-AI?label=Release&labelColor=111827&color=2563eb)](https://github.com/Ranennder/Mihon-AI/releases)
-[![Base](https://img.shields.io/badge/Base-Mihon%200.19.7-4b5563)](https://github.com/mihonapp/mihon/releases/tag/v0.19.7)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-16a34a)](https://developer.android.com/about/versions/oreo)
 [![License](https://img.shields.io/github/license/Ranennder/Mihon-AI?labelColor=111827&color=0f766e)](./LICENSE)
 
@@ -19,9 +18,7 @@ Built on stable Mihon with a dedicated AI workflow for higher-quality pages.
 
 ## Overview
 
-Mihon AI is a focused fork of Mihon that adds AI page upscaling while keeping the base reader familiar and stable.
-
-This project currently tracks stable [Mihon `v0.19.7`](https://github.com/mihonapp/mihon/releases/tag/v0.19.7).
+Mihon AI is an Android reader that adds AI page upscaling while keeping the reading flow fast and practical.
 
 ## Features
 
@@ -31,7 +28,7 @@ This project currently tracks stable [Mihon `v0.19.7`](https://github.com/mihona
 - `Fast` and `Detailed` remote upscale models.
 - On-device `GPU` mode for local and offline usage.
 - Reader caching and prefetch to keep AI pages ready ahead of you.
-- Separate Mihon AI app versioning on top of a stable Mihon base.
+- Separate Mihon AI app versioning.
 
 ## Download
 
@@ -124,8 +121,7 @@ If you report a bug, please include:
 
 ## Credits
 
-- Based on [Mihon](https://github.com/mihonapp/mihon)
-- Uses the Mihon codebase under the Apache 2.0 license
+- Uses an Apache 2.0 licensed upstream codebase
 - Remote AI workflow is built around local GPU upscaling runtimes and a Windows companion
 
 ## Disclaimer
