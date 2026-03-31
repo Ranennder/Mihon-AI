@@ -54,8 +54,10 @@ class ReaderPageUpscaler(
     private var remoteRetainedPaths: Set<String> = emptySet()
 
     init {
-        remotePrefetchScope.launch {
-            runRemotePrefetchLoop()
+        repeat(REMOTE_PREFETCH_LANE_COUNT) { lane ->
+            remotePrefetchScope.launch {
+                runRemotePrefetchLoop(lane)
+            }
         }
     }
 
@@ -144,13 +146,14 @@ class ReaderPageUpscaler(
     fun schedulePrefetch(
         page: ReaderPage,
         priority: Int = Int.MAX_VALUE,
+        lane: Int = REMOTE_PRIMARY_LANE,
     ) {
         if (!isEnabled()) {
             return
         }
 
         if (isRemoteBackendSelected()) {
-            enqueueRemotePrefetch(page, priority)
+            enqueueRemotePrefetch(page, priority, lane)
             return
         }
 
@@ -325,11 +328,11 @@ class ReaderPageUpscaler(
         return isFile && length() > 0L
     }
 
-    private suspend fun runRemotePrefetchLoop() {
+    private suspend fun runRemotePrefetchLoop(lane: Int) {
         while (true) {
             val nextTask = remoteQueueMutex.withLock {
                 remoteQueuedPages.values
-                    .filter { it.cachePath in remoteRetainedPaths }
+                    .filter { it.lane == lane && it.cachePath in remoteRetainedPaths }
                     .minWithOrNull(compareBy<RemotePrefetchTask> { it.priority }.thenBy { it.sequence })
                     ?.also { remoteQueuedPages.remove(it.cachePath) }
             }
@@ -357,6 +360,7 @@ class ReaderPageUpscaler(
     private fun enqueueRemotePrefetch(
         page: ReaderPage,
         priority: Int,
+        lane: Int,
     ) {
         val cachePath = cacheFile(page).absolutePath
         if (cacheFile(page).isReadyCacheFile()) {
@@ -373,6 +377,7 @@ class ReaderPageUpscaler(
                     cachePath = cachePath,
                     page = page,
                     priority = priority,
+                    lane = lane,
                     sequence = remotePrefetchSequence.incrementAndGet(),
                 )
             }
@@ -397,6 +402,13 @@ class ReaderPageUpscaler(
         val cachePath: String,
         val page: ReaderPage,
         val priority: Int,
+        val lane: Int,
         val sequence: Long,
     )
+
+    companion object {
+        const val REMOTE_PRIMARY_LANE = 0
+        const val REMOTE_SECONDARY_LANE = 1
+        private const val REMOTE_PREFETCH_LANE_COUNT = 2
+    }
 }

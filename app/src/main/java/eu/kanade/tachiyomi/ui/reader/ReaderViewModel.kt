@@ -880,27 +880,38 @@ class ReaderViewModel @JvmOverloads constructor(
             }
         }
 
-        val retainedPages = (prioritizedPages + loadedCompanionUpscalePages(
+        val prefetchPlan = prioritizedPages.map { page ->
+            PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
+        }
+        val retainedPages = ((prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
             anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
         )).distinct()
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
-        retainedPages.forEachIndexed { priority, page ->
-            readerPageUpscaler.schedulePrefetch(page, priority)
+        (prefetchPlan + loadedCompanionUpscalePages(
+            anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
+        ).map { page ->
+            PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
+        }).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
+            readerPageUpscaler.schedulePrefetch(request.page, priority, request.lane)
         }
     }
 
     private fun scheduleUpscaleForVisiblePages(visiblePages: List<ReaderPage>) {
-        val prioritizedPages = buildVisibleFirstUpscaleList(visiblePages)
-        if (prioritizedPages.isEmpty()) {
+        val prefetchPlan = buildVisibleFirstUpscalePlan(visiblePages)
+        if (prefetchPlan.isEmpty()) {
             return
         }
 
-        val retainedPages = (prioritizedPages + loadedCompanionUpscalePages(
-            anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
+        val retainedPages = ((prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
+            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
         )).distinct()
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
-        retainedPages.forEachIndexed { priority, page ->
-            readerPageUpscaler.schedulePrefetch(page, priority)
+        (prefetchPlan + loadedCompanionUpscalePages(
+            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+        ).map { page ->
+            PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
+        }).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
+            readerPageUpscaler.schedulePrefetch(request.page, priority, request.lane)
         }
     }
 
@@ -920,7 +931,7 @@ class ReaderViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun buildVisibleFirstUpscaleList(visiblePages: List<ReaderPage>): List<ReaderPage> {
+    private fun buildVisibleFirstUpscalePlan(visiblePages: List<ReaderPage>): List<PrefetchRequest> {
         val visiblePagesByChapter = linkedMapOf<ReaderChapter, MutableList<ReaderPage>>()
         visiblePages.forEach { page ->
             visiblePagesByChapter.getOrPut(page.chapter) { mutableListOf() }.add(page)
@@ -930,20 +941,74 @@ class ReaderViewModel @JvmOverloads constructor(
             visiblePagesByChapter.values.forEach { chapterVisiblePages ->
                 val chapterPages = chapterVisiblePages.firstOrNull()?.chapter?.pages ?: return@forEach
                 val orderedVisiblePages = chapterVisiblePages.sortedBy { it.index }
-                addAll(orderedVisiblePages)
+                orderedVisiblePages.forEach { page ->
+                    add(PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE))
+                }
 
                 val firstVisibleIndex = orderedVisiblePages.first().index.coerceIn(0, chapterPages.lastIndex)
                 val lastVisibleIndex = orderedVisiblePages.last().index.coerceIn(0, chapterPages.lastIndex)
+                val hasUncachedBeforeVisible = (0 until firstVisibleIndex).any { index ->
+                    !readerPageUpscaler.hasCachedPage(chapterPages[index])
+                }
+                val hasUncachedAfterVisible = ((lastVisibleIndex + 1)..chapterPages.lastIndex).any { index ->
+                    !readerPageUpscaler.hasCachedPage(chapterPages[index])
+                }
+                val shouldUseBidirectionalBootstrap =
+                    orderedVisiblePages.any { !readerPageUpscaler.hasCachedPage(it) } &&
+                        hasUncachedBeforeVisible &&
+                        hasUncachedAfterVisible
+
+                if (shouldUseBidirectionalBootstrap) {
+                    var distance = 1
+                    while (firstVisibleIndex - distance >= 0 || lastVisibleIndex + distance <= chapterPages.lastIndex) {
+                        val nextIndex = lastVisibleIndex + distance
+                        if (nextIndex <= chapterPages.lastIndex) {
+                            add(
+                                PrefetchRequest(
+                                    page = chapterPages[nextIndex],
+                                    lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                                ),
+                            )
+                        }
+
+                        val previousIndex = firstVisibleIndex - distance
+                        if (previousIndex >= 0) {
+                            add(
+                                PrefetchRequest(
+                                    page = chapterPages[previousIndex],
+                                    lane = ReaderPageUpscaler.REMOTE_SECONDARY_LANE,
+                                ),
+                            )
+                        }
+                        distance++
+                    }
+                    return@forEach
+                }
 
                 for (nextIndex in (lastVisibleIndex + 1)..chapterPages.lastIndex) {
-                    add(chapterPages[nextIndex])
+                    add(
+                        PrefetchRequest(
+                            page = chapterPages[nextIndex],
+                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                        ),
+                    )
                 }
                 for (previousIndex in (firstVisibleIndex - 1) downTo 0) {
-                    add(chapterPages[previousIndex])
+                    add(
+                        PrefetchRequest(
+                            page = chapterPages[previousIndex],
+                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                        ),
+                    )
                 }
             }
-        }.distinct()
+        }.distinctBy(PrefetchRequest::page)
     }
+
+    private data class PrefetchRequest(
+        val page: ReaderPage,
+        val lane: Int,
+    )
 
     /**
      * Generate a filename for the given [manga] and [page]
