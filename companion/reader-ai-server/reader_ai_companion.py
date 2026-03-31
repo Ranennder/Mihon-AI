@@ -405,11 +405,32 @@ def _run_subprocess_once(
         if completed.returncode != 0:
             raise RuntimeError(f"Upscale process failed: {details}")
 
-        if not output_path.is_file() or output_path.stat().st_size == 0:
+        produced_output_path = _resolve_produced_output_path(output_path, output_format)
+        if produced_output_path is None or produced_output_path.stat().st_size == 0:
             reason = details or "empty output file"
             raise RuntimeError(f"Upscale process did not produce a valid {output_format} image: {reason}")
 
-        return ProcessedImage(output_path.read_bytes(), output_format)
+        return ProcessedImage(
+            bytes=produced_output_path.read_bytes(),
+            output_format=_sanitize_extension(produced_output_path.suffix) if produced_output_path != output_path else output_format,
+        )
+
+
+def _resolve_produced_output_path(output_path: Path, requested_output_format: str) -> Path | None:
+    candidates = [output_path]
+    normalized_requested_format = _sanitize_extension(requested_output_format)
+    for alternate_format in ("png", "jpg", "jpeg", "webp"):
+        alternate_path = output_path.with_name(f"{output_path.name}.{alternate_format}")
+        if alternate_path not in candidates:
+            candidates.append(alternate_path)
+        if alternate_format == normalized_requested_format:
+            continue
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
 
 
 def _sanitize_extension(value: str) -> str:
