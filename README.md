@@ -6,7 +6,7 @@
 
 AI-enhanced Android reader for manga, manhwa, and webtoons.
 
-Built as a focused fork of Mihon with a smoother AI reading flow, a standalone Windows companion, and a stable upstream base.
+Built as a focused fork of Mihon with higher-quality AI-upscaled pages, a standalone Windows companion, and a stable upstream base.
 
 [![Latest release](https://img.shields.io/github/v/release/Ranennder/Mihon-AI?label=Release&labelColor=111827&color=2563eb)](https://github.com/Ranennder/Mihon-AI/releases)
 [![Base](https://img.shields.io/badge/Base-Mihon%200.19.7-4b5563)](https://github.com/mihonapp/mihon/releases/tag/v0.19.7)
