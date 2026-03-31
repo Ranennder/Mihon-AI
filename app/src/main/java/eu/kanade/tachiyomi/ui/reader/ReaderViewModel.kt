@@ -870,25 +870,13 @@ class ReaderViewModel @JvmOverloads constructor(
         pages: List<ReaderPage>,
         currentIndex: Int,
     ) {
-        val prioritizedPages = buildList {
-            add(pages[currentIndex])
-            for (nextIndex in (currentIndex + 1)..pages.lastIndex) {
-                add(pages[nextIndex])
-            }
-            for (previousIndex in (currentIndex - 1) downTo 0) {
-                add(pages[previousIndex])
-            }
-        }
-
-        val prefetchPlan = prioritizedPages.map { page ->
-            PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
-        }
+        val prefetchPlan = buildWholeChapterUpscalePlan(pages, currentIndex)
         val retainedPages = ((prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
-            anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
+            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
         )).distinct()
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
         (prefetchPlan + loadedCompanionUpscalePages(
-            anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
+            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
         ).map { page ->
             PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
         }).distinctBy(PrefetchRequest::page).forEachIndexed { priority, request ->
@@ -997,6 +985,76 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = chapterPages[previousIndex],
+                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                        ),
+                    )
+                }
+            }
+        }.distinctBy(PrefetchRequest::page)
+    }
+
+    private fun buildWholeChapterUpscalePlan(
+        pages: List<ReaderPage>,
+        currentIndex: Int,
+    ): List<PrefetchRequest> {
+        if (pages.isEmpty()) {
+            return emptyList()
+        }
+
+        val anchorIndex = currentIndex.coerceIn(0, pages.lastIndex)
+        val hasUncachedBeforeAnchor = (0 until anchorIndex).any { index ->
+            !readerPageUpscaler.hasCachedPage(pages[index])
+        }
+        val hasUncachedAfterAnchor = ((anchorIndex + 1)..pages.lastIndex).any { index ->
+            !readerPageUpscaler.hasCachedPage(pages[index])
+        }
+
+        return buildList {
+            add(PrefetchRequest(page = pages[anchorIndex], lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE))
+
+            if (hasUncachedBeforeAnchor && hasUncachedAfterAnchor) {
+                var distance = 1
+                while (anchorIndex - distance >= 0 || anchorIndex + distance <= pages.lastIndex) {
+                    val previousIndex = anchorIndex - distance
+                    if (previousIndex >= 0 && !readerPageUpscaler.hasCachedPage(pages[previousIndex])) {
+                        add(
+                            PrefetchRequest(
+                                page = pages[previousIndex],
+                                lane = ReaderPageUpscaler.REMOTE_SECONDARY_LANE,
+                            ),
+                        )
+                    }
+
+                    val nextIndex = anchorIndex + distance
+                    if (nextIndex <= pages.lastIndex && !readerPageUpscaler.hasCachedPage(pages[nextIndex])) {
+                        add(
+                            PrefetchRequest(
+                                page = pages[nextIndex],
+                                lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                            ),
+                        )
+                    }
+
+                    distance++
+                }
+                return@buildList
+            }
+
+            for (nextIndex in (anchorIndex + 1)..pages.lastIndex) {
+                if (!readerPageUpscaler.hasCachedPage(pages[nextIndex])) {
+                    add(
+                        PrefetchRequest(
+                            page = pages[nextIndex],
+                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                        ),
+                    )
+                }
+            }
+            for (previousIndex in (anchorIndex - 1) downTo 0) {
+                if (!readerPageUpscaler.hasCachedPage(pages[previousIndex])) {
+                    add(
+                        PrefetchRequest(
+                            page = pages[previousIndex],
                             lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
                         ),
                     )
