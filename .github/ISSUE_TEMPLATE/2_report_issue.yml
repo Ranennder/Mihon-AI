@@ -76,6 +76,38 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: backend-mode
+    attributes:
+      label: AI backend
+      description: Which backend were you using when the issue happened?
+      options:
+        - Remote PC
+        - GPU
+        - AI was off
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reader-mode
+    attributes:
+      label: Reader mode
+      description: Which reader mode were you using?
+      options:
+        - Webtoon
+        - Pager
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: companion-version
+    attributes:
+      label: Companion version
+      description: If you were using `Remote PC`, which companion `.exe` version was running?
+      placeholder: |
+        Example: "v26"
+
   - type: textarea
     id: other-details
     attributes:

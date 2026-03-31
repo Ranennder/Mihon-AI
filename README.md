@@ -4,21 +4,19 @@
 
 # Mihon AI
 
-Android reader with AI upscaling for manga, manhwa, and webtoons.
-
-Focused on higher-quality pages with a dedicated AI reading workflow.
+Android manga, manhwa, and webtoon reader focused on higher-quality AI-upscaled pages.
 
 [![Latest release](https://img.shields.io/github/v/release/Ranennder/Mihon-AI?label=Release&labelColor=111827&color=2563eb)](https://github.com/Ranennder/Mihon-AI/releases)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-16a34a)](https://developer.android.com/about/versions/oreo)
 [![License](https://img.shields.io/github/license/Ranennder/Mihon-AI?labelColor=111827&color=0f766e)](./LICENSE)
 
-[Releases](https://github.com/Ranennder/Mihon-AI/releases) | [Windows Companion](./companion/reader-ai-server/README.md) | [License](./LICENSE)
+[Releases](https://github.com/Ranennder/Mihon-AI/releases) | [Windows Companion](./companion/reader-ai-server/README.md) | [Report an Issue](https://github.com/Ranennder/Mihon-AI/issues) | [License](./LICENSE)
 
 </div>
 
 ## Overview
 
-Mihon AI is an Android reader that adds AI page upscaling while keeping the reading flow fast and practical.
+Mihon AI is an Android reader built around AI-upscaled pages for manga, manhwa, and webtoons.
 
 ## Features
 
@@ -33,6 +31,11 @@ Mihon AI is an Android reader that adds AI page upscaling while keeping the read
 ## Download
 
 Get the latest APKs from the [Releases page](https://github.com/Ranennder/Mihon-AI/releases).
+
+If you plan to use `Remote PC`, download both:
+
+- the Android APK for your phone
+- the Windows companion `.exe` for your PC
 
 If you are not sure which build to install:
 

@@ -1,12 +1,15 @@
-<!--
-  Please include a summary of the change and which issue is fixed.
-  Also make sure you've tested your code and also done a self-review of it.
-  Don't forget to check all base themes and tablet mode for relevant changes.
-  
-  If your changes are visual, please provide images below:
+## Summary
 
-### Images
-| Image 1 | Image 2 |
-| ------- | ------- |
-| ![](https://github.githubassets.com/images/modules/logos_page/Octocat.png) | ![](https://github.githubassets.com/images/modules/logos_page/Octocat.png) |
--->
+- What changed?
+- Why was it needed?
+
+## Testing
+
+- [ ] Tested locally
+- [ ] Relevant reader flow checked
+- [ ] Screenshots added if UI changed
+
+## Notes
+
+- Link related issue(s) if applicable
+- Mention whether the change affects `GPU`, `Remote PC`, `Pager`, or `Webtoon`

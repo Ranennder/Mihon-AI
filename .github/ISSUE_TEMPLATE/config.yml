@@ -1,1 +1,8 @@
 blank_issues_enabled: false
+contact_links:
+  - name: Download Releases
+    url: https://github.com/Ranennder/Mihon-AI/releases
+    about: Download the latest Mihon AI APK and Windows companion.
+  - name: Windows Companion Setup
+    url: https://github.com/Ranennder/Mihon-AI/tree/main/companion/reader-ai-server
+    about: Read the companion setup and build guide for Remote PC mode.
