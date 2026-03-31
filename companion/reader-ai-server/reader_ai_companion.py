@@ -54,6 +54,7 @@ JPEG_QUALITY = 95
 MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
+LOG_FILE_NAME = "companion.log"
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -119,6 +120,35 @@ class SubprocessRunResult:
 class ImageSize:
     width: int
     height: int
+
+
+class TeeTextWriter:
+    def __init__(self, primary: Any, mirror: Any):
+        self._primary = primary
+        self._mirror = mirror
+        self._lock = threading.Lock()
+        self.encoding = getattr(primary, "encoding", "utf-8")
+        self.errors = getattr(primary, "errors", "replace")
+
+    def write(self, data: str) -> int:
+        with self._lock:
+            written = self._primary.write(data)
+            self._mirror.write(data)
+            return written
+
+    def flush(self) -> None:
+        with self._lock:
+            self._primary.flush()
+            self._mirror.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._primary, "isatty", lambda: False)())
+
+    def fileno(self) -> int:
+        return self._primary.fileno()
+
+    def writable(self) -> bool:
+        return True
 
 
 class ReaderAiServer(ThreadingHTTPServer):
@@ -863,6 +893,14 @@ def _resolve_runtime_path(
     return path
 
 
+def _configure_output_tee() -> Path:
+    log_path = _app_root() / LOG_FILE_NAME
+    log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = TeeTextWriter(sys.stdout, log_file)
+    sys.stderr = TeeTextWriter(sys.stderr, log_file)
+    return log_path
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mihon AI remote companion server")
     parser.add_argument("--config", default=DEFAULT_CONFIG_NAME)
@@ -889,6 +927,7 @@ def main() -> int:
         sys.stdout.reconfigure(line_buffering=True, write_through=True)
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True, write_through=True)
+    log_path = _configure_output_tee()
 
     args = _parse_args()
     config_path = _resolve_config_path(args.config)
@@ -918,6 +957,7 @@ def main() -> int:
     print(f"Mode: {config.mode}", flush=True)
     print(f"Binary: {config.binary}", flush=True)
     print(f"Model dir: {config.model_dir}", flush=True)
+    print(f"Live logs: enabled -> {log_path}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
