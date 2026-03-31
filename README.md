@@ -4,9 +4,9 @@
 
 # Mihon AI
 
-AI-upscaled reading for manga, manhwa, and webtoons on Android.
+Android reader with AI upscaling for manga, manhwa, and webtoons.
 
-Built on stable Mihon, focused on one thing: making pages look better without turning the app into a science project.
+Built on stable Mihon with a dedicated AI workflow for higher-quality pages.
 
 [![Latest release](https://img.shields.io/github/v/release/Ranennder/Mihon-AI?label=Release&labelColor=111827&color=2563eb)](https://github.com/Ranennder/Mihon-AI/releases)
 [![Base](https://img.shields.io/badge/Base-Mihon%200.19.7-4b5563)](https://github.com/mihonapp/mihon/releases/tag/v0.19.7)
@@ -17,28 +17,21 @@ Built on stable Mihon, focused on one thing: making pages look better without tu
 
 </div>
 
-## What Mihon AI is
+## Overview
 
-Mihon AI is a focused fork of Mihon with a dedicated AI reading workflow.
-
-The goal is simple:
-
-- keep the Mihon base stable
-- add higher-quality page upscaling
-- make `Remote PC` easy enough for normal users
-- keep reading fast in real manga, manhwa, and webtoon sessions
+Mihon AI is a focused fork of Mihon that adds AI page upscaling while keeping the base reader familiar and stable.
 
 This project currently tracks stable [Mihon `v0.19.7`](https://github.com/mihonapp/mihon/releases/tag/v0.19.7).
 
-## What Mihon AI adds
+## Features
 
 - Reader top-bar `AI` toggle for instant on/off switching.
 - `Remote PC` mode with a standalone Windows companion `.exe`.
 - Local network auto-discovery when the server URL is left empty.
 - `Fast` and `Detailed` remote upscale models.
-- On-device `GPU` mode for local testing and offline usage.
-- Reader-side caching and chapter prefetch for keeping AI pages ready ahead of you.
-- Separate Mihon AI app versioning while still staying on a stable Mihon base.
+- On-device `GPU` mode for local and offline usage.
+- Reader caching and prefetch to keep AI pages ready ahead of you.
+- Separate Mihon AI app versioning on top of a stable Mihon base.
 
 ## Download
 
@@ -51,7 +44,7 @@ If you are not sure which build to install:
 
 Requires Android 8.0 or higher.
 
-## Quick Start
+## Modes
 
 ### Remote PC
 
@@ -75,7 +68,7 @@ Notes:
 
 `GPU` runs directly on the phone.
 
-- Good for testing or fully local usage.
+- Good for fully local usage and quick testing.
 - Still considered beta.
 - Can heat the phone during longer reading sessions.
 
@@ -88,9 +81,7 @@ Notes:
 
 ## Companion
 
-The Windows companion lives in [companion/reader-ai-server](./companion/reader-ai-server).
-
-It receives page images from the app, runs upscaling on the PC, and returns the processed result back to the phone.
+The Windows companion lives in [companion/reader-ai-server](./companion/reader-ai-server). It receives page images from the app, runs upscaling on the PC, and returns the processed result back to the phone.
 
 Companion docs:
 
@@ -118,17 +109,6 @@ On Windows:
 cd companion\reader-ai-server
 build_windows_exe.bat
 ```
-
-## Roadmap Direction
-
-Mihon AI is intentionally narrow in scope.
-
-The main direction is:
-
-- better remote upscaling quality for manga, manhwa, and webtoons
-- stronger reader-side caching and prefetch behavior
-- easier Windows companion setup
-- staying close to Mihon stable instead of chasing unreleased upstream changes
 
 ## Contributing
 
