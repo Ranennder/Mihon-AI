@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./.github/assets/logo.png" alt="Mihon AI logo" title="Mihon AI logo" width="96"/>
+<img src="./.github/assets/logo.svg" alt="Mihon AI logo" title="Mihon AI logo" width="96"/>
 
 # Mihon AI
 
