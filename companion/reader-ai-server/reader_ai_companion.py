@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import json
 import itertools
+import locale
 import mimetypes
 import os
 import queue
@@ -920,7 +921,7 @@ def _run_hidden_windows_command(command: list[str]) -> subprocess.CompletedProce
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
-        "encoding": "utf-8",
+        "encoding": locale.getpreferredencoding(False) or "utf-8",
         "errors": "replace",
     }
     if os.name == "nt":
@@ -936,10 +937,10 @@ def _find_listening_process_id(port: int) -> int | None:
         "-NoProfile",
         "-Command",
         (
-            f"$pid = Get-NetTCPConnection -LocalPort {port} -State Listen "
+            f"$listenerPid = Get-NetTCPConnection -LocalPort {port} -State Listen "
             "-ErrorAction SilentlyContinue | Select-Object -First 1 "
             "-ExpandProperty OwningProcess; "
-            'if ($pid) { Write-Output $pid }'
+            'if ($listenerPid) { Write-Output $listenerPid }'
         ),
     ]
     try:
