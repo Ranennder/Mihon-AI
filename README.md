@@ -112,8 +112,6 @@ On Windows:
 .\gradlew.bat assembleDebug
 ```
 
-If you build on Windows, an ASCII-only path such as `C:\projects\Mihon-AI` is safer than a OneDrive path with non-ASCII characters.
-
 ### Windows companion
 
 ```bat
