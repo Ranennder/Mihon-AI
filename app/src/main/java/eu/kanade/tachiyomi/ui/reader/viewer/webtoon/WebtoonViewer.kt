@@ -15,6 +15,7 @@ import androidx.recyclerview.widget.WebtoonLayoutManager
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
+import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
@@ -72,6 +73,7 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
      * Currently active item. It can be a chapter page or a chapter transition.
      */
     private var currentPage: Any? = null
+    private var lastReportedVisiblePageKeys: List<String> = emptyList()
 
     private val threshold: Int =
         Injekt.get<ReaderPreferences>()
@@ -252,6 +254,7 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
     override fun setChapters(chapters: ViewerChapters) {
         val forceTransition = config.alwaysShowChapterTransition || currentPage is ChapterTransition
         adapter.setChapters(chapters, forceTransition)
+        lastReportedVisiblePageKeys = emptyList()
 
         if (recycler.isGone) {
             logcat { "Recycler first layout" }
@@ -287,6 +290,7 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
                 is ChapterTransition -> onTransitionSelected(item)
             }
         }
+        reportVisiblePagesForUpscale()
     }
 
     /**
@@ -397,6 +401,32 @@ class WebtoonViewer(val activity: ReaderActivity, val isContinuous: Boolean = tr
             max(0, position - 3),
             min(position + 3, adapter.itemCount - 1),
         )
+    }
+
+    private fun reportVisiblePagesForUpscale() {
+        val visiblePages = collectVisibleReaderPages()
+        val visiblePageKeys = visiblePages.map(::visiblePageKey)
+        if (visiblePageKeys == lastReportedVisiblePageKeys) {
+            return
+        }
+
+        lastReportedVisiblePageKeys = visiblePageKeys
+        activity.onWebtoonVisiblePagesChanged(visiblePages)
+    }
+
+    private fun collectVisibleReaderPages(): List<ReaderPage> {
+        val firstPosition = layoutManager.findFirstVisibleItemPosition()
+        val lastPosition = layoutManager.findLastEndVisibleItemPosition()
+        if (firstPosition < 0 || lastPosition < firstPosition) {
+            return emptyList()
+        }
+
+        return (firstPosition..lastPosition)
+            .mapNotNull { adapter.items.getOrNull(it) as? ReaderPage }
+    }
+
+    private fun visiblePageKey(page: ReaderPage): String {
+        return "${page.chapter.chapter.id ?: -1L}:${page.index}:${page is InsertPage}"
     }
 }
 

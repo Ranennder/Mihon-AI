@@ -493,6 +493,14 @@ class ReaderViewModel @JvmOverloads constructor(
         scheduleUpscaleForWholeChapter(pages, currentPageIndex)
     }
 
+    fun onWebtoonVisiblePagesChanged(visiblePages: List<ReaderPage>) {
+        if (!readerPreferences.upscalePagesX2.get() || visiblePages.isEmpty()) {
+            return
+        }
+
+        scheduleUpscaleForVisiblePages(visiblePages)
+    }
+
     private fun downloadNextChapters() {
         if (downloadAheadAmount == 0) return
         val manga = manga ?: return
@@ -872,11 +880,28 @@ class ReaderViewModel @JvmOverloads constructor(
             }
         }
 
-        val retainedPages = prioritizedPages + loadedCompanionUpscalePages(
+        val retainedPages = (prioritizedPages + loadedCompanionUpscalePages(
             anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
-        )
+        )).distinct()
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
-        retainedPages.forEach(readerPageUpscaler::schedulePrefetch)
+        retainedPages.forEachIndexed { priority, page ->
+            readerPageUpscaler.schedulePrefetch(page, priority)
+        }
+    }
+
+    private fun scheduleUpscaleForVisiblePages(visiblePages: List<ReaderPage>) {
+        val prioritizedPages = buildVisibleFirstUpscaleList(visiblePages)
+        if (prioritizedPages.isEmpty()) {
+            return
+        }
+
+        val retainedPages = (prioritizedPages + loadedCompanionUpscalePages(
+            anchorChapterId = prioritizedPages.firstOrNull()?.chapter?.chapter?.id,
+        )).distinct()
+        readerPageUpscaler.retainScheduledPrefetches(retainedPages)
+        retainedPages.forEachIndexed { priority, page ->
+            readerPageUpscaler.schedulePrefetch(page, priority)
+        }
     }
 
     private fun loadedCompanionUpscalePages(anchorChapterId: Long?): List<ReaderPage> {
@@ -893,6 +918,31 @@ class ReaderViewModel @JvmOverloads constructor(
                 ?.takeIf { it.isNotEmpty() }
                 ?.let(::addAll)
         }
+    }
+
+    private fun buildVisibleFirstUpscaleList(visiblePages: List<ReaderPage>): List<ReaderPage> {
+        val visiblePagesByChapter = linkedMapOf<ReaderChapter, MutableList<ReaderPage>>()
+        visiblePages.forEach { page ->
+            visiblePagesByChapter.getOrPut(page.chapter) { mutableListOf() }.add(page)
+        }
+
+        return buildList {
+            visiblePagesByChapter.values.forEach { chapterVisiblePages ->
+                val chapterPages = chapterVisiblePages.firstOrNull()?.chapter?.pages ?: return@forEach
+                val orderedVisiblePages = chapterVisiblePages.sortedBy { it.index }
+                addAll(orderedVisiblePages)
+
+                val firstVisibleIndex = orderedVisiblePages.first().index.coerceIn(0, chapterPages.lastIndex)
+                val lastVisibleIndex = orderedVisiblePages.last().index.coerceIn(0, chapterPages.lastIndex)
+
+                for (nextIndex in (lastVisibleIndex + 1)..chapterPages.lastIndex) {
+                    add(chapterPages[nextIndex])
+                }
+                for (previousIndex in (firstVisibleIndex - 1) downTo 0) {
+                    add(chapterPages[previousIndex])
+                }
+            }
+        }.distinct()
     }
 
     /**

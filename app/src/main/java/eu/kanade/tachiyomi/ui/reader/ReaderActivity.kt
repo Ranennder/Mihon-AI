@@ -768,6 +768,10 @@ class ReaderActivity : BaseActivity() {
         viewModel.onWebtoonScrollStateChanged(isScrolling)
     }
 
+    fun onWebtoonVisiblePagesChanged(visiblePages: List<ReaderPage>) {
+        viewModel.onWebtoonVisiblePagesChanged(visiblePages)
+    }
+
     /**
      * Called from the viewer whenever a [page] is long clicked. A bottom sheet with a list of
      * actions to perform is shown.

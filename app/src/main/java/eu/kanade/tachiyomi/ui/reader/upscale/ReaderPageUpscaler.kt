@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,6 +24,7 @@ import tachiyomi.core.common.util.system.logcat
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
 class ReaderPageUpscaler(
@@ -33,18 +35,29 @@ class ReaderPageUpscaler(
 
     private val cacheRoot = File(app.cacheDir, "reader_ai_cache_v12").apply { mkdirs() }
     private val serialProcessingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
-    // Keep remote prefetch strictly ordered so the next page doesn't get overtaken by a later,
-    // lighter page finishing first while reading webtoons.
-    private val remoteProcessingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+    private val remotePrefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pageLocks = ConcurrentHashMap<String, Mutex>()
     private val scheduledJobs = ConcurrentHashMap<String, Job>()
     private val forcedBlockingPages = ConcurrentHashMap<String, Unit>()
+    private val remoteQueuedPages = LinkedHashMap<String, RemotePrefetchTask>()
+    private val remoteQueueMutex = Mutex()
+    private val remotePrefetchSignal = Channel<Unit>(Channel.CONFLATED)
+    private val remotePrefetchSequence = AtomicLong(0L)
     private val anime4xPageUpscaler = Anime4xPageUpscaler(app, readerPreferences)
     private val ncnnPageUpscaler = NcnnPageUpscaler(app)
     private val remotePageUpscaler = RemotePageUpscaler(app, readerPreferences, networkHelper)
 
     @Volatile
     private var lastFailureMessage: String? = null
+
+    @Volatile
+    private var remoteRetainedPaths: Set<String> = emptySet()
+
+    init {
+        remotePrefetchScope.launch {
+            runRemotePrefetchLoop()
+        }
+    }
 
     fun isEnabled(): Boolean = readerPreferences.upscalePagesX2.get()
 
@@ -72,6 +85,11 @@ class ReaderPageUpscaler(
             return source
         }
 
+        val backendMode = ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get())
+        if (backendMode == ReaderPreferences.AiBackendMode.REMOTE && (allowBlocking || forceBlocking)) {
+            dropRemotePrefetch(cacheFile.absolutePath)
+        }
+
         val lock = pageLocks.getOrPut(cacheFile.absolutePath) { Mutex() }
         return lock.withLock {
             if (cacheFile.isReadyCacheFile()) {
@@ -79,7 +97,6 @@ class ReaderPageUpscaler(
             }
 
             lastFailureMessage = null
-            val backendMode = ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get())
             val processedBytes = runCatching {
                 when (backendMode) {
                     ReaderPreferences.AiBackendMode.GPU -> ncnnPageUpscaler.upscaleSource(source)
@@ -124,8 +141,16 @@ class ReaderPageUpscaler(
         processPage(page, original)
     }
 
-    fun schedulePrefetch(page: ReaderPage) {
+    fun schedulePrefetch(
+        page: ReaderPage,
+        priority: Int = Int.MAX_VALUE,
+    ) {
         if (!isEnabled()) {
+            return
+        }
+
+        if (isRemoteBackendSelected()) {
+            enqueueRemotePrefetch(page, priority)
             return
         }
 
@@ -155,16 +180,37 @@ class ReaderPageUpscaler(
 
     private fun processingScopeForCurrentBackend(): CoroutineScope {
         return when (ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get())) {
-            ReaderPreferences.AiBackendMode.REMOTE -> remoteProcessingScope
             ReaderPreferences.AiBackendMode.GPU,
             ReaderPreferences.AiBackendMode.CPU,
             ReaderPreferences.AiBackendMode.NPU,
             -> serialProcessingScope
+            ReaderPreferences.AiBackendMode.REMOTE -> serialProcessingScope
         }
     }
 
     fun retainScheduledPrefetches(pages: Collection<ReaderPage>) {
         val keepPaths = pages.map { cacheFile(it).absolutePath }.toHashSet()
+        if (isRemoteBackendSelected()) {
+            remoteRetainedPaths = keepPaths
+            scheduledJobs.entries.forEach { entry ->
+                entry.value.cancel()
+                scheduledJobs.remove(entry.key, entry.value)
+            }
+            remotePrefetchScope.launch {
+                remoteQueueMutex.withLock {
+                    remoteQueuedPages.entries.removeIf { it.key !in keepPaths }
+                }
+                remotePrefetchSignal.trySend(Unit)
+            }
+            return
+        }
+
+        remoteRetainedPaths = emptySet()
+        remotePrefetchScope.launch {
+            remoteQueueMutex.withLock {
+                remoteQueuedPages.clear()
+            }
+        }
         scheduledJobs.entries.forEach { entry ->
             if (entry.key !in keepPaths) {
                 entry.value.cancel()
@@ -278,4 +324,79 @@ class ReaderPageUpscaler(
     private fun File.isReadyCacheFile(): Boolean {
         return isFile && length() > 0L
     }
+
+    private suspend fun runRemotePrefetchLoop() {
+        while (true) {
+            val nextTask = remoteQueueMutex.withLock {
+                remoteQueuedPages.values
+                    .filter { it.cachePath in remoteRetainedPaths }
+                    .minWithOrNull(compareBy<RemotePrefetchTask> { it.priority }.thenBy { it.sequence })
+                    ?.also { remoteQueuedPages.remove(it.cachePath) }
+            }
+
+            if (nextTask == null) {
+                remotePrefetchSignal.receive()
+                continue
+            }
+
+            try {
+                if (nextTask.cachePath !in remoteRetainedPaths || cacheFile(nextTask.page).isReadyCacheFile()) {
+                    continue
+                }
+                awaitPageReady(nextTask.page)
+                if (nextTask.cachePath !in remoteRetainedPaths || cacheFile(nextTask.page).isReadyCacheFile()) {
+                    continue
+                }
+                prefetchPage(nextTask.page)
+            } catch (e: Throwable) {
+                logcat(LogPriority.WARN, e) { "Failed to schedule AI-upscale for reader page ${nextTask.page.index}" }
+            }
+        }
+    }
+
+    private fun enqueueRemotePrefetch(
+        page: ReaderPage,
+        priority: Int,
+    ) {
+        val cachePath = cacheFile(page).absolutePath
+        if (cacheFile(page).isReadyCacheFile()) {
+            return
+        }
+
+        remotePrefetchScope.launch {
+            remoteQueueMutex.withLock {
+                val existingTask = remoteQueuedPages[cachePath]
+                if (existingTask != null && existingTask.priority <= priority) {
+                    return@withLock
+                }
+                remoteQueuedPages[cachePath] = RemotePrefetchTask(
+                    cachePath = cachePath,
+                    page = page,
+                    priority = priority,
+                    sequence = remotePrefetchSequence.incrementAndGet(),
+                )
+            }
+            remotePrefetchSignal.trySend(Unit)
+        }
+    }
+
+    private fun dropRemotePrefetch(cachePath: String) {
+        remotePrefetchScope.launch {
+            remoteQueueMutex.withLock {
+                remoteQueuedPages.remove(cachePath)
+            }
+        }
+    }
+
+    private fun isRemoteBackendSelected(): Boolean {
+        return ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get()) ==
+            ReaderPreferences.AiBackendMode.REMOTE
+    }
+
+    private data class RemotePrefetchTask(
+        val cachePath: String,
+        val page: ReaderPage,
+        val priority: Int,
+        val sequence: Long,
+    )
 }
