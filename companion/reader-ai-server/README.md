@@ -52,7 +52,7 @@ That uses `PyInstaller` and outputs:
 dist\MihonAiCompanion.exe
 ```
 
-By default the build script bundles a local `runtime/` folder into the one-file executable.
+By default the build script downloads the official Windows Real-ESRGAN runtime into `%TEMP%\mihon-realesrgan-runtime` and bundles it into the one-file executable.
 You can also point it at another runtime directory:
 
 ```bat
@@ -70,7 +70,7 @@ Example config:
   "port": 8765,
   "token": "",
   "mode": "subprocess",
-  "binary": "runtime/realesrgan-ncnn.exe",
+  "binary": "runtime/realesrgan-ncnn-vulkan.exe",
   "model_dir": "runtime/models",
   "output_format": "jpg",
   "scale": 2,

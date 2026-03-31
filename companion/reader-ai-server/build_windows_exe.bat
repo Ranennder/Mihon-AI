@@ -3,18 +3,24 @@ setlocal
 cd /d "%~dp0"
 
 set "RUNTIME_DIR=%MIHONAI_RUNTIME_DIR%"
-if not defined RUNTIME_DIR set "RUNTIME_DIR=%cd%\runtime"
+if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime"
 
-if not exist "%RUNTIME_DIR%" (
-  echo Runtime directory not found: %RUNTIME_DIR%
-  echo.
-  echo Set MIHONAI_RUNTIME_DIR to a folder containing the Windows upscale runtime,
-  echo or place the runtime folder next to this script before building.
+if not exist "%RUNTIME_DIR%\realesrgan-ncnn-vulkan.exe" (
+  echo Preparing Windows runtime in %RUNTIME_DIR%
+  powershell -ExecutionPolicy Bypass -File "%~dp0prepare_windows_runtime.ps1" -RuntimeDir "%RUNTIME_DIR%"
+  if errorlevel 1 exit /b 1
+)
+
+if not exist "%RUNTIME_DIR%\models\realesr-animevideov3-x2.bin" (
+  echo Runtime models not found in %RUNTIME_DIR%
   exit /b 1
 )
 
-py -3 -m pip install --upgrade pip pyinstaller
-py -3 -m PyInstaller ^
+set "PYTHON_CMD=py -3"
+where py >nul 2>&1 || set "PYTHON_CMD=python"
+
+call %PYTHON_CMD% -m pip install --upgrade pip pillow pyinstaller
+call %PYTHON_CMD% -m PyInstaller ^
   --clean ^
   --onefile ^
   --name MihonAiCompanion ^

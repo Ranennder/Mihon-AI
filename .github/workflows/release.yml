@@ -119,10 +119,40 @@ jobs:
           name: mihon-ai-foss
           path: mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
 
+  build_companion_windows:
+    name: Build Windows Companion
+    runs-on: windows-2022
+    needs: get_tag
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build companion
+        working-directory: companion/reader-ai-server
+        shell: cmd
+        run: build_windows_exe.bat
+
+      - name: Rename companion
+        shell: pwsh
+        run: |
+          Rename-Item -Path 'companion/reader-ai-server/dist/MihonAiCompanion.exe' -NewName 'MihonAiCompanion-${{ needs.get_tag.outputs.tag }}-windows.exe'
+
+      - name: Upload companion
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: mihon-ai-companion-windows
+          path: companion/reader-ai-server/dist/MihonAiCompanion-${{ needs.get_tag.outputs.tag }}-windows.exe
+
   release:
     name: Create GitHub Release
     runs-on: ubuntu-24.04
-    needs: [get_tag, build, build_foss]
+    needs: [get_tag, build, build_foss, build_companion_windows]
 
     steps:
       - name: Download all artifacts
@@ -137,6 +167,7 @@ jobs:
           name: |
             mihon-ai
             mihon-ai-foss
+            mihon-ai-companion-windows
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
@@ -145,6 +176,7 @@ jobs:
           name: Mihon AI ${{ needs.get_tag.outputs.tag }}
           body: |
             Android reader with AI upscaling for manga, manhwa, and webtoons.
+            Includes Android APKs and a standalone Windows companion executable.
 
             <!-->
 
@@ -162,6 +194,7 @@ jobs:
             mihon-ai-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
             mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
             mihon-ai-x86_64-${{ needs.get_tag.outputs.tag }}.apk
+            MihonAiCompanion-${{ needs.get_tag.outputs.tag }}-windows.exe
           draft: true
           prerelease: false
           token: ${{ github.token }}

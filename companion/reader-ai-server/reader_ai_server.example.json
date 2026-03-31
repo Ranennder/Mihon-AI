@@ -3,7 +3,7 @@
   "port": 8765,
   "token": "",
   "mode": "subprocess",
-  "binary": "runtime/realesrgan-ncnn.exe",
+  "binary": "runtime/realesrgan-ncnn-vulkan.exe",
   "model_dir": "runtime/models",
   "output_format": "jpg",
   "scale": 2,
