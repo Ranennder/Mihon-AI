@@ -1045,7 +1045,11 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = pages[nextIndex],
-                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                            lane = if (hasUncachedAfterAnchor && !hasUncachedBeforeAnchor && ((nextIndex - anchorIndex) % 2 == 0)) {
+                                ReaderPageUpscaler.REMOTE_SECONDARY_LANE
+                            } else {
+                                ReaderPageUpscaler.REMOTE_PRIMARY_LANE
+                            },
                         ),
                     )
                 }
@@ -1055,7 +1059,11 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = pages[previousIndex],
-                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+                            lane = if (hasUncachedBeforeAnchor && !hasUncachedAfterAnchor && ((anchorIndex - previousIndex) % 2 == 0)) {
+                                ReaderPageUpscaler.REMOTE_SECONDARY_LANE
+                            } else {
+                                ReaderPageUpscaler.REMOTE_PRIMARY_LANE
+                            },
                         ),
                     )
                 }
