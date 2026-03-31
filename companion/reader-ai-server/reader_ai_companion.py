@@ -552,7 +552,10 @@ def _run_logged_subprocess(
             if not line:
                 continue
             output_lines.append(line)
-            _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}")
+            _emit_log_line(
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
+                console=_should_surface_subprocess_console_line(line),
+            )
 
     reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
     reader_thread.start()
@@ -890,8 +893,17 @@ def _configure_output_tee() -> Path:
     return log_path
 
 
-def _emit_log_line(message: str) -> None:
-    _emit_log_text(message + "\n")
+def _emit_log_line(message: str, *, console: bool = True, log_file: bool = True) -> None:
+    _emit_log_text(message + "\n", console=console, log_file=log_file)
+
+
+def _should_surface_subprocess_console_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _PROGRESS_RE.fullmatch(stripped) is not None:
+        return True
+    return False
 
 
 def _enable_console_styling() -> None:
@@ -1104,20 +1116,25 @@ def _write_inline_progress(console: Any, message: str) -> None:
     _INLINE_PROGRESS_VISIBLE_LENGTH = visible_length
 
 
-def _emit_log_text(message: str) -> None:
+def _emit_log_text(message: str, *, console: bool = True, log_file: bool = True) -> None:
     with _LOG_LOCK:
-        console = getattr(sys, "__stdout__", None) or sys.stdout
-        console_is_tty = getattr(console, "isatty", lambda: False)()
-        if console_is_tty:
-            inline_progress = _format_inline_progress_message(message)
-            if inline_progress is not None:
-                _write_inline_progress(console, inline_progress)
+        console_stream = getattr(sys, "__stdout__", None) or sys.stdout
+        console_is_tty = getattr(console_stream, "isatty", lambda: False)()
+        if console:
+            if console_is_tty:
+                inline_progress = _format_inline_progress_message(message)
+                if inline_progress is not None:
+                    _write_inline_progress(console_stream, inline_progress)
+                else:
+                    _clear_inline_progress(console_stream)
+                    _write_console_stream(console_stream, _format_console_message(message))
             else:
-                _clear_inline_progress(console)
-                _write_console_stream(console, _format_console_message(message))
-        else:
-            _write_console_stream(console, message)
-        if _LOG_FILE_HANDLE is not None:
+                _write_console_stream(console_stream, message)
+        elif console_is_tty:
+            inline_progress = _format_inline_progress_message(message)
+            if inline_progress is None:
+                _clear_inline_progress(console_stream)
+        if log_file and _LOG_FILE_HANDLE is not None:
             _LOG_FILE_HANDLE.write(message)
             _LOG_FILE_HANDLE.flush()
 
