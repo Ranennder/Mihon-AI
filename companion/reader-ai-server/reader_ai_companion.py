@@ -55,6 +55,8 @@ MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
 LOG_FILE_NAME = "companion.log"
+_LOG_LOCK = threading.Lock()
+_LOG_FILE_HANDLE: Any | None = None
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -120,35 +122,6 @@ class SubprocessRunResult:
 class ImageSize:
     width: int
     height: int
-
-
-class TeeTextWriter:
-    def __init__(self, primary: Any, mirror: Any):
-        self._primary = primary
-        self._mirror = mirror
-        self._lock = threading.Lock()
-        self.encoding = getattr(primary, "encoding", "utf-8")
-        self.errors = getattr(primary, "errors", "replace")
-
-    def write(self, data: str) -> int:
-        with self._lock:
-            written = self._primary.write(data)
-            self._mirror.write(data)
-            return written
-
-    def flush(self) -> None:
-        with self._lock:
-            self._primary.flush()
-            self._mirror.flush()
-
-    def isatty(self) -> bool:
-        return bool(getattr(self._primary, "isatty", lambda: False)())
-
-    def fileno(self) -> int:
-        return self._primary.fileno()
-
-    def writable(self) -> bool:
-        return True
 
 
 class ReaderAiServer(ThreadingHTTPServer):
@@ -245,8 +218,7 @@ class ReaderAiServer(ThreadingHTTPServer):
     def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
         _, exc, _ = sys.exc_info()
         if isinstance(exc, ConnectionResetError):
-            sys.stdout.write(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] Client disconnected: {client_address[0]}:{client_address[1]}\n")
-            sys.stdout.flush()
+            _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] Client disconnected: {client_address[0]}:{client_address[1]}")
             return
         super().handle_error(request, client_address)
 
@@ -359,8 +331,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
 
     def log_message(self, format: str, *args: Any) -> None:
-        sys.stdout.write("[%s] %s\n" % (self.log_date_time_string(), format % args))
-        sys.stdout.flush()
+        _emit_log_line("[%s] %s" % (self.log_date_time_string(), format % args))
 
     def _authorize(self) -> bool:
         token = self.server.config.token.strip()
@@ -561,8 +532,7 @@ def _run_logged_subprocess(
             if not line:
                 continue
             output_lines.append(line)
-            sys.stdout.write(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}\n")
-            sys.stdout.flush()
+            _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}")
 
     reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
     reader_thread.start()
@@ -895,10 +865,24 @@ def _resolve_runtime_path(
 
 def _configure_output_tee() -> Path:
     log_path = _app_root() / LOG_FILE_NAME
-    log_file = open(log_path, "a", encoding="utf-8", buffering=1)
-    sys.stdout = TeeTextWriter(sys.stdout, log_file)
-    sys.stderr = TeeTextWriter(sys.stderr, log_file)
+    global _LOG_FILE_HANDLE
+    _LOG_FILE_HANDLE = open(log_path, "a", encoding="utf-8", buffering=1)
     return log_path
+
+
+def _emit_log_line(message: str) -> None:
+    _emit_log_text(message + "\n")
+
+
+def _emit_log_text(message: str) -> None:
+    with _LOG_LOCK:
+        console = getattr(sys, "__stdout__", None) or sys.stdout
+        if console is not None:
+            console.write(message)
+            console.flush()
+        if _LOG_FILE_HANDLE is not None:
+            _LOG_FILE_HANDLE.write(message)
+            _LOG_FILE_HANDLE.flush()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -953,17 +937,19 @@ def main() -> int:
     )
 
     server = ReaderAiServer((config.host, config.port), config)
-    print(f"Mihon AI companion listening on http://{config.host}:{config.port}", flush=True)
-    print(f"Mode: {config.mode}", flush=True)
-    print(f"Binary: {config.binary}", flush=True)
-    print(f"Model dir: {config.model_dir}", flush=True)
-    print(f"Live logs: enabled -> {log_path}", flush=True)
+    _emit_log_line(f"Mihon AI companion listening on http://{config.host}:{config.port}")
+    _emit_log_line(f"Mode: {config.mode}")
+    _emit_log_line(f"Binary: {config.binary}")
+    _emit_log_line(f"Model dir: {config.model_dir}")
+    _emit_log_line(f"Live logs: enabled -> {log_path}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down...", flush=True)
+        _emit_log_text("\nShutting down...\n")
     finally:
         server.server_close()
+        if _LOG_FILE_HANDLE is not None:
+            _LOG_FILE_HANDLE.close()
     return 0
 
 
