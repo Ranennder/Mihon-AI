@@ -55,7 +55,7 @@ val appVersionCodeBase = 7667
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
 val upstreamAppVersionName = "0.19.7"
-val mihonAiVersionName = "0.1.0"
+val mihonAiVersionName = "0.1.8"
 
 if (Config.includeTelemetry) {
     pluginManager.apply {
