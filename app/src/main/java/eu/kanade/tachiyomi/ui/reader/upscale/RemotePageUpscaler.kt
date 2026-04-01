@@ -111,7 +111,6 @@ class RemotePageUpscaler(
 
                 val normalizedResponseBytes = normalizeResponseImage(
                     responseBytes = responseBytes,
-                    preparedImage = preparedImage,
                 ) ?: return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
 
                 lastErrorMessage = null
@@ -190,47 +189,8 @@ class RemotePageUpscaler(
 
     private fun normalizeResponseImage(
         responseBytes: ByteArray,
-        preparedImage: PreparedImage,
     ): ByteArray? {
-        val remoteModel = readerPreferences.remoteAiModel.get()
-        if (remoteModel.companionScale <= TARGET_SCALE) {
-            return responseBytes
-        }
-
-        val targetWidth = (preparedImage.width * TARGET_SCALE).coerceAtLeast(1)
-        val targetHeight = (preparedImage.height * TARGET_SCALE).coerceAtLeast(1)
-        val decodedBitmap = BitmapFactory.decodeByteArray(responseBytes, 0, responseBytes.size)
-        if (decodedBitmap == null) {
-            lastErrorMessage = "Failed to decode remote AI image for size normalization"
-            return null
-        }
-
-        return try {
-            val bitmapToEncode =
-                if (decodedBitmap.width == targetWidth && decodedBitmap.height == targetHeight) {
-                    decodedBitmap
-                } else {
-                    Bitmap.createScaledBitmap(decodedBitmap, targetWidth, targetHeight, true)
-                }
-
-            try {
-                ByteArrayOutputStream().use { output ->
-                    check(bitmapToEncode.compress(Bitmap.CompressFormat.JPEG, REMOTE_JPEG_QUALITY, output)) {
-                        "Failed to encode normalized remote AI image"
-                    }
-                    output.toByteArray()
-                }
-            } finally {
-                if (bitmapToEncode !== decodedBitmap) {
-                    bitmapToEncode.recycle()
-                }
-            }
-        } catch (e: Throwable) {
-            lastErrorMessage = e.message ?: "Failed to normalize remote AI image size"
-            null
-        } finally {
-            decodedBitmap.recycle()
-        }
+        return responseBytes
     }
 
     private fun decodeImageSize(sourceBytes: ByteArray): ImageSize? {
@@ -320,8 +280,6 @@ class RemotePageUpscaler(
 
     companion object {
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
-        private const val TARGET_SCALE = 2
-        private const val REMOTE_JPEG_QUALITY = 95
     }
 }
 

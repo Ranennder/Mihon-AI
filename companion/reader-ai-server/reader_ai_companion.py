@@ -108,7 +108,7 @@ class Config:
     gpu_id: int = 0
     jobs: str = "1:2:2"
     timeout_seconds: int = 180
-    max_workers: int = 2
+    max_workers: int = 1
     max_request_megabytes: int = 32
 
     @classmethod
@@ -191,7 +191,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             model_name=model_name,
             default_scale=self.config.scale,
         )
-        target_scale = max(1, int(self.config.scale))
+        target_scale = native_scale
 
         if _requires_chunked_upscale(
             body=body,
