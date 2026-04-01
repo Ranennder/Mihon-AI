@@ -71,6 +71,7 @@ _LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\
 _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
+_REQUEST_DISPLAY_LABELS: dict[str, str] = {}
 _ANSI_RESET = "\x1b[0m"
 _ANSI_DIM = "\x1b[2m"
 _ANSI_BOLD = "\x1b[1m"
@@ -192,8 +193,12 @@ class ChapterUpscaleJob:
     input_dir: Path
     output_dir: Path
     pages: dict[int, PreparedChapterPage]
+    manga_title: str | None = None
+    chapter_title: str | None = None
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
     error: Exception | None = None
+    ready_pages: set[int] = field(default_factory=set, repr=False)
+    state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def resolve_output_path(self, page_index: int) -> Path | None:
         prepared_page = self.pages.get(page_index)
@@ -203,6 +208,18 @@ class ChapterUpscaleJob:
             self.output_dir / f"{prepared_page.input_path.stem}.{self.batch_output_format}",
             self.batch_output_format,
         )
+
+    @property
+    def total_pages(self) -> int:
+        return len(self.pages)
+
+    @property
+    def display_label(self) -> str:
+        title = (self.manga_title or "").strip()
+        chapter = (self.chapter_title or "").strip()
+        if title and chapter:
+            return f"{title} - {chapter}"
+        return title or chapter or f"Chapter {self.job_id}"
 
 
 @dataclass(frozen=True)
@@ -295,6 +312,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         archive_path: Path,
         requested_output_format: str,
         model_name: str,
+        manga_title: str | None,
+        chapter_title: str | None,
     ) -> ChapterUpscaleJob:
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
@@ -329,6 +348,8 @@ class ReaderAiServer(ThreadingHTTPServer):
             input_dir=input_dir,
             output_dir=output_dir,
             pages=pages,
+            manga_title=manga_title,
+            chapter_title=chapter_title,
         )
         with self._chapter_jobs_lock:
             self._chapter_jobs[job_id] = job
@@ -361,6 +382,27 @@ class ReaderAiServer(ThreadingHTTPServer):
             raise FileNotFoundError(f"Chapter page {page_index} is not available")
 
         return None
+
+    def note_chapter_page_ready(self, job_id: str, page_index: int) -> None:
+        with self._chapter_jobs_lock:
+            job = self._chapter_jobs.get(job_id)
+        if job is None:
+            return
+
+        with job.state_lock:
+            if page_index in job.ready_pages:
+                return
+            job.ready_pages.add(page_index)
+            ready_count = len(job.ready_pages)
+
+        if _should_log_chapter_ready_count(ready_count, job.total_pages):
+            _emit_log_line(
+                (
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
+                    f"[{job.request_id}] {job.display_label} - Ready {ready_count}/{job.total_pages} "
+                    f"(page {page_index + 1}/{job.total_pages})"
+                ),
+            )
 
     def _worker_loop(self, workspace: Path) -> None:
         backlog: list[Any] = []
@@ -477,8 +519,8 @@ class ReaderAiServer(ThreadingHTTPServer):
             _emit_log_line(
                 (
                     f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
-                    f"[{job.request_id}] Starting chapter job {job.job_id} "
-                    f"with {len(job.pages)} pages ({job.model_name} -> {job.batch_output_format})"
+                    f"[{job.request_id}] {job.display_label} - Starting chapter upscale "
+                    f"(0/{job.total_pages}, {job.model_name} -> {job.batch_output_format})"
                 ),
             )
             completed = _run_logged_subprocess(
@@ -486,6 +528,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                 command=command,
                 cwd=binary.parent,
                 timeout=max(self.config.timeout_seconds, 1800),
+                display_label=job.display_label,
             )
             if completed.returncode != 0:
                 raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
@@ -517,10 +560,13 @@ class ReaderAiServer(ThreadingHTTPServer):
                     f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
                 )
                 fallback_output_path.write_bytes(processed_image.bytes)
+            _emit_log_line(
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale finished",
+            )
         except Exception as exc:  # noqa: BLE001
             job.error = exc
             _emit_log_line(
-                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] Chapter job {job.job_id} failed: {exc}",
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale failed: {exc}",
             )
         finally:
             job.completed.set()
@@ -611,6 +657,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        self.server.note_chapter_page_ready(job_id, int(page_index_text))
         self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -742,6 +789,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
         output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
         requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
+        manga_title = (self.headers.get("X-Reader-AI-Manga-Title") or "").strip() or None
+        chapter_title = (self.headers.get("X-Reader-AI-Chapter-Title") or "").strip() or None
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
             self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
             return
@@ -755,15 +804,6 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         request_id = self.server.next_request_id()
-        self.log_message(
-            "[%s] Accepted chapter upscale request: %d bytes archive=%s output=%s model=%s from %s",
-            request_id,
-            body_size,
-            archive_format,
-            output_format,
-            model_name,
-            self.client_address[0],
-        )
 
         upload_workspace = self.server._workspace_root / "incoming-chapters"
         upload_workspace.mkdir(parents=True, exist_ok=True)
@@ -785,6 +825,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 archive_path=archive_path,
                 requested_output_format=output_format,
                 model_name=model_name,
+                manga_title=manga_title,
+                chapter_title=chapter_title,
             )
         except zipfile.BadZipFile:
             self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is not a valid zip file")
@@ -795,6 +837,17 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
         finally:
             archive_path.unlink(missing_ok=True)
+
+        self.log_message(
+            "[%s] Accepted chapter upscale request: %s (%d pages, %d bytes, model=%s, output=%s) from %s",
+            request_id,
+            chapter_job.display_label,
+            chapter_job.total_pages,
+            body_size,
+            model_name,
+            output_format,
+            self.client_address[0],
+        )
 
         self._send_json(
             HTTPStatus.ACCEPTED,
@@ -807,7 +860,12 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         )
 
     def log_message(self, format: str, *args: Any) -> None:
-        _emit_log_line("[%s] %s" % (self.log_date_time_string(), format % args))
+        message = format % args
+        console = not (
+            message.startswith('"GET /api/upscale-chapter/')
+            or message.startswith('"GET /health ')
+        )
+        _emit_log_line("[%s] %s" % (self.log_date_time_string(), message), console=console)
 
     def _authorize(self) -> bool:
         token = self.server.config.token.strip()
@@ -1154,7 +1212,9 @@ def _run_logged_subprocess(
     command: list[str],
     cwd: Path,
     timeout: int,
+    display_label: str | None = None,
 ) -> SubprocessRunResult:
+    _set_request_display_label(request_id, display_label)
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -1187,11 +1247,13 @@ def _run_logged_subprocess(
     except subprocess.TimeoutExpired:
         process.kill()
         reader_thread.join(timeout=1)
+        _set_request_display_label(request_id, None)
         raise
 
     reader_thread.join(timeout=1)
     if process.stdout is not None:
         process.stdout.close()
+    _set_request_display_label(request_id, None)
     details = "\n".join(output_lines).strip() or f"exit code {returncode}"
     return SubprocessRunResult(returncode=returncode, details=details)
 
@@ -1549,6 +1611,14 @@ def _should_surface_subprocess_console_line(line: str) -> bool:
     return False
 
 
+def _should_log_chapter_ready_count(ready_count: int, total_pages: int) -> bool:
+    if ready_count <= 3:
+        return True
+    if ready_count >= total_pages:
+        return True
+    return ready_count % 5 == 0
+
+
 def _enable_console_styling() -> None:
     global _CONSOLE_STYLING_ENABLED
     console = getattr(sys, "__stdout__", None) or sys.stdout
@@ -1592,6 +1662,20 @@ def _request_style(request_id: str) -> str:
     return palette[sum(ord(char) for char in request_id) % len(palette)]
 
 
+def _set_request_display_label(request_id: str, label: str | None) -> None:
+    normalized = (label or "").strip()
+    with _LOG_LOCK:
+        if normalized:
+            _REQUEST_DISPLAY_LABELS[request_id] = normalized
+        else:
+            _REQUEST_DISPLAY_LABELS.pop(request_id, None)
+
+
+def _get_request_display_label(request_id: str) -> str | None:
+    with _LOG_LOCK:
+        return _REQUEST_DISPLAY_LABELS.get(request_id)
+
+
 def _build_progress_bar(percent: float, width: int = 24) -> str:
     bounded = max(0.0, min(100.0, percent))
     filled = int(round((bounded / 100.0) * width))
@@ -1624,6 +1708,8 @@ def _format_console_body(body: str) -> str:
         return _ansi(body, _ANSI_BOLD, _ANSI_RED)
     if body.startswith("Mihon AI companion listening") or lowered.startswith("processed ") or " was closed" in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_GREEN)
+    if "accepted chapter upscale request" in lowered or "starting chapter upscale" in lowered or " - ready " in lowered:
+        return _ansi(body, _ANSI_BOLD, _ANSI_CYAN)
     if "accepted upscale request" in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_CYAN)
     if "force-closing" in lowered or "client disconnected" in lowered or "vanished while closing" in lowered:
@@ -1690,6 +1776,9 @@ def _format_inline_progress_message(message: str) -> str | None:
         prefix_parts.append(_ansi(f"[{timestamp_text}]", _ANSI_DIM))
     if request_id is not None:
         prefix_parts.append(_ansi(f"[{request_id}]", _ANSI_BOLD, _request_style(request_id)))
+        display_label = _get_request_display_label(request_id)
+        if display_label:
+            prefix_parts.append(_ansi(display_label, _ANSI_WHITE))
     prefix = (" ".join(prefix_parts) + " ") if prefix_parts else ""
     return prefix + _format_console_body(body)
 

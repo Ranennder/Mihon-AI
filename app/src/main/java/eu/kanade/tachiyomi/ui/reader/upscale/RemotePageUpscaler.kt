@@ -55,7 +55,10 @@ class RemotePageUpscaler(
         )
     }
 
-    fun startChapterJob(pages: List<PreparedChapterUploadPage>): StartedChapterJob? {
+    fun startChapterJob(
+        pages: List<PreparedChapterUploadPage>,
+        metadata: ChapterJobMetadata? = null,
+    ): StartedChapterJob? {
         lastErrorMessage = null
         if (pages.isEmpty()) {
             lastErrorMessage = "Chapter upload is empty"
@@ -72,6 +75,7 @@ class RemotePageUpscaler(
         val initialAttempt = runStartChapterJobRequest(
             baseUrlResolution = baseUrlResolution,
             pages = pages,
+            metadata = metadata,
         )
         if (initialAttempt.job != null) {
             return initialAttempt.job
@@ -89,6 +93,7 @@ class RemotePageUpscaler(
         return runStartChapterJobRequest(
             baseUrlResolution = rediscoveredBaseUrl,
             pages = pages,
+            metadata = metadata,
         ).job
     }
 
@@ -180,6 +185,7 @@ class RemotePageUpscaler(
     private fun runStartChapterJobRequest(
         baseUrlResolution: RemoteAiServerDiscovery.Resolution,
         pages: List<PreparedChapterUploadPage>,
+        metadata: ChapterJobMetadata?,
     ): ChapterJobAttempt {
         val requestUrl = "${baseUrlResolution.baseUrl}/api/upscale-chapter".toHttpUrlOrNull()
         if (requestUrl == null) {
@@ -195,10 +201,19 @@ class RemotePageUpscaler(
                 .header("X-Reader-AI-Archive-Format", REMOTE_ARCHIVE_FORMAT)
                 .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
                 .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
+                .header("X-Reader-AI-Page-Count", metadata?.totalPages?.toString() ?: pages.size.toString())
 
             readerPreferences.remoteAiToken.get().trim()
                 .takeIf { it.isNotEmpty() }
                 ?.let { requestBuilder.header("X-Reader-AI-Token", it) }
+            metadata?.mangaTitle
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { requestBuilder.header("X-Reader-AI-Manga-Title", it) }
+            metadata?.chapterTitle
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", it) }
 
             val request = requestBuilder
                 .post(archiveFile.asRequestBody(REMOTE_ARCHIVE_MEDIA_TYPE.toMediaType()))
@@ -422,6 +437,12 @@ class RemotePageUpscaler(
         val pageIndex: Int,
         val bytes: ByteArray,
         val extension: String,
+    )
+
+    data class ChapterJobMetadata(
+        val mangaTitle: String?,
+        val chapterTitle: String?,
+        val totalPages: Int,
     )
 
     data class StartedChapterJob(

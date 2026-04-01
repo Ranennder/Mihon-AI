@@ -42,6 +42,7 @@ class ReaderPageUpscaler(
     private val scheduledJobs = ConcurrentHashMap<String, Job>()
     private val forcedBlockingPages = ConcurrentHashMap<String, Unit>()
     private val remoteChapterJobs = ConcurrentHashMap<String, RemoteChapterPrefetchJob>()
+    private val remoteChapterMetadata = ConcurrentHashMap<String, RemotePageUpscaler.ChapterJobMetadata>()
     private val remoteQueuedPages = LinkedHashMap<String, RemotePrefetchTask>()
     private val remoteQueueMutex = Mutex()
     private val remotePrefetchSignal = Channel<Unit>(Channel.CONFLATED)
@@ -214,7 +215,10 @@ class ReaderPageUpscaler(
         scheduledJobs[cachePath] = scheduledJob
     }
 
-    fun scheduleWholeChapterRemotePrefetch(pages: List<ReaderPage>) {
+    fun scheduleWholeChapterRemotePrefetch(
+        pages: List<ReaderPage>,
+        mangaTitle: String? = null,
+    ) {
         if (!isEnabled() || !isRemoteWholeChapterModeSelected() || pages.isEmpty()) {
             return
         }
@@ -233,6 +237,18 @@ class ReaderPageUpscaler(
             mangaId = mangaId,
             chapterId = chapterId,
         )
+        val chapterTitle = chapter.name
+            .trim()
+            .takeIf { it.isNotEmpty() }
+        val resolvedMangaTitle = mangaTitle
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: remoteChapterMetadata[jobKey]?.mangaTitle
+        remoteChapterMetadata[jobKey] = RemotePageUpscaler.ChapterJobMetadata(
+            mangaTitle = resolvedMangaTitle,
+            chapterTitle = chapterTitle,
+            totalPages = pages.size,
+        )
         val existingJob = remoteChapterJobs[jobKey]
         if (existingJob?.job?.isActive == true) {
             return
@@ -245,6 +261,7 @@ class ReaderPageUpscaler(
                 logcat(LogPriority.WARN, e) { "Failed to prefetch whole chapter via remote AI ($chapterId)" }
             } finally {
                 remoteChapterJobs.remove(jobKey)
+                remoteChapterMetadata.remove(jobKey)
             }
         }
         remoteChapterJobs[jobKey] = RemoteChapterPrefetchJob(
@@ -353,6 +370,12 @@ class ReaderPageUpscaler(
                 return@removeIf false
             }
             chapterJob.job.cancel()
+            remoteChapterMetadata.remove(
+                buildRemoteChapterJobKey(
+                    mangaId = chapterJob.mangaId,
+                    chapterId = chapterJob.chapterId,
+                ),
+            )
             true
         }
     }
@@ -512,7 +535,24 @@ class ReaderPageUpscaler(
             return
         }
 
-        val chapterJob = remotePageUpscaler.startChapterJob(preparedPages) ?: return
+        val firstTarget = pendingTargets.first()
+        val chapter = firstTarget.page.chapter.chapter
+        val chapterId = chapter.id ?: return
+        val mangaId = chapter.manga_id ?: 0L
+        val chapterJobKey = buildRemoteChapterJobKey(
+            mangaId = mangaId,
+            chapterId = chapterId,
+        )
+        val chapterMetadata = remoteChapterMetadata[chapterJobKey] ?: RemotePageUpscaler.ChapterJobMetadata(
+            mangaTitle = null,
+            chapterTitle = chapter.name.trim().takeIf { it.isNotEmpty() },
+            totalPages = cacheTargets.size,
+        )
+
+        val chapterJob = remotePageUpscaler.startChapterJob(
+            pages = preparedPages,
+            metadata = chapterMetadata,
+        ) ?: return
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
         repeat(2_400) {
             val iterator = remainingTargets.iterator()

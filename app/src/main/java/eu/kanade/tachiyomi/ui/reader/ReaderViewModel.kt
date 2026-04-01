@@ -876,7 +876,10 @@ class ReaderViewModel @JvmOverloads constructor(
         }
 
         readerPageUpscaler.retainScheduledPrefetches(pages)
-        readerPageUpscaler.scheduleWholeChapterRemotePrefetch(pages)
+        readerPageUpscaler.scheduleWholeChapterRemotePrefetch(
+            pages = pages,
+            mangaTitle = manga?.title,
+        )
     }
 
     private fun shouldQueueWholeChapterForRemote(chapter: ReaderChapter): Boolean {
