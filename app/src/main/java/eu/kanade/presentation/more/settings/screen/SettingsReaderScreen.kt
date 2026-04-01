@@ -167,6 +167,14 @@ object SettingsReaderScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_reader_ai_remote_model),
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
                 ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = readerPreferences.remoteAiBatchMode,
+                    entries = ReaderPreferences.RemoteAiBatchMode.entries
+                        .associateWith { stringResource(it.titleRes) }
+                        .toImmutableMap(),
+                    title = stringResource(MR.strings.pref_reader_ai_remote_batch_mode),
+                    enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                ),
                 Preference.PreferenceItem.EditTextPreference(
                     preference = readerPreferences.remoteAiToken,
                     title = stringResource(MR.strings.pref_reader_ai_remote_token),

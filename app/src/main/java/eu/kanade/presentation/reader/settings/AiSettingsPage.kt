@@ -23,6 +23,7 @@ internal fun ColumnScope.AiPage(screenModel: ReaderSettingsScreenModel) {
     val remoteAiDiscoveredBaseUrl by screenModel.preferences.remoteAiDiscoveredBaseUrl.collectAsState()
     val remoteAiToken by screenModel.preferences.remoteAiToken.collectAsState()
     val remoteAiModel by screenModel.preferences.remoteAiModel.collectAsState()
+    val remoteAiBatchMode by screenModel.preferences.remoteAiBatchMode.collectAsState()
     val aiBackendMode = ReaderPreferences.normalizeAiBackendMode(rawAiBackendMode)
     val remoteAiStatus = remoteAiServerStatusText(
         manualUrl = remoteAiBaseUrl,
@@ -51,6 +52,15 @@ internal fun ColumnScope.AiPage(screenModel: ReaderSettingsScreenModel) {
                     selected = remoteAiModel == model,
                     onClick = { screenModel.setRemoteAiModel(model) },
                     label = { Text(stringResource(model.titleRes)) },
+                )
+            }
+        }
+        SettingsChipRow(MR.strings.pref_reader_ai_remote_batch_mode) {
+            ReaderPreferences.RemoteAiBatchMode.entries.forEach { batchMode ->
+                FilterChip(
+                    selected = remoteAiBatchMode == batchMode,
+                    onClick = { screenModel.preferences.remoteAiBatchMode.set(batchMode) },
+                    label = { Text(stringResource(batchMode.titleRes)) },
                 )
             }
         }

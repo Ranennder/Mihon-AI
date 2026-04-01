@@ -85,6 +85,7 @@ class RemotePageUpscaler(
             .header("X-Reader-AI-Input-Format", preparedImage.extension)
             .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
             .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
+            .header("X-Reader-AI-Batch-Size", readerPreferences.remoteAiBatchMode.get().requestBatchSize.toString())
 
         readerPreferences.remoteAiToken.get().trim()
             .takeIf { it.isNotEmpty() }

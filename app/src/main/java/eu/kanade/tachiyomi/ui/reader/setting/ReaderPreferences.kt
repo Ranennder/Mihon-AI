@@ -78,6 +78,8 @@ class ReaderPreferences(
     val remoteAiToken: Preference<String> = preferenceStore.getString("pref_reader_ai_remote_token", "")
     val remoteAiModel: Preference<RemoteAiModel> =
         preferenceStore.getEnum("pref_reader_ai_remote_model", RemoteAiModel.FAST)
+    val remoteAiBatchMode: Preference<RemoteAiBatchMode> =
+        preferenceStore.getEnum("pref_reader_ai_remote_batch_mode", RemoteAiBatchMode.SINGLE)
     val remoteAiDiscoveredBaseUrl: Preference<String> =
         preferenceStore.getString(Preference.appStateKey("reader_ai_remote_discovered_url"), "")
 
@@ -248,6 +250,20 @@ class ReaderPreferences(
             companionModelName = "realesrgan-x4plus-anime",
             cacheKey = "detailed-native4",
             companionScale = 4,
+        ),
+    }
+
+    enum class RemoteAiBatchMode(
+        val titleRes: StringResource,
+        val requestBatchSize: Int,
+    ) {
+        SINGLE(
+            titleRes = MR.strings.reader_ai_remote_batch_mode_single,
+            requestBatchSize = 1,
+        ),
+        FOUR(
+            titleRes = MR.strings.reader_ai_remote_batch_mode_four,
+            requestBatchSize = 4,
         ),
     }
 

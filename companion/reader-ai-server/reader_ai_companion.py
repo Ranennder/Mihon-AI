@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import ctypes
 import json
 import itertools
@@ -11,12 +10,13 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -49,6 +49,7 @@ SUPPORTED_MODELS = {
     },
 }
 SUPPORTED_MODEL_NAMES = tuple(SUPPORTED_MODELS.keys())
+SUPPORTED_BATCH_SIZES = (1, 4)
 JPEG_MAX_DIMENSION = 65535
 JPEG_OUTPUT_FORMATS = {"jpg", "jpeg"}
 PNG_OUTPUT_FORMAT = "png"
@@ -58,6 +59,7 @@ MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
 LOG_FILE_NAME = "companion.log"
+_STOP_PROCESSING = object()
 _LOG_LOCK = threading.Lock()
 _LOG_FILE_HANDLE: Any | None = None
 _CONSOLE_STYLING_ENABLED = False
@@ -109,6 +111,8 @@ class Config:
     jobs: str = "1:2:2"
     timeout_seconds: int = 180
     max_workers: int = 1
+    batch_size: int = 1
+    batch_wait_milliseconds: int = 200
     max_request_megabytes: int = 32
 
     @classmethod
@@ -121,6 +125,8 @@ class Config:
 
         merged = {**data, **{key: value for key, value in overrides.items() if value is not None}}
         config = cls(**merged)
+        config.batch_size = _normalize_batch_size(config.batch_size)
+        config.batch_wait_milliseconds = max(0, int(config.batch_wait_milliseconds))
         config.binary = str(_resolve_runtime_binary(config.binary, base_dir))
         config.model_dir = str(_resolve_model_dir(config.model_dir, base_dir))
         return config
@@ -130,6 +136,29 @@ class Config:
 class ProcessedImage:
     bytes: bytes
     output_format: str
+
+
+@dataclass
+class PendingUpscaleRequest:
+    request_id: str
+    body: bytes
+    input_format: str
+    requested_output_format: str
+    model_name: str
+    native_scale: int
+    preferred_output_format: str | None
+    batch_size: int
+    is_chunked: bool
+    enqueued_at: float = field(default_factory=time.perf_counter)
+    completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    result: ProcessedImage | None = None
+    error: Exception | None = None
+
+    @property
+    def batch_key(self) -> tuple[str, str, int] | None:
+        if self.is_chunked or self.preferred_output_format is None or self.batch_size <= 1:
+            return None
+        return (self.model_name, self.preferred_output_format, self.native_scale)
 
 
 @dataclass(frozen=True)
@@ -150,15 +179,22 @@ class ReaderAiServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], config: Config):
         super().__init__(server_address, ReaderAiRequestHandler)
         self.config = config
-        self.processing_slots = threading.Semaphore(config.max_workers)
         self._workspace_root_owner = tempfile.TemporaryDirectory(prefix="mihon-ai-server-")
         self._workspace_root = Path(self._workspace_root_owner.name)
-        self._workspaces: queue.SimpleQueue[Path] = queue.SimpleQueue()
         self._request_sequence = itertools.count(1)
+        self._processing_queue: queue.Queue[Any] = queue.Queue()
+        self._worker_threads: list[threading.Thread] = []
         for worker_index in range(max(1, config.max_workers)):
             workspace = self._workspace_root / f"worker-{worker_index}"
             workspace.mkdir(parents=True, exist_ok=True)
-            self._workspaces.put(workspace)
+            thread = threading.Thread(
+                target=self._worker_loop,
+                args=(workspace,),
+                name=f"reader-ai-worker-{worker_index}",
+                daemon=True,
+            )
+            thread.start()
+            self._worker_threads.append(thread)
 
     def process_image(
         self,
@@ -167,22 +203,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         input_format: str,
         output_format: str,
         model_name: str,
-    ) -> ProcessedImage:
-        with self.processing_slots:
-            with self._borrow_workspace() as workspace:
-                return self._process_image_in_workspace(request_id, workspace, body, input_format, output_format, model_name)
-
-    def next_request_id(self) -> str:
-        return f"req-{next(self._request_sequence):05d}"
-
-    def _process_image_in_workspace(
-        self,
-        request_id: str,
-        workspace: Path,
-        body: bytes,
-        input_format: str,
-        output_format: str,
-        model_name: str,
+        batch_size: int,
     ) -> ProcessedImage:
         if self.config.mode == "mock_copy":
             return ProcessedImage(body, output_format)
@@ -192,47 +213,129 @@ class ReaderAiServer(ThreadingHTTPServer):
             default_scale=self.config.scale,
         )
         target_scale = native_scale
-
-        if _requires_chunked_upscale(
+        is_chunked = _requires_chunked_upscale(
             body=body,
             native_scale=native_scale,
             target_scale=target_scale,
-        ):
-            return _run_chunked_subprocess(
-                config=self.config,
-                request_id=request_id,
-                workspace=workspace,
-                body=body,
-                requested_output_format=output_format,
-                model_name=model_name,
-                native_scale=native_scale,
-                target_scale=target_scale,
-            )
+        )
+        preferred_output_format = None if is_chunked else _select_output_format(
+            body=body,
+            requested_output_format=output_format,
+            scale=native_scale,
+        )
 
-        return _run_subprocess(
-            config=self.config,
+        request = PendingUpscaleRequest(
             request_id=request_id,
-            workspace=workspace,
             body=body,
             input_format=input_format,
             requested_output_format=output_format,
             model_name=model_name,
-            scale=native_scale,
+            native_scale=native_scale,
+            preferred_output_format=preferred_output_format,
+            batch_size=batch_size,
+            is_chunked=is_chunked,
         )
+        self._processing_queue.put(request)
+        request.completed.wait()
 
-    @contextlib.contextmanager
-    def _borrow_workspace(self) -> Any:
-        workspace = self._workspaces.get()
+        if request.error is not None:
+            raise request.error
+        if request.result is None:
+            raise RuntimeError("Upscale request completed without a result")
+        return request.result
+
+    def next_request_id(self) -> str:
+        return f"req-{next(self._request_sequence):05d}"
+
+    def _worker_loop(self, workspace: Path) -> None:
+        backlog: list[Any] = []
+        while True:
+            request = self._take_next_request(backlog)
+            if request is _STOP_PROCESSING:
+                return
+
+            batch = [request]
+            try:
+                if request.batch_key is not None:
+                    batch = self._collect_batch(request, backlog)
+                    if len(batch) > 1:
+                        _emit_log_line(
+                            (
+                                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
+                                f"Starting remote batch of {len(batch)} requests "
+                                f"(size={request.batch_size}, wait={self._describe_batch_wait(batch)}): "
+                                f"{', '.join(item.request_id for item in batch)}"
+                            ),
+                        )
+                    results = _run_subprocess_batch(
+                        config=self.config,
+                        workspace=workspace,
+                        requests=batch,
+                    )
+                    for item in batch:
+                        item.result = results[item.request_id]
+                else:
+                    request.result = _process_single_request_in_workspace(
+                        config=self.config,
+                        workspace=workspace,
+                        request=request,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                for item in batch:
+                    item.error = exc
+            finally:
+                for item in batch:
+                    item.completed.set()
+
+    def _collect_batch(
+        self,
+        first_request: PendingUpscaleRequest,
+        backlog: list[Any],
+    ) -> list[PendingUpscaleRequest]:
+        batch = [first_request]
+        deadline = time.perf_counter() + (self.config.batch_wait_milliseconds / 1000)
+        while len(batch) < first_request.batch_size:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            next_request = self._take_next_request(backlog, timeout=remaining)
+            if next_request is None:
+                break
+            if next_request is _STOP_PROCESSING:
+                backlog.append(next_request)
+                break
+            if next_request.batch_key != first_request.batch_key:
+                backlog.append(next_request)
+                break
+            batch.append(next_request)
+        return batch
+
+    def _take_next_request(
+        self,
+        backlog: list[Any],
+        timeout: float | None = None,
+    ) -> Any:
+        if backlog:
+            return backlog.pop(0)
         try:
-            yield workspace
-        finally:
-            _clear_workspace_files(workspace)
-            self._workspaces.put(workspace)
+            return self._processing_queue.get(timeout=timeout) if timeout is not None else self._processing_queue.get()
+        except queue.Empty:
+            return None
+
+    def _describe_batch_wait(self, batch: list[PendingUpscaleRequest]) -> str:
+        waits = [max(0, int((time.perf_counter() - item.enqueued_at) * 1000)) for item in batch]
+        if not waits:
+            return "0ms"
+        return f"{min(waits)}-{max(waits)}ms"
 
     def server_close(self) -> None:
         try:
             super().server_close()
         finally:
+            for _ in self._worker_threads:
+                self._processing_queue.put(_STOP_PROCESSING)
+            for worker_thread in self._worker_threads:
+                worker_thread.join(timeout=1)
             self._workspace_root_owner.cleanup()
 
     def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
@@ -263,6 +366,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             "tile_size": self.server.config.tile_size,
             "gpu_id": self.server.config.gpu_id,
             "model_name": self.server.config.model_name,
+            "batch_size": self.server.config.batch_size,
+            "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
             "supported_models": list(SUPPORTED_MODEL_NAMES),
             "model_profiles": SUPPORTED_MODELS,
         }
@@ -300,6 +405,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         input_format = (self.headers.get("X-Reader-AI-Input-Format") or "jpg").lower().strip(".")
         output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
         requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
+        requested_batch_size = (self.headers.get("X-Reader-AI-Batch-Size") or "").strip()
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
             self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
             return
@@ -313,21 +419,31 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
+        try:
+            batch_size = _resolve_requested_batch_size(
+                requested_batch_size=requested_batch_size,
+                default_batch_size=self.server.config.batch_size,
+            )
+        except ValueError as exc:
+            self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+
         request_id = self.server.next_request_id()
         self.log_message(
-            "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s from %s",
+            "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s batch=%d from %s",
             request_id,
             body_size,
             input_format,
             output_format,
             model_name,
+            batch_size,
             self.client_address[0],
         )
 
         started_at = time.perf_counter()
         body = self.rfile.read(body_size)
         try:
-            processed_image = self.server.process_image(request_id, body, input_format, output_format, model_name)
+            processed_image = self.server.process_image(request_id, body, input_format, output_format, model_name, batch_size)
         except subprocess.TimeoutExpired as exc:
             self.log_message("[%s] Upscale timeout after %s seconds", request_id, exc.timeout)
             self._send_text(HTTPStatus.GATEWAY_TIMEOUT, f"Upscale process timed out after {exc.timeout} seconds")
@@ -395,6 +511,41 @@ def _run_subprocess(
     model_name: str,
     scale: int,
 ) -> ProcessedImage:
+    request = PendingUpscaleRequest(
+        request_id=request_id,
+        body=body,
+        input_format=input_format,
+        requested_output_format=requested_output_format,
+        model_name=model_name,
+        native_scale=scale,
+        preferred_output_format=None,
+        batch_size=1,
+        is_chunked=False,
+    )
+    return _process_single_request_in_workspace(
+        config=config,
+        workspace=workspace,
+        request=request,
+    )
+
+
+def _process_single_request_in_workspace(
+    config: Config,
+    workspace: Path,
+    request: PendingUpscaleRequest,
+) -> ProcessedImage:
+    if request.is_chunked:
+        return _run_chunked_subprocess(
+            config=config,
+            request_id=request.request_id,
+            workspace=workspace,
+            body=request.body,
+            requested_output_format=request.requested_output_format,
+            model_name=request.model_name,
+            native_scale=request.native_scale,
+            target_scale=request.native_scale,
+        )
+
     binary = Path(config.binary)
     model_dir = Path(config.model_dir)
 
@@ -403,44 +554,147 @@ def _run_subprocess(
     if not model_dir.is_dir():
         raise RuntimeError(f"Model directory not found: {model_dir}")
 
-    preferred_output_format = _select_output_format(
-        body=body,
-        requested_output_format=requested_output_format,
-        scale=scale,
+    preferred_output_format = request.preferred_output_format or _select_output_format(
+        body=request.body,
+        requested_output_format=request.requested_output_format,
+        scale=request.native_scale,
     )
 
     try:
         return _run_subprocess_once(
             config=config,
-            request_id=request_id,
+            request_id=request.request_id,
             workspace=workspace,
             binary=binary,
             model_dir=model_dir,
-            body=body,
-            input_format=input_format,
+            body=request.body,
+            input_format=request.input_format,
             output_format=preferred_output_format,
-            model_name=model_name,
-            scale=scale,
+            model_name=request.model_name,
+            scale=request.native_scale,
         )
     except RuntimeError as exc:
         if (
             preferred_output_format in JPEG_OUTPUT_FORMATS
-            and requested_output_format in JPEG_OUTPUT_FORMATS
+            and request.requested_output_format in JPEG_OUTPUT_FORMATS
             and _should_retry_with_png(str(exc))
         ):
             return _run_subprocess_once(
                 config=config,
-                request_id=request_id,
+                request_id=request.request_id,
                 workspace=workspace,
                 binary=binary,
                 model_dir=model_dir,
-                body=body,
-                input_format=input_format,
+                body=request.body,
+                input_format=request.input_format,
                 output_format=PNG_OUTPUT_FORMAT,
-                model_name=model_name,
-                scale=scale,
+                model_name=request.model_name,
+                scale=request.native_scale,
             )
         raise
+
+
+def _run_subprocess_batch(
+    config: Config,
+    workspace: Path,
+    requests: list[PendingUpscaleRequest],
+) -> dict[str, ProcessedImage]:
+    if not requests:
+        return {}
+
+    binary = Path(config.binary)
+    model_dir = Path(config.model_dir)
+    if not binary.is_file():
+        raise RuntimeError(f"Upscale binary not found: {binary}")
+    if not model_dir.is_dir():
+        raise RuntimeError(f"Model directory not found: {model_dir}")
+
+    _clear_workspace_files(workspace)
+    input_dir = workspace / "batch-in"
+    output_dir = workspace / "batch-out"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    batch_output_format = requests[0].preferred_output_format or PNG_OUTPUT_FORMAT
+    scale = requests[0].native_scale
+    model_name = requests[0].model_name
+
+    stems_by_request_id: dict[str, str] = {}
+    for index, request in enumerate(requests, start=1):
+        stem = f"{index:02d}-{request.request_id}"
+        stems_by_request_id[request.request_id] = stem
+        input_path = input_dir / f"{stem}.{_sanitize_extension(request.input_format)}"
+        input_path.write_bytes(request.body)
+
+    command = [
+        str(binary),
+        "-i",
+        str(input_dir),
+        "-o",
+        str(output_dir),
+        "-s",
+        str(scale),
+        "-t",
+        str(config.tile_size),
+        "-m",
+        str(model_dir),
+        "-f",
+        batch_output_format,
+        "-g",
+        str(config.gpu_id),
+        "-j",
+        config.jobs,
+    ]
+    if model_name and _supports_model_name_flag(binary):
+        command.extend(["-n", model_name])
+
+    request_label = ",".join(request.request_id for request in requests)
+    completed = _run_logged_subprocess(
+        request_id=request_label,
+        command=command,
+        cwd=binary.parent,
+        timeout=config.timeout_seconds,
+    )
+    details = completed.details
+    if completed.returncode != 0:
+        raise RuntimeError(f"Upscale process failed: {details}")
+
+    results: dict[str, ProcessedImage] = {}
+    missing_requests: list[PendingUpscaleRequest] = []
+    for request in requests:
+        produced_output_path = _resolve_produced_output_path(
+            output_dir / f"{stems_by_request_id[request.request_id]}.{batch_output_format}",
+            batch_output_format,
+        )
+        if produced_output_path is None or produced_output_path.stat().st_size == 0:
+            missing_requests.append(request)
+            continue
+        results[request.request_id] = ProcessedImage(
+            bytes=produced_output_path.read_bytes(),
+            output_format=_sanitize_extension(produced_output_path.suffix),
+        )
+
+    for request in missing_requests:
+        fallback_workspace = workspace / f"fallback-{request.request_id}"
+        fallback_workspace.mkdir(parents=True, exist_ok=True)
+        fallback_request = PendingUpscaleRequest(
+            request_id=f"{request.request_id}/fallback",
+            body=request.body,
+            input_format=request.input_format,
+            requested_output_format=request.requested_output_format,
+            model_name=request.model_name,
+            native_scale=request.native_scale,
+            preferred_output_format=request.preferred_output_format,
+            batch_size=1,
+            is_chunked=False,
+        )
+        results[request.request_id] = _process_single_request_in_workspace(
+            config=config,
+            workspace=fallback_workspace,
+            request=fallback_request,
+        )
+
+    return results
 
 
 def _run_subprocess_once(
@@ -574,10 +828,11 @@ def _run_logged_subprocess(
 
 
 def _clear_workspace_files(workspace: Path) -> None:
-    for pattern in ("input.*", "output.*", "output.*.*"):
-        for path in workspace.glob(pattern):
-            if path.is_file():
-                path.unlink(missing_ok=True)
+    for path in workspace.iterdir():
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.is_file():
+            path.unlink(missing_ok=True)
 
 
 def _should_retry_with_png(message: str) -> bool:
@@ -795,6 +1050,25 @@ def _resolve_requested_model_name(requested_model_name: str, default_model_name:
         raise ValueError(f"Unsupported model name: {requested_model_name}. Supported values: {supported}")
 
     return requested_model_name
+
+
+def _resolve_requested_batch_size(requested_batch_size: str, default_batch_size: int) -> int:
+    if not requested_batch_size:
+        return _normalize_batch_size(default_batch_size)
+
+    try:
+        parsed_value = int(requested_batch_size)
+    except ValueError as exc:
+        raise ValueError("Unsupported batch size. Supported values: 1 | 4") from exc
+
+    return _normalize_batch_size(parsed_value)
+
+
+def _normalize_batch_size(value: int) -> int:
+    if value not in SUPPORTED_BATCH_SIZES:
+        supported = " | ".join(str(item) for item in SUPPORTED_BATCH_SIZES)
+        raise ValueError(f"Unsupported batch size: {value}. Supported values: {supported}")
+    return value
 
 
 def _resolve_model_scale(model_name: str, default_scale: int) -> int:
@@ -1264,6 +1538,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--jobs")
     parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--max-workers", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--batch-wait-milliseconds", type=int)
     parser.add_argument("--max-request-megabytes", type=int)
     return parser.parse_args()
 
@@ -1296,6 +1572,8 @@ def main() -> int:
                 "jobs": args.jobs,
                 "timeout_seconds": args.timeout_seconds,
                 "max_workers": args.max_workers,
+                "batch_size": args.batch_size,
+                "batch_wait_milliseconds": args.batch_wait_milliseconds,
                 "max_request_megabytes": args.max_request_megabytes,
             },
         )
