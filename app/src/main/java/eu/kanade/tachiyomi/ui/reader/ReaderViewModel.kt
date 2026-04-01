@@ -951,6 +951,9 @@ class ReaderViewModel @JvmOverloads constructor(
                 }
                 val shouldUseBidirectionalBootstrap =
                     orderedVisiblePages.any { !readerPageUpscaler.hasCachedPage(it) } &&
+                        chapterPages.none(readerPageUpscaler::hasCachedPage) &&
+                        firstVisibleIndex > 0 &&
+                        lastVisibleIndex < chapterPages.lastIndex &&
                         hasUncachedBeforeVisible &&
                         hasUncachedAfterVisible
 
@@ -1016,11 +1019,17 @@ class ReaderViewModel @JvmOverloads constructor(
         val hasUncachedAfterAnchor = ((anchorIndex + 1)..pages.lastIndex).any { index ->
             !readerPageUpscaler.hasCachedPage(pages[index])
         }
+        val shouldUseBidirectionalBootstrap =
+            pages.none(readerPageUpscaler::hasCachedPage) &&
+                anchorIndex > 0 &&
+                anchorIndex < pages.lastIndex &&
+                hasUncachedBeforeAnchor &&
+                hasUncachedAfterAnchor
 
         return buildList {
             add(PrefetchRequest(page = pages[anchorIndex], lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE))
 
-            if (hasUncachedBeforeAnchor && hasUncachedAfterAnchor) {
+            if (shouldUseBidirectionalBootstrap) {
                 var distance = 1
                 while (anchorIndex - distance >= 0 || anchorIndex + distance <= pages.lastIndex) {
                     val previousIndex = anchorIndex - distance
@@ -1053,13 +1062,7 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = pages[nextIndex],
-                            lane = if (hasUncachedAfterAnchor && !hasUncachedBeforeAnchor &&
-                                ((nextIndex - anchorIndex) % 2 == 0)
-                            ) {
-                                ReaderPageUpscaler.REMOTE_SECONDARY_LANE
-                            } else {
-                                ReaderPageUpscaler.REMOTE_PRIMARY_LANE
-                            },
+                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
                         ),
                     )
                 }
@@ -1069,13 +1072,7 @@ class ReaderViewModel @JvmOverloads constructor(
                     add(
                         PrefetchRequest(
                             page = pages[previousIndex],
-                            lane = if (hasUncachedBeforeAnchor && !hasUncachedAfterAnchor &&
-                                ((anchorIndex - previousIndex) % 2 == 0)
-                            ) {
-                                ReaderPageUpscaler.REMOTE_SECONDARY_LANE
-                            } else {
-                                ReaderPageUpscaler.REMOTE_PRIMARY_LANE
-                            },
+                            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
                         ),
                     )
                 }
