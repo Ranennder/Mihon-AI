@@ -813,6 +813,21 @@ class ReaderViewModel @JvmOverloads constructor(
         scheduleUpscaleForChapter(currentChapter)
     }
 
+    fun queueCurrentChapterForWholeUpscale() {
+        if (!readerPreferences.upscalePagesX2.get()) {
+            return
+        }
+
+        val currentChapter = state.value.viewerChapters?.currChapter ?: return
+        val pages = currentChapter.pages ?: return
+        if (pages.isEmpty()) {
+            return
+        }
+
+        currentChapter.pageLoader?.queuePages(pages)
+        scheduleUpscaleForChapterFromStart(pages)
+    }
+
     private fun updateUpscaleRetention(
         previousCurrentChapterId: Long?,
         viewerChapters: ViewerChapters,
@@ -844,6 +859,23 @@ class ReaderViewModel @JvmOverloads constructor(
 
         val currentPageIndex = chapter.requestedPage.coerceIn(0, pages.lastIndex)
         scheduleUpscaleForWholeChapter(pages, currentPageIndex)
+    }
+
+    private fun scheduleUpscaleForChapterFromStart(pages: List<ReaderPage>) {
+        if (pages.isEmpty() || !readerPreferences.upscalePagesX2.get()) {
+            return
+        }
+
+        val prefetchPlan = pages.mapIndexed { priority, page ->
+            PrefetchRequest(
+                page = page,
+                lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+            ) to priority
+        }
+        readerPageUpscaler.retainScheduledPrefetches(pages)
+        prefetchPlan.forEach { (request, priority) ->
+            readerPageUpscaler.schedulePrefetch(request.page, priority, request.lane)
+        }
     }
 
     private fun scheduleUpscaleForLoadedCompanionChapter(chapter: ReaderChapter) {

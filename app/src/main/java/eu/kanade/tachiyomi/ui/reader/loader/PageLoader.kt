@@ -30,6 +30,11 @@ abstract class PageLoader {
     open suspend fun loadPage(page: ReaderPage) {}
 
     /**
+     * Queues a collection of pages for loading without waiting for a specific viewer subscription.
+     */
+    open fun queuePages(pages: List<ReaderPage>) {}
+
+    /**
      * Retries the given [page] in case it failed to load. This method only makes sense when an
      * online source is used.
      */

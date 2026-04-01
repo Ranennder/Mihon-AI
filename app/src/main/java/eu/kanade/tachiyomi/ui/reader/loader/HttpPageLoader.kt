@@ -124,6 +124,21 @@ internal class HttpPageLoader(
         queue.offer(PriorityPage(page, PriorityPage.RETRY))
     }
 
+    override fun queuePages(pages: List<ReaderPage>) {
+        pages.forEach { page ->
+            val imageUrl = page.imageUrl
+            if (page.status == Page.State.Ready && imageUrl != null && !chapterCache.isImageInCache(imageUrl)) {
+                page.status = Page.State.Queue
+            }
+            if (page.status is Page.State.Error) {
+                page.status = Page.State.Queue
+            }
+            if (page.status == Page.State.Queue) {
+                queue.offer(PriorityPage(page, PriorityPage.ADJACENT))
+            }
+        }
+    }
+
     override fun recycle() {
         super.recycle()
         scope.cancel()
