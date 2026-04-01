@@ -10,7 +10,7 @@ Android manga, manhwa, and webtoon reader focused on higher-quality AI-upscaled 
 [![Android](https://img.shields.io/badge/Android-8.0%2B-16a34a)](https://developer.android.com/about/versions/oreo)
 [![License](https://img.shields.io/github/license/Ranennder/Mihon-AI?labelColor=111827&color=0f766e)](./LICENSE)
 
-[Releases](https://github.com/Ranennder/Mihon-AI/releases) | [Windows Companion](./companion/reader-ai-server/README.md) | [Report an Issue](https://github.com/Ranennder/Mihon-AI/issues) | [License](./LICENSE)
+[Latest Release](https://github.com/Ranennder/Mihon-AI/releases/latest) | [All Releases](https://github.com/Ranennder/Mihon-AI/releases) | [Windows Companion](./companion/reader-ai-server/README.md) | [Report an Issue](https://github.com/Ranennder/Mihon-AI/issues) | [License](./LICENSE)
 
 </div>
 
@@ -30,7 +30,9 @@ Mihon AI is an Android reader built around AI-upscaled pages for manga, manhwa, 
 
 ## Download
 
-Get the latest APKs from the [Releases page](https://github.com/Ranennder/Mihon-AI/releases).
+Download the latest published build from [Latest Release](https://github.com/Ranennder/Mihon-AI/releases/latest).
+
+You do not need to build from source to use Mihon AI.
 
 If you plan to use `Remote PC`, download both:
 
@@ -41,6 +43,11 @@ If you are not sure which build to install:
 
 - `arm64` is the right choice for almost every modern Android phone.
 - `universal` is the fallback if you specifically want the all-in-one APK.
+
+Recommended files:
+
+- Android: `Mihon-AI-vX.Y.Z-arm64-....apk`
+- Windows companion: `MihonAiCompanion-....exe`
 
 Requires Android 8.0 or higher.
 
