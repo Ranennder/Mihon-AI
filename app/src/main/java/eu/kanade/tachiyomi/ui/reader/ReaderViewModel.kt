@@ -838,9 +838,7 @@ class ReaderViewModel @JvmOverloads constructor(
         val mangaId = manga?.id ?: return
         val keepChapterIds = buildSet {
             viewerChapters.currChapter.chapter.id?.let(::add)
-            if (!shouldPreferForwardWholeChapterRemoteRetention()) {
-                previousCurrentChapterId?.let(::add)
-            }
+            previousCurrentChapterId?.let(::add)
             viewerChapters.nextChapter?.chapter?.id?.let(::add)
         }
         readerPageUpscaler.retainChapters(mangaId, keepChapterIds)
@@ -903,15 +901,7 @@ class ReaderViewModel @JvmOverloads constructor(
         if (!readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter) {
             return false
         }
-        val viewerChapters = state.value.viewerChapters ?: return false
-        return viewerChapters.currChapter.chapter.id == chapterId ||
-            viewerChapters.nextChapter?.chapter?.id == chapterId
-    }
-
-    private fun shouldPreferForwardWholeChapterRemoteRetention(): Boolean {
-        return readerPreferences.upscalePagesX2.get() &&
-            readerPreferences.selectedAiBackendMode() == ReaderPreferences.AiBackendMode.REMOTE &&
-            readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter
+        return state.value.viewerChapters?.currChapter?.chapter?.id == chapterId
     }
 
     private fun scheduleUpscaleForLoadedCompanionChapter(chapter: ReaderChapter) {
