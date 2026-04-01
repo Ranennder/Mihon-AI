@@ -256,14 +256,22 @@ class ReaderPreferences(
     enum class RemoteAiBatchMode(
         val titleRes: StringResource,
         val requestBatchSize: Int,
+        val shouldQueueWholeChapter: Boolean,
     ) {
         SINGLE(
             titleRes = MR.strings.reader_ai_remote_batch_mode_single,
             requestBatchSize = 1,
+            shouldQueueWholeChapter = false,
         ),
         FOUR(
             titleRes = MR.strings.reader_ai_remote_batch_mode_four,
             requestBatchSize = 4,
+            shouldQueueWholeChapter = false,
+        ),
+        CHAPTER(
+            titleRes = MR.strings.reader_ai_remote_batch_mode_chapter,
+            requestBatchSize = 4,
+            shouldQueueWholeChapter = true,
         ),
     }
 

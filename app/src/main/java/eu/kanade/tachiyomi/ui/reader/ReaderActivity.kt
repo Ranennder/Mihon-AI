@@ -472,10 +472,6 @@ class ReaderActivity : BaseActivity() {
             onClickTopAppBar = ::openMangaScreen,
             aiEnabled = upscaleEnabled,
             onToggleAi = { setUpscaleEnabledFromSettings(!upscaleEnabled) },
-            onQueueAiChapter = ::queueCurrentChapterForAi.takeIf {
-                upscaleEnabled &&
-                    readerPreferences.selectedAiBackendMode() == ReaderPreferences.AiBackendMode.REMOTE
-            },
             bookmarked = state.bookmarked,
             onToggleBookmarked = viewModel::toggleChapterBookmark,
             onOpenInWebView = ::openChapterInWebView.takeIf { isHttpSource },
@@ -593,12 +589,6 @@ class ReaderActivity : BaseActivity() {
                 stringResource(if (enabled) MR.strings.on else MR.strings.off) +
                 " ($backendLabel$modelSuffix)",
         )
-    }
-
-    private fun queueCurrentChapterForAi() {
-        viewModel.queueCurrentChapterForWholeUpscale()
-        menuToggleToast?.cancel()
-        menuToggleToast = toast(MR.strings.reader_ai_chapter_queue_started)
     }
 
     /**

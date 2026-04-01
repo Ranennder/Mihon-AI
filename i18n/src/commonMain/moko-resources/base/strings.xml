@@ -108,7 +108,6 @@
     <string name="action_remove">Remove</string>
     <string name="action_remove_everything">Remove everything</string>
     <string name="action_ai">AI</string>
-    <string name="action_queue_ai_chapter">Queue AI chapter</string>
     <string name="action_start">Start</string>
     <string name="action_resume">Resume</string>
     <string name="action_open_in_browser">Open in browser</string>
@@ -548,13 +547,13 @@
     <string name="pref_reader_ai_remote_batch_mode">Remote batch mode</string>
     <string name="reader_ai_remote_batch_mode_single">1 at a time</string>
     <string name="reader_ai_remote_batch_mode_four">4 at a time</string>
+    <string name="reader_ai_remote_batch_mode_chapter">Chapter</string>
     <string name="pref_reader_ai_remote_url">Remote AI server URL</string>
     <string name="reader_ai_remote_url_auto_hint">Leave the URL blank to auto-discover the companion on Wi-Fi.</string>
     <string name="reader_ai_remote_url_auto_discovered">Auto-discovered companion: %s</string>
     <string name="reader_ai_remote_url_auto_active">Using auto-discovered companion: %s</string>
     <string name="pref_reader_ai_remote_token">Remote AI server token</string>
     <string name="reader_ai_failed">AI upscale failed, showing the original page</string>
-    <string name="reader_ai_chapter_queue_started">Queued the current chapter for AI processing</string>
     <string name="pref_auto_update_manga_on_mark_read">Update progress when marked as read</string>
     <string name="services">Trackers</string>
     <string name="tracking_info">One-way sync to update the chapter progress in external tracker services. Set up tracking for individual entries from their tracking button.</string>

@@ -25,7 +25,6 @@ fun ReaderTopBar(
     navigateUp: () -> Unit,
     aiEnabled: Boolean,
     onToggleAi: () -> Unit,
-    onQueueAiChapter: (() -> Unit)?,
     bookmarked: Boolean,
     onToggleBookmarked: () -> Unit,
     onOpenReaderSettings: (() -> Unit)?,
@@ -79,14 +78,6 @@ fun ReaderTopBar(
                             add(
                                 AppBar.OverflowAction(
                                     title = stringResource(MR.strings.action_settings),
-                                    onClick = it,
-                                ),
-                            )
-                        }
-                        onQueueAiChapter?.let {
-                            add(
-                                AppBar.OverflowAction(
-                                    title = stringResource(MR.strings.action_queue_ai_chapter),
                                     onClick = it,
                                 ),
                             )

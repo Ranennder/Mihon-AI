@@ -485,6 +485,12 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
+        if (shouldQueueWholeChapterForRemote(currentChapter.chapter.id)) {
+            currentChapter.pageLoader?.queuePages(pages)
+            scheduleUpscaleForChapterFromStart(pages)
+            return
+        }
+
         val currentPageIndex = (state.value.currentPage - 1)
             .takeIf { it in pages.indices }
             ?: currentChapter.requestedPage.coerceIn(0, pages.lastIndex)
@@ -495,6 +501,18 @@ class ReaderViewModel @JvmOverloads constructor(
 
     fun onWebtoonVisiblePagesChanged(visiblePages: List<ReaderPage>) {
         if (!readerPreferences.upscalePagesX2.get() || visiblePages.isEmpty()) {
+            return
+        }
+
+        val currentChapter = state.value.viewerChapters?.currChapter
+        if (currentChapter != null && shouldQueueWholeChapterForRemote(currentChapter.chapter.id)) {
+            val pages = currentChapter.pages ?: return
+            if (pages.isEmpty()) {
+                return
+            }
+
+            currentChapter.pageLoader?.queuePages(pages)
+            scheduleUpscaleForChapterFromStart(pages)
             return
         }
 
@@ -813,21 +831,6 @@ class ReaderViewModel @JvmOverloads constructor(
         scheduleUpscaleForChapter(currentChapter)
     }
 
-    fun queueCurrentChapterForWholeUpscale() {
-        if (!readerPreferences.upscalePagesX2.get()) {
-            return
-        }
-
-        val currentChapter = state.value.viewerChapters?.currChapter ?: return
-        val pages = currentChapter.pages ?: return
-        if (pages.isEmpty()) {
-            return
-        }
-
-        currentChapter.pageLoader?.queuePages(pages)
-        scheduleUpscaleForChapterFromStart(pages)
-    }
-
     private fun updateUpscaleRetention(
         previousCurrentChapterId: Long?,
         viewerChapters: ViewerChapters,
@@ -857,6 +860,12 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
+        if (shouldQueueWholeChapterForRemote(chapter)) {
+            chapter.pageLoader?.queuePages(pages)
+            scheduleUpscaleForChapterFromStart(pages)
+            return
+        }
+
         val currentPageIndex = chapter.requestedPage.coerceIn(0, pages.lastIndex)
         scheduleUpscaleForWholeChapter(pages, currentPageIndex)
     }
@@ -878,9 +887,32 @@ class ReaderViewModel @JvmOverloads constructor(
         }
     }
 
+    private fun shouldQueueWholeChapterForRemote(chapter: ReaderChapter): Boolean {
+        return shouldQueueWholeChapterForRemote(chapter.chapter.id)
+    }
+
+    private fun shouldQueueWholeChapterForRemote(chapterId: Long?): Boolean {
+        if (!readerPreferences.upscalePagesX2.get()) {
+            return false
+        }
+        if (readerPreferences.selectedAiBackendMode() != ReaderPreferences.AiBackendMode.REMOTE) {
+            return false
+        }
+        if (!readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter) {
+            return false
+        }
+        return state.value.viewerChapters?.currChapter?.chapter?.id == chapterId
+    }
+
     private fun scheduleUpscaleForLoadedCompanionChapter(chapter: ReaderChapter) {
         val pages = chapter.pages ?: return
         if (pages.isEmpty() || !readerPreferences.upscalePagesX2.get()) {
+            return
+        }
+
+        if (shouldQueueWholeChapterForRemote(chapter)) {
+            chapter.pageLoader?.queuePages(pages)
+            scheduleUpscaleForChapterFromStart(pages)
             return
         }
 
@@ -894,6 +926,12 @@ class ReaderViewModel @JvmOverloads constructor(
         }
 
         val pages = page.chapter.pages ?: return
+        if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id)) {
+            page.chapter.pageLoader?.queuePages(pages)
+            scheduleUpscaleForChapterFromStart(pages)
+            return
+        }
+
         val currentIndex = page.index.coerceIn(0, pages.lastIndex)
         scheduleUpscaleForWholeChapter(pages, currentIndex)
     }
