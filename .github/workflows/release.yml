@@ -62,41 +62,6 @@ jobs:
             mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
             mihon-ai-x86_64-${{ needs.get_tag.outputs.tag }}.apk
 
-  build_foss:
-    name: Build (FOSS)
-    runs-on: ubuntu-24.04
-    needs: get_tag
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up JDK
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        with:
-          java-version-file: .github/.java-version
-          distribution: temurin
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-        with:
-          cache-disabled: true
-
-      - name: Build
-        run: ./gradlew assembleFoss -Penable-updater
-
-      - name: Rename APK
-        run: |
-          set -e
-
-          mv app/build/outputs/apk/foss/app-universal-foss.apk mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
-
-      - name: Upload APK
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: mihon-ai-foss
-          path: mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
-
   build_companion_windows:
     name: Build Windows Companion
     runs-on: windows-2022
@@ -130,7 +95,7 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-24.04
-    needs: [get_tag, build, build_foss, build_companion_windows]
+    needs: [get_tag, build, build_companion_windows]
 
     steps:
       - name: Download all artifacts
@@ -144,7 +109,6 @@ jobs:
           failOnError: false
           name: |
             mihon-ai
-            mihon-ai-foss
             mihon-ai-companion-windows
 
       - name: Create GitHub Release
@@ -167,7 +131,6 @@ jobs:
             > ### If you are unsure which version to download then go with `mihon-ai-${{ needs.get_tag.outputs.tag }}.apk`
           files: |
             mihon-ai-${{ needs.get_tag.outputs.tag }}.apk
-            mihon-ai-${{ needs.get_tag.outputs.tag }}-foss.apk
             mihon-ai-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
             mihon-ai-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
             mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
