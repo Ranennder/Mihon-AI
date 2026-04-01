@@ -11,6 +11,7 @@ import eu.kanade.presentation.more.settings.widget.BasePreferenceWidget
 import eu.kanade.presentation.reader.settings.AiBackendSelector
 import eu.kanade.presentation.reader.settings.remoteAiServerStatusText
 import eu.kanade.presentation.reader.settings.remoteAiServerUrlPreferenceSubtitle
+import eu.kanade.presentation.reader.settings.remoteAiTokenSubtitle
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
@@ -94,6 +95,7 @@ object SettingsReaderScreen : SearchableSettings {
             manualUrl = remoteAiBaseUrl,
             statusText = remoteAiStatus,
         )
+        val remoteAiTokenSubtitle = remoteAiTokenSubtitle()
 
         LaunchedEffect(rawAiBackendMode) {
             readerPreferences.migrateLegacyAiBackendMode()
@@ -178,6 +180,7 @@ object SettingsReaderScreen : SearchableSettings {
                 Preference.PreferenceItem.EditTextPreference(
                     preference = readerPreferences.remoteAiToken,
                     title = stringResource(MR.strings.pref_reader_ai_remote_token),
+                    subtitle = remoteAiTokenSubtitle,
                     allowBlank = true,
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
                 ),

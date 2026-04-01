@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.util.system.isConnectedToWifi
 import logcat.LogPriority
 import okhttp3.Request
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 import tachiyomi.core.common.util.system.logcat
 import java.net.Inet4Address
@@ -65,17 +66,11 @@ internal class RemoteAiServerDiscovery(
     }
 
     private fun manualBaseUrl(): String? {
-        return readerPreferences.remoteAiBaseUrl.get()
-            .trim()
-            .trimEnd('/')
-            .takeIf { it.isNotEmpty() }
+        return normalizeBaseUrl(readerPreferences.remoteAiBaseUrl.get())
     }
 
     private fun cachedDiscoveredBaseUrl(): String? {
-        return readerPreferences.remoteAiDiscoveredBaseUrl.get()
-            .trim()
-            .trimEnd('/')
-            .takeIf { it.isNotEmpty() }
+        return normalizeBaseUrl(readerPreferences.remoteAiDiscoveredBaseUrl.get())
     }
 
     private fun discoverOnLocalNetwork(): String? {
@@ -174,6 +169,34 @@ internal class RemoteAiServerDiscovery(
                 logcat(LogPriority.DEBUG, it) { "Remote AI discovery probe failed for $baseUrl" }
             }
             .getOrNull()
+    }
+
+    private fun normalizeBaseUrl(rawValue: String): String? {
+        val trimmed = rawValue.trim().trimEnd('/')
+        if (trimmed.isEmpty()) {
+            return null
+        }
+
+        val withScheme = if ("://" in trimmed) trimmed else "http://$trimmed"
+        val authority = withScheme.substringAfter("://", "").substringBefore('/')
+        val hasExplicitPort = when {
+            authority.startsWith("[") -> authority.contains("]:")
+            authority.count { it == ':' } == 1 -> authority.substringAfterLast(':').toIntOrNull() != null
+            else -> false
+        }
+
+        val parsed = withScheme.toHttpUrlOrNull() ?: return trimmed
+        val normalized = parsed.newBuilder()
+            .apply {
+                if (!hasExplicitPort) {
+                    port(DEFAULT_DISCOVERY_PORT)
+                }
+            }
+            .build()
+            .toString()
+            .trimEnd('/')
+
+        return normalized
     }
 
     private companion object {

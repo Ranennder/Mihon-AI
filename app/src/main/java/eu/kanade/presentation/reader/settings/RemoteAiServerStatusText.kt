@@ -19,8 +19,16 @@ internal fun remoteAiServerStatusText(
         manualUrl.isBlank() -> {
             stringResource(MR.strings.reader_ai_remote_url_auto_hint)
         }
+        isLikelyTailscaleUrl(manualUrl) -> {
+            stringResource(MR.strings.reader_ai_remote_url_tailscale_active, manualUrl)
+        }
         else -> null
     }
+}
+
+@Composable
+internal fun remoteAiTokenSubtitle(): String {
+    return stringResource(MR.strings.reader_ai_remote_token_hint)
 }
 
 internal fun remoteAiServerUrlPreferenceSubtitle(
@@ -32,4 +40,12 @@ internal fun remoteAiServerUrlPreferenceSubtitle(
         manualUrl.isNotBlank() -> "%s"
         else -> statusText
     }
+}
+
+private fun isLikelyTailscaleUrl(value: String): Boolean {
+    val trimmed = value.trim().lowercase()
+    return ".ts.net" in trimmed ||
+        ".beta.tailscale.net" in trimmed ||
+        trimmed.contains("://100.") ||
+        trimmed.startsWith("100.")
 }
