@@ -8,6 +8,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   get_tag:
     name: Extract tag name
@@ -103,6 +106,9 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: List release files
+        run: ls -lah
+
       - name: Delete all artifacts
         uses: geekyeggo/delete-artifact@f275313e70c08f6120db482d7a6b98377786765b # v5.1.0
         with:
@@ -136,6 +142,9 @@ jobs:
             mihon-ai-x86-${{ needs.get_tag.outputs.tag }}.apk
             mihon-ai-x86_64-${{ needs.get_tag.outputs.tag }}.apk
             MihonAiCompanion-${{ needs.get_tag.outputs.tag }}-windows.exe
-          draft: true
+          draft: false
           prerelease: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
           token: ${{ github.token }}
