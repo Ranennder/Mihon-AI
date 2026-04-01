@@ -162,16 +162,38 @@ class PendingUpscaleRequest:
     preferred_output_format: str | None
     batch_size: int
     is_chunked: bool
+    manga_title: str | None = None
+    chapter_title: str | None = None
+    page_index: int | None = None
+    total_pages: int | None = None
     enqueued_at: float = field(default_factory=time.perf_counter)
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
     result: ProcessedImage | None = None
     error: Exception | None = None
 
     @property
-    def batch_key(self) -> tuple[str, str, int] | None:
+    def batch_key(self) -> tuple[str, str, int, str] | None:
         if self.is_chunked or self.preferred_output_format is None or self.batch_size <= 1:
             return None
-        return (self.model_name, self.preferred_output_format, self.native_scale)
+        return (
+            self.model_name,
+            self.preferred_output_format,
+            self.native_scale,
+            self.chapter_display_label or "",
+        )
+
+    @property
+    def chapter_display_label(self) -> str | None:
+        return _build_chapter_display_label(self.manga_title, self.chapter_title)
+
+    @property
+    def page_display_label(self) -> str | None:
+        return _build_page_display_label(
+            manga_title=self.manga_title,
+            chapter_title=self.chapter_title,
+            page_index=self.page_index,
+            total_pages=self.total_pages,
+        )
 
 
 @dataclass(frozen=True)
@@ -263,6 +285,10 @@ class ReaderAiServer(ThreadingHTTPServer):
         output_format: str,
         model_name: str,
         batch_size: int,
+        manga_title: str | None = None,
+        chapter_title: str | None = None,
+        page_index: int | None = None,
+        total_pages: int | None = None,
     ) -> ProcessedImage:
         if self.config.mode == "mock_copy":
             return ProcessedImage(body, output_format)
@@ -293,6 +319,10 @@ class ReaderAiServer(ThreadingHTTPServer):
             preferred_output_format=preferred_output_format,
             batch_size=batch_size,
             is_chunked=is_chunked,
+            manga_title=manga_title,
+            chapter_title=chapter_title,
+            page_index=page_index,
+            total_pages=total_pages,
         )
         self._processing_queue.put(request)
         request.completed.wait()
@@ -416,6 +446,11 @@ class ReaderAiServer(ThreadingHTTPServer):
                 if request.batch_key is not None:
                     batch = self._collect_batch(request, backlog)
                     if len(batch) > 1:
+                        batch_display = _describe_request_batch(batch)
+                        if batch_display is not None:
+                            _emit_log_line(
+                                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] {batch_display} - Starting AI batch ({len(batch)} pages)",
+                            )
                         _emit_log_line(
                             (
                                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
@@ -423,6 +458,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                                 f"(size={request.batch_size}, wait={self._describe_batch_wait(batch)}): "
                                 f"{', '.join(item.request_id for item in batch)}"
                             ),
+                            console=False,
                         )
                     results = _run_subprocess_batch(
                         config=self.config,
@@ -698,6 +734,10 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
         requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
         requested_batch_size = (self.headers.get("X-Reader-AI-Batch-Size") or "").strip()
+        manga_title = (self.headers.get("X-Reader-AI-Manga-Title") or "").strip() or None
+        chapter_title = (self.headers.get("X-Reader-AI-Chapter-Title") or "").strip() or None
+        page_index_header = (self.headers.get("X-Reader-AI-Page-Index") or "").strip()
+        total_pages_header = (self.headers.get("X-Reader-AI-Page-Count") or "").strip()
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
             self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
             return
@@ -720,22 +760,58 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
+        page_index = _parse_optional_int_header(page_index_header)
+        total_pages = _parse_optional_int_header(total_pages_header)
         request_id = self.server.next_request_id()
-        self.log_message(
-            "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s batch=%d from %s",
-            request_id,
-            body_size,
-            input_format,
-            output_format,
-            model_name,
-            batch_size,
-            self.client_address[0],
+        display_label = _build_page_display_label(
+            manga_title=manga_title,
+            chapter_title=chapter_title,
+            page_index=page_index,
+            total_pages=total_pages,
         )
+        if display_label is not None:
+            self.log_message(
+                "[%s] %s - Queued for AI upscale (batch=%d)",
+                request_id,
+                display_label,
+                batch_size,
+            )
+            _emit_log_line(
+                (
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
+                    f"[{request_id}] Accepted upscale request: {body_size} bytes "
+                    f"input={input_format} output={output_format} model={model_name} "
+                    f"batch={batch_size} from {self.client_address[0]}"
+                ),
+                console=False,
+            )
+        else:
+            self.log_message(
+                "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s batch=%d from %s",
+                request_id,
+                body_size,
+                input_format,
+                output_format,
+                model_name,
+                batch_size,
+                self.client_address[0],
+            )
 
         started_at = time.perf_counter()
         body = self.rfile.read(body_size)
         try:
-            processed_image = self.server.process_image(request_id, body, input_format, output_format, model_name, batch_size)
+            processed_image = self.server.process_image(
+                request_id,
+                body,
+                input_format,
+                output_format,
+                model_name,
+                batch_size,
+                manga_title=manga_title,
+                chapter_title=chapter_title,
+                page_index=page_index,
+                total_pages=total_pages,
+            )
         except subprocess.TimeoutExpired as exc:
             self.log_message("[%s] Upscale timeout after %s seconds", request_id, exc.timeout)
             self._send_text(HTTPStatus.GATEWAY_TIMEOUT, f"Upscale process timed out after {exc.timeout} seconds")
@@ -746,16 +822,25 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         elapsed = time.perf_counter() - started_at
-        self.log_message(
-            "[%s] Processed %d bytes into %d bytes in %.2fs via %s (%s -> %s)",
-            request_id,
-            len(body),
-            len(processed_image.bytes),
-            elapsed,
-            self.server.config.mode,
-            model_name,
-            processed_image.output_format,
-        )
+        if display_label is not None:
+            self.log_message(
+                "[%s] %s - Ready in %.2fs (%s)",
+                request_id,
+                display_label,
+                elapsed,
+                _format_compact_bytes(len(processed_image.bytes)),
+            )
+        else:
+            self.log_message(
+                "[%s] Processed %d bytes into %d bytes in %.2fs via %s (%s -> %s)",
+                request_id,
+                len(body),
+                len(processed_image.bytes),
+                elapsed,
+                self.server.config.mode,
+                model_name,
+                processed_image.output_format,
+            )
         self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
 
     def _handle_chapter_upscale_request(self) -> None:
@@ -839,14 +924,19 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             archive_path.unlink(missing_ok=True)
 
         self.log_message(
-            "[%s] Accepted chapter upscale request: %s (%d pages, %d bytes, model=%s, output=%s) from %s",
+            "[%s] %s - Chapter queued (%d pages)",
             request_id,
             chapter_job.display_label,
             chapter_job.total_pages,
-            body_size,
-            model_name,
-            output_format,
-            self.client_address[0],
+        )
+        _emit_log_line(
+            (
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
+                f"[{request_id}] Accepted chapter upscale request: {chapter_job.display_label} "
+                f"({chapter_job.total_pages} pages, {body_size} bytes, model={model_name}, output={output_format}) "
+                f"from {self.client_address[0]}"
+            ),
+            console=False,
         )
 
         self._send_json(
@@ -942,6 +1032,7 @@ def _process_single_request_in_workspace(
             model_name=request.model_name,
             native_scale=request.native_scale,
             target_scale=request.native_scale,
+            display_label=request.page_display_label,
         )
 
     binary = Path(config.binary)
@@ -970,6 +1061,7 @@ def _process_single_request_in_workspace(
             output_format=preferred_output_format,
             model_name=request.model_name,
             scale=request.native_scale,
+            display_label=request.page_display_label,
         )
     except RuntimeError as exc:
         if (
@@ -988,6 +1080,7 @@ def _process_single_request_in_workspace(
                 output_format=PNG_OUTPUT_FORMAT,
                 model_name=request.model_name,
                 scale=request.native_scale,
+                display_label=request.page_display_label,
             )
         raise
 
@@ -1047,11 +1140,13 @@ def _run_subprocess_batch(
         command.extend(["-n", model_name])
 
     request_label = ",".join(request.request_id for request in requests)
+    batch_display_label = _describe_request_batch(requests)
     completed = _run_logged_subprocess(
         request_id=request_label,
         command=command,
         cwd=binary.parent,
         timeout=config.timeout_seconds,
+        display_label=batch_display_label,
     )
     details = completed.details
     if completed.returncode != 0:
@@ -1085,6 +1180,10 @@ def _run_subprocess_batch(
             preferred_output_format=request.preferred_output_format,
             batch_size=1,
             is_chunked=False,
+            manga_title=request.manga_title,
+            chapter_title=request.chapter_title,
+            page_index=request.page_index,
+            total_pages=request.total_pages,
         )
         results[request.request_id] = _process_single_request_in_workspace(
             config=config,
@@ -1106,6 +1205,7 @@ def _run_subprocess_once(
     output_format: str,
     model_name: str,
     scale: int,
+    display_label: str | None = None,
 ) -> ProcessedImage:
     _clear_workspace_files(workspace)
     input_path = workspace / f"input.{_sanitize_extension(input_format)}"
@@ -1139,6 +1239,7 @@ def _run_subprocess_once(
         command=command,
         cwd=binary.parent,
         timeout=config.timeout_seconds,
+        display_label=display_label,
     )
     details = completed.details
 
@@ -1176,6 +1277,63 @@ def _resolve_produced_output_path(output_path: Path, requested_output_format: st
 def _sanitize_extension(value: str) -> str:
     value = value.lower().strip().strip(".")
     return value if value in {"jpg", "jpeg", "png", "webp"} else "png"
+
+
+def _parse_optional_int_header(value: str) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _build_chapter_display_label(manga_title: str | None, chapter_title: str | None) -> str | None:
+    title = (manga_title or "").strip()
+    chapter = (chapter_title or "").strip()
+    if title and chapter:
+        return f"{title} - {chapter}"
+    return title or chapter or None
+
+
+def _build_page_display_label(
+    manga_title: str | None,
+    chapter_title: str | None,
+    page_index: int | None,
+    total_pages: int | None,
+) -> str | None:
+    chapter_label = _build_chapter_display_label(manga_title, chapter_title)
+    if page_index is None or total_pages is None or total_pages <= 0:
+        return chapter_label
+    page_label = f"{page_index + 1}/{total_pages}"
+    if chapter_label:
+        return f"{chapter_label} - {page_label}"
+    return f"Page {page_label}"
+
+
+def _format_compact_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024.0 or unit == "GB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{size} B"
+
+
+def _describe_request_batch(requests: list[PendingUpscaleRequest]) -> str | None:
+    if not requests:
+        return None
+    chapter_label = requests[0].chapter_display_label
+    if chapter_label is None or any(item.chapter_display_label != chapter_label for item in requests):
+        return None
+    indexed_requests = [item for item in requests if item.page_index is not None and item.total_pages]
+    if len(indexed_requests) != len(requests):
+        return chapter_label
+    page_labels = ", ".join(str(item.page_index + 1) for item in indexed_requests)
+    total_pages = indexed_requests[0].total_pages
+    return f"{chapter_label} - pages {page_labels}/{total_pages}"
 
 
 def _extract_chapter_archive(
@@ -1380,6 +1538,7 @@ def _run_chunked_subprocess(
     model_name: str,
     native_scale: int,
     target_scale: int,
+    display_label: str | None = None,
 ) -> ProcessedImage:
     binary = Path(config.binary)
     model_dir = Path(config.model_dir)
@@ -1419,6 +1578,7 @@ def _run_chunked_subprocess(
                 output_format=INTERNAL_CHUNK_FORMAT,
                 model_name=model_name,
                 scale=native_scale,
+                display_label=display_label,
             )
 
             with Image.open(BytesIO(processed_chunk.bytes)) as upscaled_chunk_raw:
@@ -1706,13 +1866,13 @@ def _format_console_body(body: str) -> str:
     lowered = body.lower()
     if "upscale error" in lowered or "failed" in lowered or "traceback" in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_RED)
-    if body.startswith("Mihon AI companion listening") or lowered.startswith("processed ") or " was closed" in lowered:
+    if body.startswith("Mihon AI companion listening") or " was closed" in lowered or "ready in " in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_GREEN)
-    if "accepted chapter upscale request" in lowered or "starting chapter upscale" in lowered or " - ready " in lowered:
+    if "accepted chapter upscale request" in lowered or "starting chapter upscale" in lowered or "chapter queued" in lowered or " - ready " in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_CYAN)
-    if "accepted upscale request" in lowered:
+    if "queued for ai upscale" in lowered or "starting ai batch" in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_CYAN)
-    if "force-closing" in lowered or "client disconnected" in lowered or "vanished while closing" in lowered:
+    if "restarting previous companion" in lowered or "client disconnected" in lowered or "vanished while closing" in lowered:
         return _ansi(body, _ANSI_BOLD, _ANSI_YELLOW)
     if body.startswith("Mode:") or body.startswith("Binary:") or body.startswith("Model dir:") or body.startswith("Live logs:") or body.startswith("Console logging:"):
         return _ansi(body, _ANSI_WHITE)
@@ -1929,7 +2089,7 @@ def _wait_for_port_release(port: int, timeout_seconds: float = 5.0) -> bool:
 
 def _close_existing_instance(port: int, pid: int) -> bool:
     _emit_log_line(
-        f"Force-closing previous companion instance on port {port} (pid={pid})"
+        f"Restarting previous companion on port {port}"
     )
     try:
         result = _run_hidden_windows_command(["taskkill", "/PID", str(pid), "/T", "/F"])
@@ -2040,11 +2200,11 @@ def main() -> int:
         if server is None:
             return 1
         _emit_log_line(f"Mihon AI companion listening on http://{config.host}:{config.port}")
-        _emit_log_line(f"Mode: {config.mode}")
-        _emit_log_line(f"Binary: {config.binary}")
-        _emit_log_line(f"Model dir: {config.model_dir}")
-        _emit_log_line(f"Live logs: enabled -> {log_path}")
-        _emit_log_line("Console logging: win32 direct + fd fallback")
+        _emit_log_line(f"Mode: {config.mode}", console=False)
+        _emit_log_line(f"Binary: {config.binary}", console=False)
+        _emit_log_line(f"Model dir: {config.model_dir}", console=False)
+        _emit_log_line(f"Live logs: enabled -> {log_path}", console=False)
+        _emit_log_line("Console logging: win32 direct + fd fallback", console=False)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

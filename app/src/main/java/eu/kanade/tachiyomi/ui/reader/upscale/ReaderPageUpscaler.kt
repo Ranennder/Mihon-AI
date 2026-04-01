@@ -120,7 +120,10 @@ class ReaderPageUpscaler(
                     ReaderPreferences.AiBackendMode.NPU,
                     ->
                         anime4xPageUpscaler.upscaleSource(source)
-                    ReaderPreferences.AiBackendMode.REMOTE -> remotePageUpscaler.upscaleSource(source)
+                    ReaderPreferences.AiBackendMode.REMOTE -> remotePageUpscaler.upscaleSource(
+                        source = source,
+                        pageMetadata = pageRequestMetadata(page),
+                    )
                 }
             }
                 .onFailure { logcat(LogPriority.WARN, it) { "Failed to AI-upscale reader page ${cacheFile.name}" } }
@@ -223,6 +226,11 @@ class ReaderPageUpscaler(
             return
         }
 
+        rememberChapterMetadata(
+            pages = pages,
+            mangaTitle = mangaTitle,
+        )
+
         val firstPage = pages.first()
         val chapter = firstPage.chapter.chapter
         val chapterId = chapter.id ?: return
@@ -236,18 +244,6 @@ class ReaderPageUpscaler(
         val jobKey = buildRemoteChapterJobKey(
             mangaId = mangaId,
             chapterId = chapterId,
-        )
-        val chapterTitle = chapter.name
-            .trim()
-            .takeIf { it.isNotEmpty() }
-        val resolvedMangaTitle = mangaTitle
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: remoteChapterMetadata[jobKey]?.mangaTitle
-        remoteChapterMetadata[jobKey] = RemotePageUpscaler.ChapterJobMetadata(
-            mangaTitle = resolvedMangaTitle,
-            chapterTitle = chapterTitle,
-            totalPages = pages.size,
         )
         val existingJob = remoteChapterJobs[jobKey]
         if (existingJob?.job?.isActive == true) {
@@ -310,6 +306,36 @@ class ReaderPageUpscaler(
                 scheduledJobs.remove(entry.key, entry.value)
             }
         }
+    }
+
+    fun rememberChapterMetadata(
+        pages: List<ReaderPage>,
+        mangaTitle: String? = null,
+    ) {
+        if (pages.isEmpty()) {
+            return
+        }
+
+        val firstPage = pages.first()
+        val chapter = firstPage.chapter.chapter
+        val chapterId = chapter.id ?: return
+        val mangaId = chapter.manga_id ?: 0L
+        val jobKey = buildRemoteChapterJobKey(
+            mangaId = mangaId,
+            chapterId = chapterId,
+        )
+        val chapterTitle = chapter.name
+            .trim()
+            .takeIf { it.isNotEmpty() }
+        val resolvedMangaTitle = mangaTitle
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: remoteChapterMetadata[jobKey]?.mangaTitle
+        remoteChapterMetadata[jobKey] = RemotePageUpscaler.ChapterJobMetadata(
+            mangaTitle = resolvedMangaTitle,
+            chapterTitle = chapterTitle,
+            totalPages = pages.size,
+        )
     }
 
     fun requestBlockingReload(page: ReaderPage) {
@@ -617,6 +643,24 @@ class ReaderPageUpscaler(
             chapterId = chapterId,
         )
         return remoteChapterJobs[jobKey]?.job?.isActive == true
+    }
+
+    private fun pageRequestMetadata(page: ReaderPage): RemotePageUpscaler.PageRequestMetadata? {
+        val chapter = page.chapter.chapter
+        val chapterId = chapter.id ?: return null
+        val mangaId = chapter.manga_id ?: 0L
+        val jobKey = buildRemoteChapterJobKey(
+            mangaId = mangaId,
+            chapterId = chapterId,
+        )
+        val metadata = remoteChapterMetadata[jobKey] ?: return null
+        val totalPages = page.chapter.pages?.size ?: metadata.totalPages
+        return RemotePageUpscaler.PageRequestMetadata(
+            mangaTitle = metadata.mangaTitle,
+            chapterTitle = metadata.chapterTitle,
+            pageIndex = page.index,
+            totalPages = totalPages,
+        )
     }
 
     private fun isRemoteBackendSelected(): Boolean {

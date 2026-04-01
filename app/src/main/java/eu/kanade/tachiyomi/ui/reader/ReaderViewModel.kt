@@ -860,6 +860,11 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
+        readerPageUpscaler.rememberChapterMetadata(
+            pages = pages,
+            mangaTitle = manga?.title,
+        )
+
         if (shouldQueueWholeChapterForRemote(chapter)) {
             chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
@@ -905,6 +910,11 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
+        readerPageUpscaler.rememberChapterMetadata(
+            pages = pages,
+            mangaTitle = manga?.title,
+        )
+
         if (shouldQueueWholeChapterForRemote(chapter)) {
             chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
@@ -921,6 +931,10 @@ class ReaderViewModel @JvmOverloads constructor(
         }
 
         val pages = page.chapter.pages ?: return
+        readerPageUpscaler.rememberChapterMetadata(
+            pages = pages,
+            mangaTitle = manga?.title,
+        )
         if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id)) {
             page.chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
@@ -954,6 +968,16 @@ class ReaderViewModel @JvmOverloads constructor(
     }
 
     private fun scheduleUpscaleForVisiblePages(visiblePages: List<ReaderPage>) {
+        visiblePages
+            .groupBy { it.chapter.chapter.id ?: Long.MIN_VALUE }
+            .values
+            .forEach { group ->
+                val chapterPages = group.firstOrNull()?.chapter?.pages ?: group
+                readerPageUpscaler.rememberChapterMetadata(
+                    pages = chapterPages,
+                    mangaTitle = manga?.title,
+                )
+            }
         val prefetchPlan = buildVisibleFirstUpscalePlan(visiblePages)
         if (prefetchPlan.isEmpty()) {
             return

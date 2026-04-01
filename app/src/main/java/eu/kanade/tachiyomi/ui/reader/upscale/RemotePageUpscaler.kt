@@ -148,7 +148,10 @@ class RemotePageUpscaler(
             }
     }
 
-    fun upscaleSource(source: BufferedSource): ByteArray? {
+    fun upscaleSource(
+        source: BufferedSource,
+        pageMetadata: PageRequestMetadata? = null,
+    ): ByteArray? {
         lastErrorMessage = null
 
         val baseUrlResolution = discovery.resolveBaseUrl()
@@ -162,6 +165,7 @@ class RemotePageUpscaler(
         val initialAttempt = runUpscaleRequest(
             baseUrl = baseUrlResolution.baseUrl,
             preparedImage = preparedImage,
+            pageMetadata = pageMetadata,
         )
         if (initialAttempt.bytes != null) {
             return initialAttempt.bytes
@@ -179,6 +183,7 @@ class RemotePageUpscaler(
         return runUpscaleRequest(
             baseUrl = rediscoveredBaseUrl.baseUrl,
             preparedImage = preparedImage,
+            pageMetadata = pageMetadata,
         ).bytes
     }
 
@@ -260,6 +265,7 @@ class RemotePageUpscaler(
     private fun runUpscaleRequest(
         baseUrl: String,
         preparedImage: PreparedImage,
+        pageMetadata: PageRequestMetadata?,
     ): UpscaleAttempt {
         val requestUrl = "$baseUrl/api/upscale".toHttpUrlOrNull()
         if (requestUrl == null) {
@@ -278,6 +284,18 @@ class RemotePageUpscaler(
         readerPreferences.remoteAiToken.get().trim()
             .takeIf { it.isNotEmpty() }
             ?.let { requestBuilder.header("X-Reader-AI-Token", it) }
+        pageMetadata?.mangaTitle
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { requestBuilder.header("X-Reader-AI-Manga-Title", it) }
+        pageMetadata?.chapterTitle
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", it) }
+        pageMetadata?.let {
+            requestBuilder.header("X-Reader-AI-Page-Index", it.pageIndex.toString())
+            requestBuilder.header("X-Reader-AI-Page-Count", it.totalPages.toString())
+        }
 
         val request = requestBuilder
             .post(preparedImage.bytes.toRequestBody(preparedImage.mediaType.toMediaType()))
@@ -437,6 +455,13 @@ class RemotePageUpscaler(
         val pageIndex: Int,
         val bytes: ByteArray,
         val extension: String,
+    )
+
+    data class PageRequestMetadata(
+        val mangaTitle: String?,
+        val chapterTitle: String?,
+        val pageIndex: Int,
+        val totalPages: Int,
     )
 
     data class ChapterJobMetadata(
