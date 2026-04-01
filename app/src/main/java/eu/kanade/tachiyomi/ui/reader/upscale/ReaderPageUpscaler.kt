@@ -107,7 +107,7 @@ class ReaderPageUpscaler(
             if (cacheFile.isReadyCacheFile()) {
                 return@withLock cacheFile.toBuffer()
             }
-            if (wholeChapterRemoteMode && waitForWholeChapterCache(cacheFile)) {
+            if (wholeChapterRemoteMode && waitForWholeChapterCache(page, cacheFile)) {
                 return@withLock cacheFile.toBuffer()
             }
 
@@ -549,14 +549,34 @@ class ReaderPageUpscaler(
         lastFailureMessage = "Remote AI chapter job timed out before all pages were ready"
     }
 
-    private suspend fun waitForWholeChapterCache(cacheFile: File): Boolean {
-        repeat(8) {
+    private suspend fun waitForWholeChapterCache(
+        page: ReaderPage,
+        cacheFile: File,
+    ): Boolean {
+        val attempts = if (hasActiveWholeChapterJob(page)) {
+            WHOLE_CHAPTER_ACTIVE_WAIT_ATTEMPTS
+        } else {
+            WHOLE_CHAPTER_DEFAULT_WAIT_ATTEMPTS
+        }
+
+        repeat(attempts) {
             if (cacheFile.isReadyCacheFile()) {
                 return true
             }
             delay(100)
         }
         return cacheFile.isReadyCacheFile()
+    }
+
+    private fun hasActiveWholeChapterJob(page: ReaderPage): Boolean {
+        val chapter = page.chapter.chapter
+        val chapterId = chapter.id ?: return false
+        val mangaId = chapter.manga_id ?: 0L
+        val jobKey = buildRemoteChapterJobKey(
+            mangaId = mangaId,
+            chapterId = chapterId,
+        )
+        return remoteChapterJobs[jobKey]?.job?.isActive == true
     }
 
     private fun isRemoteBackendSelected(): Boolean {
@@ -604,5 +624,7 @@ class ReaderPageUpscaler(
         const val REMOTE_PRIMARY_LANE = 0
         const val REMOTE_SECONDARY_LANE = 1
         private const val REMOTE_PREFETCH_LANE_COUNT = 2
+        private const val WHOLE_CHAPTER_DEFAULT_WAIT_ATTEMPTS = 8
+        private const val WHOLE_CHAPTER_ACTIVE_WAIT_ATTEMPTS = 50
     }
 }
