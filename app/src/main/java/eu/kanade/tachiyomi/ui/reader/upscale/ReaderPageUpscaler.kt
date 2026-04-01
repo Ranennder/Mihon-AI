@@ -580,9 +580,11 @@ class ReaderPageUpscaler(
             metadata = chapterMetadata,
         ) ?: return
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
+        var consecutiveRetryableFailures = 0
         repeat(2_400) {
             val iterator = remainingTargets.iterator()
             var sawProgress = false
+            var sawRetryableFailure = false
             while (iterator.hasNext()) {
                 val (_, target) = iterator.next()
                 if (target.cacheFile.isReadyCacheFile()) {
@@ -599,8 +601,14 @@ class ReaderPageUpscaler(
                         sawProgress = true
                     }
                     is RemotePageUpscaler.ChapterPageFetchResult.Failed -> {
-                        lastFailureMessage = fetchResult.message
-                        return
+                        if (!fetchResult.retryable) {
+                            lastFailureMessage = fetchResult.message
+                            return
+                        }
+                        sawRetryableFailure = true
+                        logcat(LogPriority.WARN) {
+                            "Transient remote AI chapter fetch failure for page ${target.page.index}: ${fetchResult.message}"
+                        }
                     }
                 }
             }
@@ -609,7 +617,24 @@ class ReaderPageUpscaler(
                 return
             }
 
-            delay(if (sawProgress) 100 else 350)
+            consecutiveRetryableFailures = when {
+                sawProgress -> 0
+                sawRetryableFailure -> consecutiveRetryableFailures + 1
+                else -> 0
+            }
+            if (consecutiveRetryableFailures >= WHOLE_CHAPTER_RETRYABLE_FAILURE_LIMIT) {
+                lastFailureMessage =
+                    "Remote AI chapter job stopped responding while waiting for chapter pages"
+                return
+            }
+
+            delay(
+                when {
+                    sawProgress -> 100
+                    sawRetryableFailure -> 500
+                    else -> 350
+                },
+            )
         }
 
         lastFailureMessage = "Remote AI chapter job timed out before all pages were ready"
@@ -709,6 +734,7 @@ class ReaderPageUpscaler(
         const val REMOTE_SECONDARY_LANE = 1
         private const val REMOTE_PREFETCH_LANE_COUNT = 2
         private const val WHOLE_CHAPTER_DEFAULT_WAIT_ATTEMPTS = 8
-        private const val WHOLE_CHAPTER_ACTIVE_WAIT_ATTEMPTS = 50
+        private const val WHOLE_CHAPTER_ACTIVE_WAIT_ATTEMPTS = 150
+        private const val WHOLE_CHAPTER_RETRYABLE_FAILURE_LIMIT = 20
     }
 }

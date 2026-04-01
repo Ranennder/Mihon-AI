@@ -108,7 +108,10 @@ class RemotePageUpscaler(
         val requestUrl = "${job.baseUrl}/api/upscale-chapter/${job.jobId}/page/$pageIndex".toHttpUrlOrNull()
         if (requestUrl == null) {
             lastErrorMessage = "Remote AI chapter job URL is invalid"
-            return ChapterPageFetchResult.Failed(lastErrorMessage!!)
+            return ChapterPageFetchResult.Failed(
+                message = lastErrorMessage!!,
+                retryable = false,
+            )
         }
 
         val requestBuilder = Request.Builder()
@@ -127,7 +130,10 @@ class RemotePageUpscaler(
                         val responseBytes = response.body.bytes()
                         if (responseBytes.isEmpty()) {
                             lastErrorMessage = "Remote AI chapter page is empty"
-                            ChapterPageFetchResult.Failed(lastErrorMessage!!)
+                            ChapterPageFetchResult.Failed(
+                                message = lastErrorMessage!!,
+                                retryable = true,
+                            )
                         } else {
                             ChapterPageFetchResult.Ready(responseBytes)
                         }
@@ -136,7 +142,10 @@ class RemotePageUpscaler(
                         lastErrorMessage = response.body.string()
                             .takeIf(String::isNotBlank)
                             ?: "Remote AI chapter page request returned HTTP ${response.code}"
-                        ChapterPageFetchResult.Failed(lastErrorMessage!!)
+                        ChapterPageFetchResult.Failed(
+                            message = lastErrorMessage!!,
+                            retryable = response.code >= 500,
+                        )
                     }
                 }
             }
@@ -146,7 +155,10 @@ class RemotePageUpscaler(
                 logcat(LogPriority.WARN, it) { "Failed to fetch remote AI chapter page" }
             }
             .getOrElse {
-                ChapterPageFetchResult.Failed(lastErrorMessage ?: "Remote AI chapter page request failed")
+                ChapterPageFetchResult.Failed(
+                    message = lastErrorMessage ?: "Remote AI chapter page request failed",
+                    retryable = true,
+                )
             }
     }
 
@@ -480,7 +492,10 @@ class RemotePageUpscaler(
     sealed interface ChapterPageFetchResult {
         data object Pending : ChapterPageFetchResult
         data class Ready(val bytes: ByteArray) : ChapterPageFetchResult
-        data class Failed(val message: String) : ChapterPageFetchResult
+        data class Failed(
+            val message: String,
+            val retryable: Boolean,
+        ) : ChapterPageFetchResult
     }
 
     private data class PreparedImage(
