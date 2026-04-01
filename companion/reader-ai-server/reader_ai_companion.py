@@ -588,12 +588,20 @@ class ReaderAiServer(ThreadingHTTPServer):
             if completed.returncode != 0:
                 raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
 
-            missing_pages = [
-                prepared_page
-                for prepared_page in job.pages.values()
-                if job.resolve_output_path(prepared_page.page_index) is None
-            ]
-            for prepared_page in missing_pages:
+            fallback_pages: list[PreparedChapterPage] = []
+            for prepared_page in job.pages.values():
+                produced_output_path = job.resolve_output_path(prepared_page.page_index)
+                if produced_output_path is None:
+                    fallback_pages.append(prepared_page)
+                    continue
+                if _chapter_output_requires_fallback(
+                    input_path=prepared_page.input_path,
+                    output_path=produced_output_path,
+                ):
+                    produced_output_path.unlink(missing_ok=True)
+                    fallback_pages.append(prepared_page)
+
+            for prepared_page in fallback_pages:
                 fallback_workspace = job.workspace / f"fallback-{prepared_page.page_index:04d}"
                 fallback_workspace.mkdir(parents=True, exist_ok=True)
                 processed_image = _process_single_request_in_workspace(
@@ -1291,6 +1299,22 @@ def _resolve_produced_output_path(output_path: Path, requested_output_format: st
             return candidate
 
     return None
+
+
+def _chapter_output_requires_fallback(input_path: Path, output_path: Path) -> bool:
+    try:
+        with Image.open(input_path) as input_image:
+            input_extrema = input_image.convert("RGB").getextrema()
+        with Image.open(output_path) as output_image:
+            output_extrema = output_image.convert("RGB").getextrema()
+    except Exception:
+        return True
+
+    return _is_full_black_extrema(output_extrema) and not _is_full_black_extrema(input_extrema)
+
+
+def _is_full_black_extrema(extrema: tuple[tuple[int, int], ...]) -> bool:
+    return all(channel_min == 0 and channel_max == 0 for channel_min, channel_max in extrema)
 
 
 def _sanitize_extension(value: str) -> str:
