@@ -203,21 +203,6 @@ class SubprocessRunResult:
     details: str
 
 
-@dataclass(frozen=True)
-class TailscaleStatus:
-    backend_state: str | None
-    dns_name: str | None
-    ipv4: tuple[str, ...]
-
-    @property
-    def urls(self) -> tuple[str, ...]:
-        urls: list[str] = []
-        if self.dns_name:
-            urls.append(self.dns_name)
-        urls.extend(self.ipv4)
-        return tuple(dict.fromkeys(urls))
-
-
 @dataclass
 class ChapterUpscaleJob:
     job_id: str
@@ -278,7 +263,6 @@ class ReaderAiServer(ThreadingHTTPServer):
         self._workspace_root = Path(self._workspace_root_owner.name)
         self._chapter_jobs_root = self._workspace_root / "chapter-jobs"
         self._chapter_jobs_root.mkdir(parents=True, exist_ok=True)
-        self.tailscale_status = _detect_tailscale_status(config.port)
         self._request_sequence = itertools.count(1)
         self._processing_queue: queue.Queue[Any] = queue.Queue()
         self._worker_threads: list[threading.Thread] = []
@@ -692,8 +676,6 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "model_name": self.server.config.model_name,
                 "batch_size": self.server.config.batch_size,
                 "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
-                "token_required": bool(self.server.config.token.strip()),
-                "tailscale": _serialize_tailscale_status(self.server.tailscale_status),
                 "supported_models": list(SUPPORTED_MODEL_NAMES),
                 "model_profiles": SUPPORTED_MODELS,
             }
@@ -2215,78 +2197,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _tailscale_cli_path() -> str | None:
-    return shutil.which("tailscale") or shutil.which("tailscale.exe")
-
-
-def _run_tailscale_command(*args: str) -> subprocess.CompletedProcess[str] | None:
-    tailscale_path = _tailscale_cli_path()
-    if not tailscale_path:
-        return None
-    try:
-        return subprocess.run(
-            [tailscale_path, *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            check=False,
-        )
-    except Exception:
-        return None
-
-
-def _detect_tailscale_status(port: int) -> TailscaleStatus | None:
-    status_result = _run_tailscale_command("status", "--json")
-    if status_result and status_result.returncode == 0 and status_result.stdout.strip():
-        try:
-            payload = json.loads(status_result.stdout)
-            self_info = payload.get("Self") or {}
-            backend_state = str(payload.get("BackendState") or "").strip() or None
-            dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".") or None
-            ipv4 = tuple(
-                ip
-                for ip in self_info.get("TailscaleIPs") or []
-                if isinstance(ip, str) and "." in ip
-            )
-            return TailscaleStatus(
-                backend_state=backend_state,
-                dns_name=dns_name,
-                ipv4=ipv4,
-            )
-        except Exception:
-            pass
-
-    ip_result = _run_tailscale_command("ip", "-4")
-    if ip_result and ip_result.returncode == 0:
-        ipv4 = tuple(
-            line.strip()
-            for line in ip_result.stdout.splitlines()
-            if line.strip()
-        )
-        if ipv4:
-            return TailscaleStatus(
-                backend_state=None,
-                dns_name=None,
-                ipv4=ipv4,
-            )
-
-    return None
-
-
-def _serialize_tailscale_status(status: TailscaleStatus | None) -> dict[str, Any] | None:
-    if status is None:
-        return None
-    return {
-        "backend_state": status.backend_state,
-        "dns_name": status.dns_name,
-        "ipv4": list(status.ipv4),
-        "urls": [f"http://{value}:8765" for value in status.urls],
-    }
-
-
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, write_through=True)
@@ -2330,14 +2240,6 @@ def main() -> int:
         _emit_log_line(f"Model dir: {config.model_dir}", console=False)
         _emit_log_line(f"Live logs: enabled -> {log_path}", console=False)
         _emit_log_line("Console logging: win32 direct + fd fallback", console=False)
-        if server.tailscale_status is not None:
-            if server.tailscale_status.backend_state:
-                _emit_log_line(f"Tailscale: {server.tailscale_status.backend_state}")
-            use_url = next((f"http://{value}:{config.port}" for value in server.tailscale_status.urls), None)
-            if use_url is not None:
-                _emit_log_line(f"Use in Mihon AI: {use_url}")
-            if not config.token.strip():
-                _emit_log_line("Tailscale warning: token is empty. Set the same token in Mihon AI before reading remotely.")
         try:
             server.serve_forever()
         except KeyboardInterrupt:

@@ -29,7 +29,6 @@ internal fun ColumnScope.AiPage(screenModel: ReaderSettingsScreenModel) {
         manualUrl = remoteAiBaseUrl,
         discoveredUrl = remoteAiDiscoveredBaseUrl,
     )
-    val remoteAiTokenSubtitle = remoteAiTokenSubtitle()
 
     LaunchedEffect(rawAiBackendMode) {
         screenModel.preferences.migrateLegacyAiBackendMode()
@@ -75,7 +74,6 @@ internal fun ColumnScope.AiPage(screenModel: ReaderSettingsScreenModel) {
             label = stringResource(MR.strings.pref_reader_ai_remote_token),
             value = remoteAiToken,
             onChange = screenModel.preferences.remoteAiToken::set,
-            supportingText = remoteAiTokenSubtitle,
         )
     }
 }

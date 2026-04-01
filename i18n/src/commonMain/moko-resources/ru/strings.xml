@@ -125,12 +125,10 @@
     <string name="reader_ai_remote_batch_mode_four">По 4</string>
     <string name="reader_ai_remote_batch_mode_chapter">Глава</string>
     <string name="pref_reader_ai_remote_url">URL удаленного AI-сервера</string>
-    <string name="reader_ai_remote_url_auto_hint">Оставьте URL пустым, чтобы автоматически найти companion по Wi-Fi, или укажите адрес Tailscale для удаленного доступа.</string>
+    <string name="reader_ai_remote_url_auto_hint">Оставьте URL пустым, чтобы автоматически найти companion по Wi-Fi.</string>
     <string name="reader_ai_remote_url_auto_discovered">Автообнаруженный companion: %s</string>
     <string name="reader_ai_remote_url_auto_active">Используется автообнаруженный companion: %s</string>
-    <string name="reader_ai_remote_url_tailscale_active">Используется companion через Tailscale: %s</string>
     <string name="pref_reader_ai_remote_token">Токен удаленного AI-сервера</string>
-    <string name="reader_ai_remote_token_hint">В домашней Wi-Fi сети можно оставить пустым. Для Tailscale и другого удаленного доступа токен лучше задать.</string>
     <string name="reader_ai_failed">AI-апскейл не сработал, показана исходная страница</string>
     <string name="pref_category_about">Информация</string>
     <string name="pref_category_advanced">Дополнительно</string>
