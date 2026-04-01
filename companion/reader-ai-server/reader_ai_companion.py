@@ -604,19 +604,24 @@ class ReaderAiServer(ThreadingHTTPServer):
             for prepared_page in fallback_pages:
                 fallback_workspace = job.workspace / f"fallback-{prepared_page.page_index:04d}"
                 fallback_workspace.mkdir(parents=True, exist_ok=True)
+                fallback_body = prepared_page.input_path.read_bytes()
                 processed_image = _process_single_request_in_workspace(
                     config=self.config,
                     workspace=fallback_workspace,
                     request=PendingUpscaleRequest(
                         request_id=f"{job.request_id}/page-{prepared_page.page_index}/fallback",
-                        body=prepared_page.input_path.read_bytes(),
+                        body=fallback_body,
                         input_format=prepared_page.input_format,
                         requested_output_format=job.requested_output_format,
                         model_name=job.model_name,
                         native_scale=job.native_scale,
                         preferred_output_format=None,
                         batch_size=1,
-                        is_chunked=False,
+                        is_chunked=_requires_chunked_upscale(
+                            body=fallback_body,
+                            native_scale=job.native_scale,
+                            target_scale=job.native_scale,
+                        ),
                     ),
                 )
                 fallback_output_path = job.output_dir / (
@@ -1206,7 +1211,11 @@ def _run_subprocess_batch(
             native_scale=request.native_scale,
             preferred_output_format=request.preferred_output_format,
             batch_size=1,
-            is_chunked=False,
+            is_chunked=_requires_chunked_upscale(
+                body=request.body,
+                native_scale=request.native_scale,
+                target_scale=request.native_scale,
+            ),
             manga_title=request.manga_title,
             chapter_title=request.chapter_title,
             page_index=request.page_index,
@@ -1288,6 +1297,9 @@ def _resolve_produced_output_path(output_path: Path, requested_output_format: st
     candidates = [output_path]
     normalized_requested_format = _sanitize_extension(requested_output_format)
     for alternate_format in ("png", "jpg", "jpeg", "webp"):
+        alternate_suffix_path = output_path.with_suffix(f".{alternate_format}")
+        if alternate_suffix_path not in candidates:
+            candidates.append(alternate_suffix_path)
         alternate_path = output_path.with_name(f"{output_path.name}.{alternate_format}")
         if alternate_path not in candidates:
             candidates.append(alternate_path)
