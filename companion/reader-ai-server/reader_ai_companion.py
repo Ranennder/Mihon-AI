@@ -1409,7 +1409,7 @@ def _run_logged_subprocess(
             output_lines.append(line)
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
-                console=_should_surface_subprocess_console_line(line),
+                console=_should_surface_subprocess_console_line(request_id, line),
             )
 
     reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
@@ -1776,9 +1776,11 @@ def _emit_log_line(message: str, *, console: bool = True, log_file: bool = True)
     _emit_log_text(message + "\n", console=console, log_file=log_file)
 
 
-def _should_surface_subprocess_console_line(line: str) -> bool:
+def _should_surface_subprocess_console_line(request_id: str, line: str) -> bool:
     stripped = line.strip()
     if not stripped:
+        return False
+    if "/chapter-" in request_id and _PROGRESS_RE.fullmatch(stripped) is not None:
         return False
     if _PROGRESS_RE.fullmatch(stripped) is not None:
         return True
