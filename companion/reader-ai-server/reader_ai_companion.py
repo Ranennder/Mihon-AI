@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 from PIL import Image
 
@@ -734,8 +734,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
         requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
         requested_batch_size = (self.headers.get("X-Reader-AI-Batch-Size") or "").strip()
-        manga_title = (self.headers.get("X-Reader-AI-Manga-Title") or "").strip() or None
-        chapter_title = (self.headers.get("X-Reader-AI-Chapter-Title") or "").strip() or None
+        manga_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Manga-Title"))
+        chapter_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Chapter-Title"))
         page_index_header = (self.headers.get("X-Reader-AI-Page-Index") or "").strip()
         total_pages_header = (self.headers.get("X-Reader-AI-Page-Count") or "").strip()
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
@@ -874,8 +874,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
         output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
         requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
-        manga_title = (self.headers.get("X-Reader-AI-Manga-Title") or "").strip() or None
-        chapter_title = (self.headers.get("X-Reader-AI-Chapter-Title") or "").strip() or None
+        manga_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Manga-Title"))
+        chapter_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Chapter-Title"))
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
             self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
             return
@@ -1286,6 +1286,20 @@ def _parse_optional_int_header(value: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _decode_optional_text_header(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        decoded = unquote_plus(text)
+    except Exception:
+        decoded = text
+    decoded = decoded.strip()
+    return decoded or None
 
 
 def _build_chapter_display_label(manga_title: str | None, chapter_title: str | None) -> str | None:

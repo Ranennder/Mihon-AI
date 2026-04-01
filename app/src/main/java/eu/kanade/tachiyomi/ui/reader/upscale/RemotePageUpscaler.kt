@@ -16,6 +16,8 @@ import org.json.JSONObject
 import tachiyomi.core.common.util.system.logcat
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
@@ -214,11 +216,11 @@ class RemotePageUpscaler(
             metadata?.mangaTitle
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
-                ?.let { requestBuilder.header("X-Reader-AI-Manga-Title", it) }
+                ?.let { requestBuilder.header("X-Reader-AI-Manga-Title", encodeHeaderText(it)) }
             metadata?.chapterTitle
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
-                ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", it) }
+                ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", encodeHeaderText(it)) }
 
             val request = requestBuilder
                 .post(archiveFile.asRequestBody(REMOTE_ARCHIVE_MEDIA_TYPE.toMediaType()))
@@ -287,11 +289,11 @@ class RemotePageUpscaler(
         pageMetadata?.mangaTitle
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
-            ?.let { requestBuilder.header("X-Reader-AI-Manga-Title", it) }
+            ?.let { requestBuilder.header("X-Reader-AI-Manga-Title", encodeHeaderText(it)) }
         pageMetadata?.chapterTitle
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
-            ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", it) }
+            ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", encodeHeaderText(it)) }
         pageMetadata?.let {
             requestBuilder.header("X-Reader-AI-Page-Index", it.pageIndex.toString())
             requestBuilder.header("X-Reader-AI-Page-Count", it.totalPages.toString())
@@ -543,6 +545,10 @@ class RemotePageUpscaler(
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
         private const val REMOTE_ARCHIVE_FORMAT = "zip"
         private const val REMOTE_ARCHIVE_MEDIA_TYPE = "application/zip"
+
+        private fun encodeHeaderText(value: String): String {
+            return URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+        }
     }
 }
 
