@@ -63,6 +63,7 @@ CHUNK_OVERLAP_INPUT_PIXELS = 32
 LOG_FILE_NAME = "companion.log"
 CHAPTER_ARCHIVE_FORMAT = "zip"
 CHAPTER_JOB_RETENTION_SECONDS = 1800
+CHAPTER_PAGE_STABILITY_SECONDS = 0.35
 _STOP_PROCESSING = object()
 _LOG_LOCK = threading.RLock()
 _LOG_FILE_HANDLE: Any | None = None
@@ -220,6 +221,8 @@ class ChapterUpscaleJob:
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
     error: Exception | None = None
     ready_pages: set[int] = field(default_factory=set, repr=False)
+    stable_output_pages: set[int] = field(default_factory=set, repr=False)
+    observed_output_sizes: dict[int, tuple[int, float]] = field(default_factory=dict, repr=False)
     state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def resolve_output_path(self, page_index: int) -> Path | None:
@@ -400,11 +403,27 @@ class ReaderAiServer(ThreadingHTTPServer):
             raise KeyError(job_id)
 
         produced_output_path = job.resolve_output_path(page_index)
-        if produced_output_path is not None and produced_output_path.is_file() and produced_output_path.stat().st_size > 0:
-            return ProcessedImage(
-                bytes=produced_output_path.read_bytes(),
-                output_format=_sanitize_extension(produced_output_path.suffix),
-            )
+        if produced_output_path is not None and produced_output_path.is_file():
+            output_size = produced_output_path.stat().st_size
+            if output_size > 0:
+                if not job.completed.is_set():
+                    now = time.perf_counter()
+                    with job.state_lock:
+                        if page_index not in job.stable_output_pages:
+                            previous_observation = job.observed_output_sizes.get(page_index)
+                            if previous_observation is None or previous_observation[0] != output_size:
+                                job.observed_output_sizes[page_index] = (output_size, now)
+                                return None
+                            observed_size, observed_at = previous_observation
+                            if observed_size != output_size or (now - observed_at) < CHAPTER_PAGE_STABILITY_SECONDS:
+                                return None
+                            job.stable_output_pages.add(page_index)
+                            job.observed_output_sizes.pop(page_index, None)
+
+                return ProcessedImage(
+                    bytes=produced_output_path.read_bytes(),
+                    output_format=_sanitize_extension(produced_output_path.suffix),
+                )
 
         if job.completed.is_set():
             if job.error is not None:
