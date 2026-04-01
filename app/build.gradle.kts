@@ -33,6 +33,24 @@ val stableDevKeyPassword =
         ?: providers.environmentVariable("MIHONAI_DEV_KEY_PASSWORD").orNull
         ?: stableDevStorePassword
 val hasStableDevKeystore = stableDevKeystoreFile.exists()
+val repoReleaseKeystoreFile = file(
+    providers.gradleProperty("mihonai.releaseKeystorePath").orNull
+        ?: providers.environmentVariable("MIHONAI_RELEASE_KEYSTORE_PATH").orNull
+        ?: rootProject.file("signing/mihon-ai-release.jks").absolutePath,
+)
+val repoReleaseStorePassword =
+    providers.gradleProperty("mihonai.releaseStorePassword").orNull
+        ?: providers.environmentVariable("MIHONAI_RELEASE_STORE_PASSWORD").orNull
+        ?: "mihonai-dev"
+val repoReleaseKeyAlias =
+    providers.gradleProperty("mihonai.releaseKeyAlias").orNull
+        ?: providers.environmentVariable("MIHONAI_RELEASE_KEY_ALIAS").orNull
+        ?: "mihonai-dev"
+val repoReleaseKeyPassword =
+    providers.gradleProperty("mihonai.releaseKeyPassword").orNull
+        ?: providers.environmentVariable("MIHONAI_RELEASE_KEY_PASSWORD").orNull
+        ?: repoReleaseStorePassword
+val hasRepoReleaseKeystore = repoReleaseKeystoreFile.exists()
 val appVersionCodeBase = 7667
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
@@ -56,6 +74,14 @@ android {
                 storePassword = stableDevStorePassword
                 keyAlias = stableDevKeyAlias
                 keyPassword = stableDevKeyPassword
+            }
+        }
+        if (hasRepoReleaseKeystore) {
+            create("mihonAiRelease") {
+                storeFile = repoReleaseKeystoreFile
+                storePassword = repoReleaseStorePassword
+                keyAlias = repoReleaseKeyAlias
+                keyPassword = repoReleaseKeyPassword
             }
         }
     }
@@ -90,6 +116,9 @@ android {
         val release by getting {
             isMinifyEnabled = Config.enableCodeShrink
             isShrinkResources = Config.enableCodeShrink
+            if (hasRepoReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("mihonAiRelease")
+            }
 
             proguardFiles("proguard-android-optimize.txt", "proguard-rules.pro")
 
@@ -102,6 +131,9 @@ android {
             initWith(release)
 
             applicationIdSuffix = ".foss"
+            if (hasRepoReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("mihonAiRelease")
+            }
 
             matchingFallbacks.addAll(commonMatchingFallbacks)
         }
