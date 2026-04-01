@@ -9,11 +9,17 @@ import logcat.LogPriority
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
+import org.json.JSONObject
 import tachiyomi.core.common.util.system.logcat
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class RemotePageUpscaler(
     app: Application,
@@ -21,6 +27,7 @@ class RemotePageUpscaler(
     networkHelper: NetworkHelper,
 ) {
 
+    private val uploadWorkspace = File(app.cacheDir, "reader_ai_remote_uploads").apply { mkdirs() }
     private val client = networkHelper.nonCloudflareClient.newBuilder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
@@ -33,6 +40,107 @@ class RemotePageUpscaler(
 
     fun consumeLastErrorMessage(): String? {
         return lastErrorMessage.also { lastErrorMessage = null }
+    }
+
+    fun prepareChapterUploadPage(
+        pageIndex: Int,
+        sourceBytes: ByteArray,
+    ): PreparedChapterUploadPage? {
+        lastErrorMessage = null
+        val preparedImage = prepareRequestImage(sourceBytes) ?: return null
+        return PreparedChapterUploadPage(
+            pageIndex = pageIndex,
+            bytes = preparedImage.bytes,
+            extension = preparedImage.extension,
+        )
+    }
+
+    fun startChapterJob(pages: List<PreparedChapterUploadPage>): StartedChapterJob? {
+        lastErrorMessage = null
+        if (pages.isEmpty()) {
+            lastErrorMessage = "Chapter upload is empty"
+            return null
+        }
+
+        val baseUrlResolution = discovery.resolveBaseUrl()
+        if (baseUrlResolution == null) {
+            lastErrorMessage =
+                "Remote AI companion was not found on local Wi-Fi. Set the server URL manually if needed."
+            return null
+        }
+
+        val initialAttempt = runStartChapterJobRequest(
+            baseUrlResolution = baseUrlResolution,
+            pages = pages,
+        )
+        if (initialAttempt.job != null) {
+            return initialAttempt.job
+        }
+
+        if (!baseUrlResolution.isAutoDiscovered || initialAttempt.failureKind != UpscaleFailureKind.NETWORK) {
+            return null
+        }
+
+        discovery.clearCachedBaseUrl()
+        val rediscoveredBaseUrl = discovery.resolveBaseUrl(forceRediscovery = true)
+            ?.takeIf { it.baseUrl != baseUrlResolution.baseUrl }
+            ?: return null
+
+        return runStartChapterJobRequest(
+            baseUrlResolution = rediscoveredBaseUrl,
+            pages = pages,
+        ).job
+    }
+
+    fun fetchChapterPage(
+        job: StartedChapterJob,
+        pageIndex: Int,
+    ): ChapterPageFetchResult {
+        lastErrorMessage = null
+
+        val requestUrl = "${job.baseUrl}/api/upscale-chapter/${job.jobId}/page/$pageIndex".toHttpUrlOrNull()
+        if (requestUrl == null) {
+            lastErrorMessage = "Remote AI chapter job URL is invalid"
+            return ChapterPageFetchResult.Failed(lastErrorMessage!!)
+        }
+
+        val requestBuilder = Request.Builder()
+            .url(requestUrl)
+            .header("Accept", "image/jpeg, image/png;q=0.9")
+
+        readerPreferences.remoteAiToken.get().trim()
+            .takeIf { it.isNotEmpty() }
+            ?.let { requestBuilder.header("X-Reader-AI-Token", it) }
+
+        return runCatching {
+            client.newCall(requestBuilder.get().build()).execute().use { response ->
+                when {
+                    response.code == 202 -> ChapterPageFetchResult.Pending
+                    response.isSuccessful -> {
+                        val responseBytes = response.body.bytes()
+                        if (responseBytes.isEmpty()) {
+                            lastErrorMessage = "Remote AI chapter page is empty"
+                            ChapterPageFetchResult.Failed(lastErrorMessage!!)
+                        } else {
+                            ChapterPageFetchResult.Ready(responseBytes)
+                        }
+                    }
+                    else -> {
+                        lastErrorMessage = response.body.string()
+                            .takeIf(String::isNotBlank)
+                            ?: "Remote AI chapter page request returned HTTP ${response.code}"
+                        ChapterPageFetchResult.Failed(lastErrorMessage!!)
+                    }
+                }
+            }
+        }
+            .onFailure {
+                lastErrorMessage = it.message ?: "Remote AI chapter page request failed"
+                logcat(LogPriority.WARN, it) { "Failed to fetch remote AI chapter page" }
+            }
+            .getOrElse {
+                ChapterPageFetchResult.Failed(lastErrorMessage ?: "Remote AI chapter page request failed")
+            }
     }
 
     fun upscaleSource(source: BufferedSource): ByteArray? {
@@ -67,6 +175,71 @@ class RemotePageUpscaler(
             baseUrl = rediscoveredBaseUrl.baseUrl,
             preparedImage = preparedImage,
         ).bytes
+    }
+
+    private fun runStartChapterJobRequest(
+        baseUrlResolution: RemoteAiServerDiscovery.Resolution,
+        pages: List<PreparedChapterUploadPage>,
+    ): ChapterJobAttempt {
+        val requestUrl = "${baseUrlResolution.baseUrl}/api/upscale-chapter".toHttpUrlOrNull()
+        if (requestUrl == null) {
+            lastErrorMessage = "Remote AI chapter job URL is invalid"
+            return ChapterJobAttempt.failure(UpscaleFailureKind.CONFIGURATION)
+        }
+
+        val archiveFile = createChapterArchive(pages)
+        try {
+            val requestBuilder = Request.Builder()
+                .url(requestUrl)
+                .header("Accept", "application/json")
+                .header("X-Reader-AI-Archive-Format", REMOTE_ARCHIVE_FORMAT)
+                .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
+                .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
+
+            readerPreferences.remoteAiToken.get().trim()
+                .takeIf { it.isNotEmpty() }
+                ?.let { requestBuilder.header("X-Reader-AI-Token", it) }
+
+            val request = requestBuilder
+                .post(archiveFile.asRequestBody(REMOTE_ARCHIVE_MEDIA_TYPE.toMediaType()))
+                .build()
+
+            return runCatching {
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        lastErrorMessage = response.body.string()
+                            .takeIf(String::isNotBlank)
+                            ?: "Remote AI chapter job returned HTTP ${response.code}"
+                        return@use ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
+                    }
+
+                    val payload = response.body.string()
+                    val json = JSONObject(payload)
+                    val jobId = json.optString("job_id").trim()
+                    if (jobId.isEmpty()) {
+                        lastErrorMessage = "Remote AI chapter job response did not include a job id"
+                        return@use ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
+                    }
+
+                    lastErrorMessage = null
+                    ChapterJobAttempt.success(
+                        StartedChapterJob(
+                            baseUrl = baseUrlResolution.baseUrl,
+                            jobId = jobId,
+                        ),
+                    )
+                }
+            }
+                .onFailure {
+                    lastErrorMessage = it.message ?: "Remote AI chapter job request failed"
+                    logcat(LogPriority.WARN, it) { "Failed to start remote AI chapter job" }
+                }
+                .getOrElse {
+                    ChapterJobAttempt.failure(UpscaleFailureKind.NETWORK)
+                }
+        } finally {
+            archiveFile.delete()
+        }
     }
 
     private fun runUpscaleRequest(
@@ -194,6 +367,19 @@ class RemotePageUpscaler(
         return responseBytes
     }
 
+    private fun createChapterArchive(pages: List<PreparedChapterUploadPage>): File {
+        val archiveFile = File(uploadWorkspace, "chapter-${UUID.randomUUID()}.zip")
+        ZipOutputStream(archiveFile.outputStream().buffered()).use { zipOutput ->
+            pages.sortedBy { it.pageIndex }.forEach { page ->
+                val entryName = "${page.pageIndex.toString().padStart(4, '0')}.${page.extension}"
+                zipOutput.putNextEntry(ZipEntry(entryName))
+                zipOutput.write(page.bytes)
+                zipOutput.closeEntry()
+            }
+        }
+        return archiveFile
+    }
+
     private fun decodeImageSize(sourceBytes: ByteArray): ImageSize? {
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(sourceBytes, 0, sourceBytes.size, options)
@@ -232,6 +418,23 @@ class RemotePageUpscaler(
         }
     }
 
+    data class PreparedChapterUploadPage(
+        val pageIndex: Int,
+        val bytes: ByteArray,
+        val extension: String,
+    )
+
+    data class StartedChapterJob(
+        val baseUrl: String,
+        val jobId: String,
+    )
+
+    sealed interface ChapterPageFetchResult {
+        data object Pending : ChapterPageFetchResult
+        data class Ready(val bytes: ByteArray) : ChapterPageFetchResult
+        data class Failed(val message: String) : ChapterPageFetchResult
+    }
+
     private data class PreparedImage(
         val bytes: ByteArray,
         val mediaType: String,
@@ -262,6 +465,17 @@ class RemotePageUpscaler(
         }
     }
 
+    private data class ChapterJobAttempt(
+        val job: StartedChapterJob?,
+        val failureKind: UpscaleFailureKind?,
+    ) {
+        companion object {
+            fun success(job: StartedChapterJob) = ChapterJobAttempt(job = job, failureKind = null)
+
+            fun failure(kind: UpscaleFailureKind) = ChapterJobAttempt(job = null, failureKind = kind)
+        }
+    }
+
     private enum class UpscaleFailureKind {
         CONFIGURATION,
         NETWORK,
@@ -281,6 +495,8 @@ class RemotePageUpscaler(
 
     companion object {
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
+        private const val REMOTE_ARCHIVE_FORMAT = "zip"
+        private const val REMOTE_ARCHIVE_MEDIA_TYPE = "application/zip"
     }
 }
 

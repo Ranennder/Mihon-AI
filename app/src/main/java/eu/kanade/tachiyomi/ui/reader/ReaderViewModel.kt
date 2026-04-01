@@ -875,16 +875,8 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
-        val prefetchPlan = pages.mapIndexed { priority, page ->
-            PrefetchRequest(
-                page = page,
-                lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
-            ) to priority
-        }
         readerPageUpscaler.retainScheduledPrefetches(pages)
-        prefetchPlan.forEach { (request, priority) ->
-            readerPageUpscaler.schedulePrefetch(request.page, priority, request.lane)
-        }
+        readerPageUpscaler.scheduleWholeChapterRemotePrefetch(pages)
     }
 
     private fun shouldQueueWholeChapterForRemote(chapter: ReaderChapter): Boolean {

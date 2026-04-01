@@ -4,6 +4,7 @@ import android.app.Application
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
+import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.CoroutineScope
@@ -13,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -39,6 +41,7 @@ class ReaderPageUpscaler(
     private val pageLocks = ConcurrentHashMap<String, Mutex>()
     private val scheduledJobs = ConcurrentHashMap<String, Job>()
     private val forcedBlockingPages = ConcurrentHashMap<String, Unit>()
+    private val remoteChapterJobs = ConcurrentHashMap<String, RemoteChapterPrefetchJob>()
     private val remoteQueuedPages = LinkedHashMap<String, RemotePrefetchTask>()
     private val remoteQueueMutex = Mutex()
     private val remotePrefetchSignal = Channel<Unit>(Channel.CONFLATED)
@@ -75,6 +78,14 @@ class ReaderPageUpscaler(
         }
 
         val cacheFile = cacheFile(page)
+        val backendMode = ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get())
+        val wholeChapterRemoteMode =
+            backendMode == ReaderPreferences.AiBackendMode.REMOTE && isRemoteWholeChapterModeSelected()
+        if (wholeChapterRemoteMode) {
+            page.chapter.pages
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::scheduleWholeChapterRemotePrefetch)
+        }
         if (cacheFile.isReadyCacheFile()) {
             return cacheFile.toBuffer()
         }
@@ -87,7 +98,6 @@ class ReaderPageUpscaler(
             return source
         }
 
-        val backendMode = ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get())
         if (backendMode == ReaderPreferences.AiBackendMode.REMOTE && (allowBlocking || forceBlocking)) {
             dropRemotePrefetch(cacheFile.absolutePath)
         }
@@ -95,6 +105,9 @@ class ReaderPageUpscaler(
         val lock = pageLocks.getOrPut(cacheFile.absolutePath) { Mutex() }
         return lock.withLock {
             if (cacheFile.isReadyCacheFile()) {
+                return@withLock cacheFile.toBuffer()
+            }
+            if (wholeChapterRemoteMode && waitForWholeChapterCache(cacheFile)) {
                 return@withLock cacheFile.toBuffer()
             }
 
@@ -139,6 +152,13 @@ class ReaderPageUpscaler(
             return
         }
 
+        if (isRemoteWholeChapterModeSelected()) {
+            page.chapter.pages
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::scheduleWholeChapterRemotePrefetch)
+            return
+        }
+
         val stream = page.stream ?: return
         val cacheFile = cacheFile(page)
         if (cacheFile.isReadyCacheFile()) {
@@ -155,6 +175,13 @@ class ReaderPageUpscaler(
         lane: Int = REMOTE_PRIMARY_LANE,
     ) {
         if (!isEnabled()) {
+            return
+        }
+
+        if (isRemoteWholeChapterModeSelected()) {
+            page.chapter.pages
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::scheduleWholeChapterRemotePrefetch)
             return
         }
 
@@ -185,6 +212,46 @@ class ReaderPageUpscaler(
             }
         }
         scheduledJobs[cachePath] = scheduledJob
+    }
+
+    fun scheduleWholeChapterRemotePrefetch(pages: List<ReaderPage>) {
+        if (!isEnabled() || !isRemoteWholeChapterModeSelected() || pages.isEmpty()) {
+            return
+        }
+
+        val firstPage = pages.first()
+        val chapter = firstPage.chapter.chapter
+        val chapterId = chapter.id ?: return
+        val mangaId = chapter.manga_id ?: 0L
+        val cacheTargets = pages.map { page ->
+            ChapterCacheTarget(
+                page = page,
+                cacheFile = cacheFile(page),
+            )
+        }
+        val jobKey = buildRemoteChapterJobKey(
+            mangaId = mangaId,
+            chapterId = chapterId,
+        )
+        val existingJob = remoteChapterJobs[jobKey]
+        if (existingJob?.job?.isActive == true) {
+            return
+        }
+
+        val job = remotePrefetchScope.launch {
+            try {
+                runWholeChapterRemotePrefetch(cacheTargets)
+            } catch (e: Throwable) {
+                logcat(LogPriority.WARN, e) { "Failed to prefetch whole chapter via remote AI ($chapterId)" }
+            } finally {
+                remoteChapterJobs.remove(jobKey)
+            }
+        }
+        remoteChapterJobs[jobKey] = RemoteChapterPrefetchJob(
+            mangaId = mangaId,
+            chapterId = chapterId,
+            job = job,
+        )
     }
 
     private fun processingScopeForCurrentBackend(): CoroutineScope {
@@ -280,6 +347,14 @@ class ReaderPageUpscaler(
         mangaDir.listFiles()
             ?.filter { it.isDirectory && it.name !in keepDirNames }
             ?.forEach { it.deleteRecursively() }
+
+        remoteChapterJobs.entries.removeIf { (_, chapterJob) ->
+            if (chapterJob.mangaId != mangaId || chapterJob.chapterId in chapterIds) {
+                return@removeIf false
+            }
+            chapterJob.job.cancel()
+            true
+        }
     }
 
     fun clearTransientChapters(
@@ -409,9 +484,101 @@ class ReaderPageUpscaler(
         }
     }
 
+    private suspend fun runWholeChapterRemotePrefetch(cacheTargets: List<ChapterCacheTarget>) {
+        val pendingTargets = cacheTargets.filterNot { it.cacheFile.isReadyCacheFile() }
+        if (pendingTargets.isEmpty()) {
+            return
+        }
+
+        val preparedPages = buildList {
+            pendingTargets.forEach { target ->
+                awaitPageReady(target.page)
+                if (target.cacheFile.isReadyCacheFile()) {
+                    return@forEach
+                }
+
+                val stream = target.page.stream ?: return@forEach
+                val sourceBytes = stream().use { input ->
+                    Buffer().readFrom(input).readByteArray()
+                }
+                val preparedPage = remotePageUpscaler.prepareChapterUploadPage(
+                    pageIndex = target.page.index,
+                    sourceBytes = sourceBytes,
+                ) ?: return
+                add(preparedPage)
+            }
+        }
+        if (preparedPages.isEmpty()) {
+            return
+        }
+
+        val chapterJob = remotePageUpscaler.startChapterJob(preparedPages) ?: return
+        val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
+        repeat(2_400) {
+            val iterator = remainingTargets.iterator()
+            var sawProgress = false
+            while (iterator.hasNext()) {
+                val (_, target) = iterator.next()
+                if (target.cacheFile.isReadyCacheFile()) {
+                    iterator.remove()
+                    continue
+                }
+
+                when (val fetchResult = remotePageUpscaler.fetchChapterPage(chapterJob, target.page.index)) {
+                    is RemotePageUpscaler.ChapterPageFetchResult.Pending -> Unit
+                    is RemotePageUpscaler.ChapterPageFetchResult.Ready -> {
+                        target.cacheFile.parentFile?.mkdirs()
+                        target.cacheFile.writeBytesAtomically(fetchResult.bytes)
+                        iterator.remove()
+                        sawProgress = true
+                    }
+                    is RemotePageUpscaler.ChapterPageFetchResult.Failed -> {
+                        lastFailureMessage = fetchResult.message
+                        return
+                    }
+                }
+            }
+
+            if (remainingTargets.isEmpty()) {
+                return
+            }
+
+            delay(if (sawProgress) 100 else 350)
+        }
+
+        lastFailureMessage = "Remote AI chapter job timed out before all pages were ready"
+    }
+
+    private suspend fun waitForWholeChapterCache(cacheFile: File): Boolean {
+        repeat(8) {
+            if (cacheFile.isReadyCacheFile()) {
+                return true
+            }
+            delay(100)
+        }
+        return cacheFile.isReadyCacheFile()
+    }
+
     private fun isRemoteBackendSelected(): Boolean {
         return ReaderPreferences.normalizeAiBackendMode(readerPreferences.aiBackendMode.get()) ==
             ReaderPreferences.AiBackendMode.REMOTE
+    }
+
+    private fun isRemoteWholeChapterModeSelected(): Boolean {
+        return isRemoteBackendSelected() && readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter
+    }
+
+    private fun buildRemoteChapterJobKey(
+        mangaId: Long,
+        chapterId: Long,
+    ): String {
+        return buildString {
+            append(mangaId)
+            append(':')
+            append(chapterId)
+            append(':')
+            append(readerPreferences.remoteAiModel.get().cacheKey)
+        }
     }
 
     private data class RemotePrefetchTask(
@@ -420,6 +587,17 @@ class ReaderPageUpscaler(
         val priority: Int,
         val lane: Int,
         val sequence: Long,
+    )
+
+    private data class ChapterCacheTarget(
+        val page: ReaderPage,
+        val cacheFile: File,
+    )
+
+    private data class RemoteChapterPrefetchJob(
+        val mangaId: Long,
+        val chapterId: Long,
+        val job: Job,
     )
 
     companion object {

@@ -16,6 +16,8 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
+import zipfile
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,6 +61,8 @@ MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
 LOG_FILE_NAME = "companion.log"
+CHAPTER_ARCHIVE_FORMAT = "zip"
+CHAPTER_JOB_RETENTION_SECONDS = 1800
 _STOP_PROCESSING = object()
 _LOG_LOCK = threading.Lock()
 _LOG_FILE_HANDLE: Any | None = None
@@ -66,6 +70,7 @@ _CONSOLE_STYLING_ENABLED = False
 _LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\]\s+(.*)$")
 _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
+_CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
 _ANSI_RESET = "\x1b[0m"
 _ANSI_DIM = "\x1b[2m"
 _ANSI_BOLD = "\x1b[1m"
@@ -138,6 +143,13 @@ class ProcessedImage:
     output_format: str
 
 
+@dataclass(frozen=True)
+class PreparedChapterPage:
+    page_index: int
+    input_path: Path
+    input_format: str
+
+
 @dataclass
 class PendingUpscaleRequest:
     request_id: str
@@ -167,6 +179,32 @@ class SubprocessRunResult:
     details: str
 
 
+@dataclass
+class ChapterUpscaleJob:
+    job_id: str
+    request_id: str
+    created_at: float
+    model_name: str
+    native_scale: int
+    requested_output_format: str
+    batch_output_format: str
+    workspace: Path
+    input_dir: Path
+    output_dir: Path
+    pages: dict[int, PreparedChapterPage]
+    completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    error: Exception | None = None
+
+    def resolve_output_path(self, page_index: int) -> Path | None:
+        prepared_page = self.pages.get(page_index)
+        if prepared_page is None:
+            return None
+        return _resolve_produced_output_path(
+            self.output_dir / f"{prepared_page.input_path.stem}.{self.batch_output_format}",
+            self.batch_output_format,
+        )
+
+
 @dataclass(frozen=True)
 class ImageSize:
     width: int
@@ -181,9 +219,13 @@ class ReaderAiServer(ThreadingHTTPServer):
         self.config = config
         self._workspace_root_owner = tempfile.TemporaryDirectory(prefix="mihon-ai-server-")
         self._workspace_root = Path(self._workspace_root_owner.name)
+        self._chapter_jobs_root = self._workspace_root / "chapter-jobs"
+        self._chapter_jobs_root.mkdir(parents=True, exist_ok=True)
         self._request_sequence = itertools.count(1)
         self._processing_queue: queue.Queue[Any] = queue.Queue()
         self._worker_threads: list[threading.Thread] = []
+        self._chapter_jobs: dict[str, ChapterUpscaleJob] = {}
+        self._chapter_jobs_lock = threading.Lock()
         for worker_index in range(max(1, config.max_workers)):
             workspace = self._workspace_root / f"worker-{worker_index}"
             workspace.mkdir(parents=True, exist_ok=True)
@@ -246,6 +288,79 @@ class ReaderAiServer(ThreadingHTTPServer):
 
     def next_request_id(self) -> str:
         return f"req-{next(self._request_sequence):05d}"
+
+    def create_chapter_job(
+        self,
+        request_id: str,
+        archive_path: Path,
+        requested_output_format: str,
+        model_name: str,
+    ) -> ChapterUpscaleJob:
+        if self.config.mode == "mock_copy":
+            raise RuntimeError("Chapter mode is not supported in mock_copy")
+
+        self._cleanup_expired_chapter_jobs()
+        native_scale = _resolve_model_scale(
+            model_name=model_name,
+            default_scale=self.config.scale,
+        )
+        job_id = uuid.uuid4().hex[:12]
+        workspace = self._chapter_jobs_root / job_id
+        input_dir = workspace / "chapter-in"
+        output_dir = workspace / "chapter-out"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pages = _extract_chapter_archive(
+            archive_path=archive_path,
+            input_dir=input_dir,
+        )
+        if not pages:
+            raise RuntimeError("Chapter archive did not contain any image pages")
+
+        job = ChapterUpscaleJob(
+            job_id=job_id,
+            request_id=request_id,
+            created_at=time.time(),
+            model_name=model_name,
+            native_scale=native_scale,
+            requested_output_format=requested_output_format,
+            batch_output_format=_sanitize_extension(requested_output_format),
+            workspace=workspace,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            pages=pages,
+        )
+        with self._chapter_jobs_lock:
+            self._chapter_jobs[job_id] = job
+
+        thread = threading.Thread(
+            target=self._run_chapter_job,
+            args=(job,),
+            name=f"reader-ai-chapter-{job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return job
+
+    def get_chapter_page(self, job_id: str, page_index: int) -> ProcessedImage | None:
+        with self._chapter_jobs_lock:
+            job = self._chapter_jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+
+        produced_output_path = job.resolve_output_path(page_index)
+        if produced_output_path is not None and produced_output_path.is_file() and produced_output_path.stat().st_size > 0:
+            return ProcessedImage(
+                bytes=produced_output_path.read_bytes(),
+                output_format=_sanitize_extension(produced_output_path.suffix),
+            )
+
+        if job.completed.is_set():
+            if job.error is not None:
+                raise RuntimeError(str(job.error))
+            raise FileNotFoundError(f"Chapter page {page_index} is not available")
+
+        return None
 
     def _worker_loop(self, workspace: Path) -> None:
         backlog: list[Any] = []
@@ -328,6 +443,101 @@ class ReaderAiServer(ThreadingHTTPServer):
             return "0ms"
         return f"{min(waits)}-{max(waits)}ms"
 
+    def _run_chapter_job(self, job: ChapterUpscaleJob) -> None:
+        binary = Path(self.config.binary)
+        model_dir = Path(self.config.model_dir)
+        try:
+            if not binary.is_file():
+                raise RuntimeError(f"Upscale binary not found: {binary}")
+            if not model_dir.is_dir():
+                raise RuntimeError(f"Model directory not found: {model_dir}")
+
+            command = [
+                str(binary),
+                "-i",
+                str(job.input_dir),
+                "-o",
+                str(job.output_dir),
+                "-s",
+                str(job.native_scale),
+                "-t",
+                str(self.config.tile_size),
+                "-m",
+                str(model_dir),
+                "-f",
+                job.batch_output_format,
+                "-g",
+                str(self.config.gpu_id),
+                "-j",
+                self.config.jobs,
+            ]
+            if job.model_name and _supports_model_name_flag(binary):
+                command.extend(["-n", job.model_name])
+
+            _emit_log_line(
+                (
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
+                    f"[{job.request_id}] Starting chapter job {job.job_id} "
+                    f"with {len(job.pages)} pages ({job.model_name} -> {job.batch_output_format})"
+                ),
+            )
+            completed = _run_logged_subprocess(
+                request_id=f"{job.request_id}/chapter-{job.job_id}",
+                command=command,
+                cwd=binary.parent,
+                timeout=max(self.config.timeout_seconds, 1800),
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
+
+            missing_pages = [
+                prepared_page
+                for prepared_page in job.pages.values()
+                if job.resolve_output_path(prepared_page.page_index) is None
+            ]
+            for prepared_page in missing_pages:
+                fallback_workspace = job.workspace / f"fallback-{prepared_page.page_index:04d}"
+                fallback_workspace.mkdir(parents=True, exist_ok=True)
+                processed_image = _process_single_request_in_workspace(
+                    config=self.config,
+                    workspace=fallback_workspace,
+                    request=PendingUpscaleRequest(
+                        request_id=f"{job.request_id}/page-{prepared_page.page_index}/fallback",
+                        body=prepared_page.input_path.read_bytes(),
+                        input_format=prepared_page.input_format,
+                        requested_output_format=job.requested_output_format,
+                        model_name=job.model_name,
+                        native_scale=job.native_scale,
+                        preferred_output_format=None,
+                        batch_size=1,
+                        is_chunked=False,
+                    ),
+                )
+                fallback_output_path = job.output_dir / (
+                    f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
+                )
+                fallback_output_path.write_bytes(processed_image.bytes)
+        except Exception as exc:  # noqa: BLE001
+            job.error = exc
+            _emit_log_line(
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] Chapter job {job.job_id} failed: {exc}",
+            )
+        finally:
+            job.completed.set()
+
+    def _cleanup_expired_chapter_jobs(self) -> None:
+        cutoff = time.time() - CHAPTER_JOB_RETENTION_SECONDS
+        with self._chapter_jobs_lock:
+            expired_job_ids = [
+                job_id
+                for job_id, job in self._chapter_jobs.items()
+                if job.completed.is_set() and job.created_at < cutoff
+            ]
+            expired_jobs = [self._chapter_jobs.pop(job_id) for job_id in expired_job_ids]
+
+        for job in expired_jobs:
+            shutil.rmtree(job.workspace, ignore_errors=True)
+
     def server_close(self) -> None:
         try:
             super().server_close()
@@ -352,33 +562,68 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        if parsed.path != "/health":
+        if parsed.path == "/health":
+            payload = {
+                "ok": True,
+                "mode": self.server.config.mode,
+                "binary": self.server.config.binary,
+                "model_dir": self.server.config.model_dir,
+                "output_format": self.server.config.output_format,
+                "scale": self.server.config.scale,
+                "tile_size": self.server.config.tile_size,
+                "gpu_id": self.server.config.gpu_id,
+                "model_name": self.server.config.model_name,
+                "batch_size": self.server.config.batch_size,
+                "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
+                "supported_models": list(SUPPORTED_MODEL_NAMES),
+                "model_profiles": SUPPORTED_MODELS,
+            }
+            self._send_json(HTTPStatus.OK, payload)
+            return
+
+        chapter_page_match = _CHAPTER_PAGE_PATH_RE.match(parsed.path)
+        if chapter_page_match is None:
             self._send_text(HTTPStatus.NOT_FOUND, "Not found")
             return
 
-        payload = {
-            "ok": True,
-            "mode": self.server.config.mode,
-            "binary": self.server.config.binary,
-            "model_dir": self.server.config.model_dir,
-            "output_format": self.server.config.output_format,
-            "scale": self.server.config.scale,
-            "tile_size": self.server.config.tile_size,
-            "gpu_id": self.server.config.gpu_id,
-            "model_name": self.server.config.model_name,
-            "batch_size": self.server.config.batch_size,
-            "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
-            "supported_models": list(SUPPORTED_MODEL_NAMES),
-            "model_profiles": SUPPORTED_MODELS,
-        }
-        self._send_json(HTTPStatus.OK, payload)
+        if not self._authorize():
+            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            return
+
+        job_id, page_index_text = chapter_page_match.groups()
+        try:
+            processed_image = self.server.get_chapter_page(job_id, int(page_index_text))
+        except KeyError:
+            self._send_text(HTTPStatus.NOT_FOUND, "Chapter job not found")
+            return
+        except FileNotFoundError:
+            self._send_text(HTTPStatus.NOT_FOUND, "Chapter page not found")
+            return
+        except RuntimeError as exc:
+            self.log_message("Chapter page fetch error: %s", exc)
+            self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
+            return
+
+        if processed_image is None:
+            self.send_response(HTTPStatus.ACCEPTED)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        if parsed.path != "/api/upscale":
-            self._send_text(HTTPStatus.NOT_FOUND, "Not found")
+        if parsed.path == "/api/upscale":
+            self._handle_single_upscale_request()
             return
+        if parsed.path == "/api/upscale-chapter":
+            self._handle_chapter_upscale_request()
+            return
+        self._send_text(HTTPStatus.NOT_FOUND, "Not found")
 
+    def _handle_single_upscale_request(self) -> None:
         if not self._authorize():
             self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
             return
@@ -465,6 +710,101 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             processed_image.output_format,
         )
         self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
+
+    def _handle_chapter_upscale_request(self) -> None:
+        if not self._authorize():
+            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            return
+
+        content_length = self.headers.get("Content-Length")
+        if not content_length:
+            self._send_text(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
+            return
+
+        try:
+            body_size = int(content_length)
+        except ValueError:
+            self._send_text(HTTPStatus.BAD_REQUEST, "Content-Length must be an integer")
+            return
+
+        if body_size <= 0:
+            self._send_text(HTTPStatus.BAD_REQUEST, "Request body is empty")
+            return
+
+        if body_size > max(self.server.config.max_request_megabytes, 512) * 1024 * 1024:
+            self._send_text(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Chapter archive is too large")
+            return
+
+        archive_format = (self.headers.get("X-Reader-AI-Archive-Format") or CHAPTER_ARCHIVE_FORMAT).lower().strip(".")
+        if archive_format != CHAPTER_ARCHIVE_FORMAT:
+            self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported chapter archive format")
+            return
+
+        output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
+        requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
+        if output_format not in {"jpg", "jpeg", "png", "webp"}:
+            self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
+            return
+        try:
+            model_name = _resolve_requested_model_name(
+                requested_model_name=requested_model_name,
+                default_model_name=self.server.config.model_name,
+            )
+        except ValueError as exc:
+            self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+
+        request_id = self.server.next_request_id()
+        self.log_message(
+            "[%s] Accepted chapter upscale request: %d bytes archive=%s output=%s model=%s from %s",
+            request_id,
+            body_size,
+            archive_format,
+            output_format,
+            model_name,
+            self.client_address[0],
+        )
+
+        upload_workspace = self.server._workspace_root / "incoming-chapters"
+        upload_workspace.mkdir(parents=True, exist_ok=True)
+        archive_path = upload_workspace / f"{request_id}.{archive_format}"
+        try:
+            with archive_path.open("wb") as archive_file:
+                remaining = body_size
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    archive_file.write(chunk)
+                    remaining -= len(chunk)
+            if archive_path.stat().st_size == 0:
+                self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is empty")
+                return
+            chapter_job = self.server.create_chapter_job(
+                request_id=request_id,
+                archive_path=archive_path,
+                requested_output_format=output_format,
+                model_name=model_name,
+            )
+        except zipfile.BadZipFile:
+            self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is not a valid zip file")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.log_message("[%s] Chapter job error: %s", request_id, exc)
+            self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
+            return
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+        self._send_json(
+            HTTPStatus.ACCEPTED,
+            {
+                "job_id": chapter_job.job_id,
+                "page_count": len(chapter_job.pages),
+                "model_name": chapter_job.model_name,
+                "output_format": chapter_job.batch_output_format,
+            },
+        )
 
     def log_message(self, format: str, *args: Any) -> None:
         _emit_log_line("[%s] %s" % (self.log_date_time_string(), format % args))
@@ -778,6 +1118,35 @@ def _resolve_produced_output_path(output_path: Path, requested_output_format: st
 def _sanitize_extension(value: str) -> str:
     value = value.lower().strip().strip(".")
     return value if value in {"jpg", "jpeg", "png", "webp"} else "png"
+
+
+def _extract_chapter_archive(
+    archive_path: Path,
+    input_dir: Path,
+) -> dict[int, PreparedChapterPage]:
+    pages: dict[int, PreparedChapterPage] = {}
+    with zipfile.ZipFile(archive_path) as archive:
+        for entry in archive.infolist():
+            if entry.is_dir():
+                continue
+            entry_name = Path(entry.filename).name
+            if not entry_name:
+                continue
+            entry_path = Path(entry_name)
+            page_stem = entry_path.stem
+            if not page_stem.isdigit():
+                continue
+            page_index = int(page_stem)
+            input_format = _sanitize_extension(entry_path.suffix)
+            input_path = input_dir / f"{page_index:04d}.{input_format}"
+            with archive.open(entry) as source, input_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+            pages[page_index] = PreparedChapterPage(
+                page_index=page_index,
+                input_path=input_path,
+                input_format=input_format,
+            )
+    return dict(sorted(pages.items()))
 
 
 def _run_logged_subprocess(
