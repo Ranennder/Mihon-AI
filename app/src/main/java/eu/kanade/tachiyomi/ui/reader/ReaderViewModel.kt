@@ -26,7 +26,6 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.reader.loader.ChapterLoader
 import eu.kanade.tachiyomi.ui.reader.loader.DownloadPageLoader
-import eu.kanade.tachiyomi.ui.reader.loader.QueuePagesMode
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
@@ -487,7 +486,7 @@ class ReaderViewModel @JvmOverloads constructor(
         }
 
         if (shouldQueueWholeChapterForRemote(currentChapter.chapter.id)) {
-            currentChapter.pageLoader?.queuePages(pages, QueuePagesMode.WHOLE_CHAPTER)
+            currentChapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
         }
@@ -512,7 +511,7 @@ class ReaderViewModel @JvmOverloads constructor(
                 return
             }
 
-            currentChapter.pageLoader?.queuePages(pages, QueuePagesMode.WHOLE_CHAPTER)
+            currentChapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
         }
@@ -862,7 +861,7 @@ class ReaderViewModel @JvmOverloads constructor(
         }
 
         if (shouldQueueWholeChapterForRemote(chapter)) {
-            chapter.pageLoader?.queuePages(pages, QueuePagesMode.WHOLE_CHAPTER)
+            chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
         }
@@ -912,7 +911,7 @@ class ReaderViewModel @JvmOverloads constructor(
         }
 
         if (shouldQueueWholeChapterForRemote(chapter)) {
-            chapter.pageLoader?.queuePages(pages, QueuePagesMode.WHOLE_CHAPTER)
+            chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
         }
@@ -928,7 +927,7 @@ class ReaderViewModel @JvmOverloads constructor(
 
         val pages = page.chapter.pages ?: return
         if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id)) {
-            page.chapter.pageLoader?.queuePages(pages, QueuePagesMode.WHOLE_CHAPTER)
+            page.chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
         }

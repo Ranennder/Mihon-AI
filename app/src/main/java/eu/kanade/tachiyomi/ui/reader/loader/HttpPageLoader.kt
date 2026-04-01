@@ -11,14 +11,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withIOContext
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.PriorityBlockingQueue
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -40,33 +40,23 @@ internal class HttpPageLoader(
      * A queue used to manage requests one by one while allowing priorities.
      */
     private val queue = PriorityBlockingQueue<PriorityPage>()
-    private val enqueuedPageIndexes = ConcurrentHashMap.newKeySet<Int>()
 
     private val preloadSize = 4
-    private var activeWorkerCount = 0
 
     init {
-        ensureWorkers(BASE_WORKERS)
-    }
-
-    private fun ensureWorkers(targetCount: Int) {
-        while (activeWorkerCount < targetCount) {
-            activeWorkerCount++
-            scope.launchIO {
-                while (isActive) {
-                    val priorityPage = runInterruptible { queue.take() }
-                    try {
-                        if (priorityPage.page.status == Page.State.Queue) {
-                            internalLoadPage(
-                                page = priorityPage.page,
-                                force = priorityPage.priority == PriorityPage.RETRY,
-                            )
-                        }
-                    } finally {
-                        enqueuedPageIndexes.remove(priorityPage.page.index)
-                    }
+        scope.launchIO {
+            flow {
+                while (true) {
+                    emit(runInterruptible { queue.take() })
                 }
             }
+                .filter { it.page.status == Page.State.Queue }
+                .collect {
+                    internalLoadPage(
+                        page = it.page,
+                        force = it.priority == PriorityPage.RETRY,
+                    )
+                }
         }
     }
 
@@ -109,7 +99,7 @@ internal class HttpPageLoader(
 
         val queuedPages = mutableListOf<PriorityPage>()
         if (page.status == Page.State.Queue) {
-            enqueuePage(page, PriorityPage.DEFAULT)?.let(queuedPages::add)
+            queuedPages += PriorityPage(page, PriorityPage.DEFAULT).also { queue.offer(it) }
         }
         queuedPages += preloadNextPages(page, preloadSize)
 
@@ -118,7 +108,6 @@ internal class HttpPageLoader(
                 queuedPages.forEach {
                     if (it.page.status == Page.State.Queue) {
                         queue.remove(it)
-                        enqueuedPageIndexes.remove(it.page.index)
                     }
                 }
             }
@@ -132,22 +121,10 @@ internal class HttpPageLoader(
         if (page.status is Page.State.Error) {
             page.status = Page.State.Queue
         }
-        enqueuePage(page, PriorityPage.RETRY)
+        queue.offer(PriorityPage(page, PriorityPage.RETRY))
     }
 
-    override fun queuePages(
-        pages: List<ReaderPage>,
-        mode: QueuePagesMode,
-    ) {
-        if (mode == QueuePagesMode.WHOLE_CHAPTER) {
-            ensureWorkers(WHOLE_CHAPTER_WORKERS)
-        }
-
-        val priority = when (mode) {
-            QueuePagesMode.BACKGROUND -> PriorityPage.ADJACENT
-            QueuePagesMode.WHOLE_CHAPTER -> PriorityPage.DEFAULT
-        }
-
+    override fun queuePages(pages: List<ReaderPage>) {
         pages.forEach { page ->
             val imageUrl = page.imageUrl
             if (page.status == Page.State.Ready && imageUrl != null && !chapterCache.isImageInCache(imageUrl)) {
@@ -157,7 +134,7 @@ internal class HttpPageLoader(
                 page.status = Page.State.Queue
             }
             if (page.status == Page.State.Queue) {
-                enqueuePage(page, priority)
+                queue.offer(PriorityPage(page, PriorityPage.ADJACENT))
             }
         }
     }
@@ -197,21 +174,11 @@ internal class HttpPageLoader(
             .subList(pageIndex + 1, min(pageIndex + 1 + amount, pages.size))
             .mapNotNull {
                 if (it.status == Page.State.Queue) {
-                    enqueuePage(it, PriorityPage.ADJACENT)
+                    PriorityPage(it, PriorityPage.ADJACENT).apply { queue.offer(this) }
                 } else {
                     null
                 }
             }
-    }
-
-    private fun enqueuePage(
-        page: ReaderPage,
-        priority: Int,
-    ): PriorityPage? {
-        if (!enqueuedPageIndexes.add(page.index)) {
-            return null
-        }
-        return PriorityPage(page, priority).also { queue.offer(it) }
     }
 
     /**
@@ -244,10 +211,6 @@ internal class HttpPageLoader(
         }
     }
 
-    private companion object {
-        const val BASE_WORKERS = 1
-        const val WHOLE_CHAPTER_WORKERS = 4
-    }
 }
 
 /**
