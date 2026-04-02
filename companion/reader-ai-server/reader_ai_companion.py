@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -599,7 +599,37 @@ class ReaderAiServer(ThreadingHTTPServer):
                 display_label=job.display_label,
             )
             if completed.returncode != 0:
-                raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
+                if _should_retry_with_safe_vulkan_settings(completed.details):
+                    safe_config = _build_safe_vulkan_retry_config(self.config)
+                    for prepared_page in job.pages.values():
+                        fallback_workspace = job.workspace / f"safe-page-{prepared_page.page_index:04d}"
+                        fallback_workspace.mkdir(parents=True, exist_ok=True)
+                        fallback_body = prepared_page.input_path.read_bytes()
+                        processed_image = _process_single_request_in_workspace(
+                            config=safe_config,
+                            workspace=fallback_workspace,
+                            request=PendingUpscaleRequest(
+                                request_id=f"{job.request_id}/page-{prepared_page.page_index}/safe-chapter",
+                                body=fallback_body,
+                                input_format=prepared_page.input_format,
+                                requested_output_format=job.requested_output_format,
+                                model_name=job.model_name,
+                                native_scale=job.native_scale,
+                                preferred_output_format=None,
+                                batch_size=1,
+                                is_chunked=_requires_chunked_upscale(
+                                    body=fallback_body,
+                                    native_scale=job.native_scale,
+                                    target_scale=job.native_scale,
+                                ),
+                            ),
+                        )
+                        safe_output_path = job.output_dir / (
+                            f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
+                        )
+                        safe_output_path.write_bytes(processed_image.bytes)
+                else:
+                    raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
 
             fallback_pages: list[PreparedChapterPage] = []
             for prepared_page in job.pages.values():
@@ -1112,6 +1142,20 @@ def _process_single_request_in_workspace(
             display_label=request.page_display_label,
         )
     except RuntimeError as exc:
+        if _should_retry_with_safe_vulkan_settings(str(exc)):
+            return _run_subprocess_once(
+                config=_build_safe_vulkan_retry_config(config),
+                request_id=request.request_id,
+                workspace=workspace,
+                binary=binary,
+                model_dir=model_dir,
+                body=request.body,
+                input_format=request.input_format,
+                output_format=preferred_output_format,
+                model_name=request.model_name,
+                scale=request.native_scale,
+                display_label=request.page_display_label,
+            )
         if (
             preferred_output_format in JPEG_OUTPUT_FORMATS
             and request.requested_output_format in JPEG_OUTPUT_FORMATS
@@ -1198,6 +1242,37 @@ def _run_subprocess_batch(
     )
     details = completed.details
     if completed.returncode != 0:
+        if _should_retry_with_safe_vulkan_settings(details):
+            safe_config = _build_safe_vulkan_retry_config(config)
+            results: dict[str, ProcessedImage] = {}
+            for request in requests:
+                fallback_workspace = workspace / f"safe-fallback-{request.request_id}"
+                fallback_workspace.mkdir(parents=True, exist_ok=True)
+                fallback_request = PendingUpscaleRequest(
+                    request_id=f"{request.request_id}/safe-fallback",
+                    body=request.body,
+                    input_format=request.input_format,
+                    requested_output_format=request.requested_output_format,
+                    model_name=request.model_name,
+                    native_scale=request.native_scale,
+                    preferred_output_format=request.preferred_output_format,
+                    batch_size=1,
+                    is_chunked=_requires_chunked_upscale(
+                        body=request.body,
+                        native_scale=request.native_scale,
+                        target_scale=request.native_scale,
+                    ),
+                    manga_title=request.manga_title,
+                    chapter_title=request.chapter_title,
+                    page_index=request.page_index,
+                    total_pages=request.total_pages,
+                )
+                results[request.request_id] = _process_single_request_in_workspace(
+                    config=safe_config,
+                    workspace=fallback_workspace,
+                    request=fallback_request,
+                )
+            return results
         raise RuntimeError(f"Upscale process failed: {details}")
 
     results: dict[str, ProcessedImage] = {}
@@ -1512,6 +1587,21 @@ def _clear_workspace_files(workspace: Path) -> None:
 def _should_retry_with_png(message: str) -> bool:
     lowered = message.lower()
     return "encode image" in lowered or "empty output file" in lowered
+
+
+def _should_retry_with_safe_vulkan_settings(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "vkqueuesubmit failed -4" in lowered or
+        "vkwaitforfences failed -4" in lowered or
+        "vk_error_device_lost" in lowered or
+        "device lost" in lowered
+    )
+
+
+def _build_safe_vulkan_retry_config(config: Config) -> Config:
+    safe_tile_size = config.tile_size if config.tile_size > 0 else 256
+    return replace(config, tile_size=safe_tile_size, jobs="1:1:1", batch_size=1)
 
 
 def _requires_chunked_upscale(body: bytes, native_scale: int, target_scale: int) -> bool:
