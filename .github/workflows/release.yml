@@ -82,6 +82,8 @@ jobs:
       - name: Build companion
         working-directory: companion/reader-ai-server
         shell: cmd
+        env:
+          MIHON_AI_RELEASE_TAG: ${{ needs.get_tag.outputs.tag }}
         run: build_windows_exe.bat
 
       - name: Rename companion

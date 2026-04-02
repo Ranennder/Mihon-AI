@@ -2,6 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
+set "BUILD_INFO_FILE=%~dp0companion_build_info.py"
+set "RELEASE_TAG=%MIHON_AI_RELEASE_TAG%"
+if not defined RELEASE_TAG set "RELEASE_TAG="
+> "%BUILD_INFO_FILE%" echo RELEASE_TAG = "%RELEASE_TAG%"
+
 set "RUNTIME_DIR=%MIHONAI_RUNTIME_DIR%"
 if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime"
 

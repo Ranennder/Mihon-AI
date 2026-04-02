@@ -25,8 +25,15 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_plus, urlparse
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 from PIL import Image
+
+try:
+    from companion_build_info import RELEASE_TAG as EMBEDDED_RELEASE_TAG
+except Exception:
+    EMBEDDED_RELEASE_TAG = ""
 
 
 DEFAULT_CONFIG_NAME = "reader_ai_server.json"
@@ -64,6 +71,11 @@ LOG_FILE_NAME = "companion.log"
 CHAPTER_ARCHIVE_FORMAT = "zip"
 CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
+GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/Ranennder/Mihon-AI/releases/latest"
+COMPANION_RELEASE_ASSET_SUFFIX = "-windows.exe"
+AUTO_UPDATE_CONNECT_TIMEOUT_SECONDS = 8
+AUTO_UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 300
+AUTO_UPDATE_CHUNK_SIZE = 1024 * 1024
 _STOP_PROCESSING = object()
 _LOG_LOCK = threading.RLock()
 _LOG_FILE_HANDLE: Any | None = None
@@ -72,6 +84,7 @@ _LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\
 _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
+_RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _REQUEST_DISPLAY_LABELS: dict[str, str] = {}
 _ANSI_RESET = "\x1b[0m"
 _ANSI_DIM = "\x1b[2m"
@@ -677,6 +690,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/health":
+            current_release_tag = _detect_current_release_tag()
             payload = {
                 "ok": True,
                 "mode": self.server.config.mode,
@@ -691,6 +705,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
                 "supported_models": list(SUPPORTED_MODEL_NAMES),
                 "model_profiles": SUPPORTED_MODELS,
+                "companion_release_tag": current_release_tag,
+                "auto_update_enabled": current_release_tag is not None,
             }
             self._send_json(HTTPStatus.OK, payload)
             return
@@ -2115,6 +2131,178 @@ def _run_hidden_windows_command(command: list[str]) -> subprocess.CompletedProce
     return subprocess.run(command, **kwargs)
 
 
+def _normalize_release_tag(value: str | None) -> str | None:
+    normalized = (value or "").strip()
+    if not normalized:
+        return None
+    if not normalized.startswith("v"):
+        normalized = f"v{normalized}"
+    return normalized if _RELEASE_TAG_RE.fullmatch(normalized) else None
+
+
+def _parse_release_tag(value: str | None) -> tuple[int, int, int] | None:
+    normalized = _normalize_release_tag(value)
+    if normalized is None:
+        return None
+    major, minor, patch = normalized.removeprefix("v").split(".")
+    return int(major), int(minor), int(patch)
+
+
+def _detect_current_release_tag() -> str | None:
+    embedded = _normalize_release_tag(EMBEDDED_RELEASE_TAG)
+    if embedded is not None:
+        return embedded
+    executable_name = Path(sys.executable if getattr(sys, "frozen", False) else __file__).name
+    match = _RELEASE_TAG_RE.search(executable_name)
+    return _normalize_release_tag(match.group(0)) if match is not None else None
+
+
+def _fetch_latest_release_payload(current_tag: str) -> dict[str, Any]:
+    request = UrlRequest(
+        GITHUB_LATEST_RELEASE_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"MihonAiCompanion/{current_tag}",
+        },
+    )
+    with urlopen(request, timeout=AUTO_UPDATE_CONNECT_TIMEOUT_SECONDS) as response:  # noqa: S310
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _select_companion_release_asset(release_payload: dict[str, Any], release_tag: str) -> tuple[str, str] | None:
+    expected_name = f"MihonAiCompanion-{release_tag}-windows.exe".lower()
+    assets = release_payload.get("assets")
+    if not isinstance(assets, list):
+        return None
+
+    best_match: tuple[str, str] | None = None
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_name = str(asset.get("name") or "")
+        asset_url = str(asset.get("browser_download_url") or "")
+        lowered_name = asset_name.lower()
+        if not asset_url:
+            continue
+        if lowered_name == expected_name:
+            return asset_name, asset_url
+        if lowered_name.endswith(COMPANION_RELEASE_ASSET_SUFFIX) and asset_name.startswith("MihonAiCompanion-"):
+            best_match = (asset_name, asset_url)
+    return best_match
+
+
+def _download_release_asset(download_url: str, destination_path: Path, release_tag: str) -> None:
+    request = UrlRequest(
+        download_url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": f"MihonAiCompanion/{release_tag}",
+        },
+    )
+    with urlopen(request, timeout=AUTO_UPDATE_DOWNLOAD_TIMEOUT_SECONDS) as response:  # noqa: S310
+        with destination_path.open("wb") as output_file:
+            while True:
+                chunk = response.read(AUTO_UPDATE_CHUNK_SIZE)
+                if not chunk:
+                    break
+                output_file.write(chunk)
+
+
+def _powershell_single_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _launch_windows_self_replace(
+    *,
+    current_executable: Path,
+    downloaded_executable: Path,
+    relaunch_arguments: list[str],
+) -> None:
+    updater_script = Path(tempfile.gettempdir()) / f"mihon-ai-companion-update-{uuid.uuid4().hex}.ps1"
+    powershell_args = ", ".join(_powershell_single_quoted(argument) for argument in relaunch_arguments)
+    updater_script.write_text(
+        "\n".join(
+            [
+                f"$target = {_powershell_single_quoted(str(current_executable))}",
+                f"$source = {_powershell_single_quoted(str(downloaded_executable))}",
+                f"$pidToWait = {os.getpid()}",
+                f"$arguments = @({powershell_args})" if relaunch_arguments else "$arguments = @()",
+                "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {",
+                "  Start-Sleep -Milliseconds 250",
+                "}",
+                "Move-Item -LiteralPath $source -Destination $target -Force",
+                "Start-Process -FilePath $target -ArgumentList $arguments",
+                "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(updater_script),
+        ],
+        **kwargs,
+    )
+
+
+def _maybe_perform_self_update(*, skip_self_update: bool) -> bool:
+    if skip_self_update or os.name != "nt" or not getattr(sys, "frozen", False):
+        return False
+
+    current_tag = _detect_current_release_tag()
+    if current_tag is None:
+        return False
+
+    current_version = _parse_release_tag(current_tag)
+    if current_version is None:
+        return False
+
+    try:
+        release_payload = _fetch_latest_release_payload(current_tag)
+        latest_tag = _normalize_release_tag(str(release_payload.get("tag_name") or ""))
+        if latest_tag is None:
+            return False
+        latest_version = _parse_release_tag(latest_tag)
+        if latest_version is None or latest_version <= current_version:
+            return False
+
+        selected_asset = _select_companion_release_asset(release_payload, latest_tag)
+        if selected_asset is None:
+            _emit_log_line(
+                f"Auto-update: latest release {latest_tag} has no Windows companion asset",
+                console=False,
+            )
+            return False
+
+        asset_name, asset_url = selected_asset
+        current_executable = Path(sys.executable).resolve()
+        downloaded_executable = Path(tempfile.gettempdir()) / f"{current_executable.stem}-{latest_tag}.download.exe"
+        downloaded_executable.unlink(missing_ok=True)
+
+        _emit_log_line(f"Auto-update: downloading {asset_name}")
+        _download_release_asset(asset_url, downloaded_executable, latest_tag)
+        _emit_log_line(f"Auto-update: installing {latest_tag} and restarting companion")
+        relaunch_arguments = [argument for argument in sys.argv[1:] if argument != "--skip-self-update"]
+        relaunch_arguments.append("--skip-self-update")
+        _launch_windows_self_replace(
+            current_executable=current_executable,
+            downloaded_executable=downloaded_executable,
+            relaunch_arguments=relaunch_arguments,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _emit_log_line(f"Auto-update check failed: {exc}", console=False)
+        return False
+
+
 def _find_listening_process_id(port: int) -> int | None:
     if os.name != "nt":
         return None
@@ -2230,6 +2418,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--batch-wait-milliseconds", type=int)
     parser.add_argument("--max-request-megabytes", type=int)
+    parser.add_argument("--skip-self-update", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -2243,6 +2432,8 @@ def main() -> int:
         log_path = _configure_output_tee()
 
         args = _parse_args()
+        if _maybe_perform_self_update(skip_self_update=args.skip_self_update):
+            return 0
         config_path = _resolve_config_path(args.config)
         config = Config.load(
             config_path,
@@ -2271,6 +2462,9 @@ def main() -> int:
         if server is None:
             return 1
         _emit_log_line(f"Mihon AI companion listening on http://{config.host}:{config.port}")
+        current_release_tag = _detect_current_release_tag()
+        if current_release_tag is not None:
+            _emit_log_line(f"Release version: {current_release_tag}", console=False)
         _emit_log_line(f"Mode: {config.mode}", console=False)
         _emit_log_line(f"Binary: {config.binary}", console=False)
         _emit_log_line(f"Model dir: {config.model_dir}", console=False)
