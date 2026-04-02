@@ -580,23 +580,56 @@ class ReaderPageUpscaler(
             metadata = chapterMetadata,
         ) ?: return
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
+        val nextPollAt = remainingTargets.keys.associateWith { 0L }.toMutableMap()
+        val pendingPollCounts = mutableMapOf<Int, Int>()
+        val retryableFailureCounts = mutableMapOf<Int, Int>()
         var consecutiveRetryableFailures = 0
         repeat(2_400) {
+            val now = System.currentTimeMillis()
+            val duePageIndexes = remainingTargets.keys.filter { pageIndex ->
+                (nextPollAt[pageIndex] ?: 0L) <= now
+            }
+            if (duePageIndexes.isEmpty()) {
+                val nextDueAt = nextPollAt.values.minOrNull()
+                delay(
+                    when {
+                        nextDueAt == null -> WHOLE_CHAPTER_IDLE_POLL_DELAY_MS
+                        else -> (nextDueAt - now)
+                            .coerceAtLeast(WHOLE_CHAPTER_MIN_POLL_DELAY_MS)
+                            .coerceAtMost(WHOLE_CHAPTER_MAX_POLL_DELAY_MS)
+                    },
+                )
+                return@repeat
+            }
+
             val iterator = remainingTargets.iterator()
             var sawProgress = false
             var sawRetryableFailure = false
             while (iterator.hasNext()) {
-                val (_, target) = iterator.next()
+                val (pageIndex, target) = iterator.next()
+                if (pageIndex !in duePageIndexes) {
+                    continue
+                }
                 if (target.cacheFile.isReadyCacheFile()) {
+                    nextPollAt.remove(pageIndex)
+                    pendingPollCounts.remove(pageIndex)
+                    retryableFailureCounts.remove(pageIndex)
                     iterator.remove()
                     continue
                 }
 
-                when (val fetchResult = remotePageUpscaler.fetchChapterPage(chapterJob, target.page.index)) {
-                    is RemotePageUpscaler.ChapterPageFetchResult.Pending -> Unit
+                when (val fetchResult = remotePageUpscaler.fetchChapterPage(chapterJob, pageIndex)) {
+                    is RemotePageUpscaler.ChapterPageFetchResult.Pending -> {
+                        val pendingCount = pendingPollCounts.getOrDefault(pageIndex, 0) + 1
+                        pendingPollCounts[pageIndex] = pendingCount
+                        nextPollAt[pageIndex] = now + wholeChapterPendingBackoffMillis(pendingCount)
+                    }
                     is RemotePageUpscaler.ChapterPageFetchResult.Ready -> {
                         target.cacheFile.parentFile?.mkdirs()
                         target.cacheFile.writeBytesAtomically(fetchResult.bytes)
+                        nextPollAt.remove(pageIndex)
+                        pendingPollCounts.remove(pageIndex)
+                        retryableFailureCounts.remove(pageIndex)
                         iterator.remove()
                         sawProgress = true
                     }
@@ -606,8 +639,11 @@ class ReaderPageUpscaler(
                             return
                         }
                         sawRetryableFailure = true
+                        val failureCount = retryableFailureCounts.getOrDefault(pageIndex, 0) + 1
+                        retryableFailureCounts[pageIndex] = failureCount
+                        nextPollAt[pageIndex] = now + wholeChapterRetryableFailureBackoffMillis(failureCount)
                         logcat(LogPriority.WARN) {
-                            "Transient remote AI chapter fetch failure for page ${target.page.index}: ${fetchResult.message}"
+                            "Transient remote AI chapter fetch failure for page $pageIndex: ${fetchResult.message}"
                         }
                     }
                 }
@@ -628,11 +664,20 @@ class ReaderPageUpscaler(
                 return
             }
 
+            if (sawProgress) {
+                val acceleratedNextPollAt = System.currentTimeMillis() + WHOLE_CHAPTER_PROGRESS_POLL_DELAY_MS
+                nextPollAt.entries.forEach { entry ->
+                    if (entry.value > acceleratedNextPollAt) {
+                        entry.setValue(acceleratedNextPollAt)
+                    }
+                }
+            }
+
             delay(
                 when {
-                    sawProgress -> 100
-                    sawRetryableFailure -> 500
-                    else -> 350
+                    sawProgress -> WHOLE_CHAPTER_PROGRESS_POLL_DELAY_MS
+                    sawRetryableFailure -> WHOLE_CHAPTER_RETRYABLE_FAILURE_DELAY_MS
+                    else -> WHOLE_CHAPTER_IDLE_POLL_DELAY_MS
                 },
             )
         }
@@ -654,7 +699,7 @@ class ReaderPageUpscaler(
             if (cacheFile.isReadyCacheFile()) {
                 return true
             }
-            delay(100)
+            delay(100L)
         }
         return cacheFile.isReadyCacheFile()
     }
@@ -668,6 +713,19 @@ class ReaderPageUpscaler(
             chapterId = chapterId,
         )
         return remoteChapterJobs[jobKey]?.job?.isActive == true
+    }
+
+    private fun wholeChapterPendingBackoffMillis(pendingCount: Int): Long {
+        val normalizedCount = pendingCount.coerceAtLeast(1) - 1
+        val delayMillis = WHOLE_CHAPTER_MIN_POLL_DELAY_MS + (normalizedCount * WHOLE_CHAPTER_PENDING_POLL_STEP_MS)
+        return delayMillis.coerceAtMost(WHOLE_CHAPTER_MAX_POLL_DELAY_MS)
+    }
+
+    private fun wholeChapterRetryableFailureBackoffMillis(failureCount: Int): Long {
+        val normalizedCount = failureCount.coerceAtLeast(1) - 1
+        val delayMillis =
+            WHOLE_CHAPTER_RETRYABLE_FAILURE_DELAY_MS + (normalizedCount * WHOLE_CHAPTER_FAILURE_POLL_STEP_MS)
+        return delayMillis.coerceAtMost(WHOLE_CHAPTER_MAX_FAILURE_DELAY_MS)
     }
 
     private fun pageRequestMetadata(page: ReaderPage): RemotePageUpscaler.PageRequestMetadata? {
@@ -736,5 +794,13 @@ class ReaderPageUpscaler(
         private const val WHOLE_CHAPTER_DEFAULT_WAIT_ATTEMPTS = 8
         private const val WHOLE_CHAPTER_ACTIVE_WAIT_ATTEMPTS = 150
         private const val WHOLE_CHAPTER_RETRYABLE_FAILURE_LIMIT = 20
+        private const val WHOLE_CHAPTER_MIN_POLL_DELAY_MS = 250L
+        private const val WHOLE_CHAPTER_PENDING_POLL_STEP_MS = 200L
+        private const val WHOLE_CHAPTER_MAX_POLL_DELAY_MS = 1_500L
+        private const val WHOLE_CHAPTER_PROGRESS_POLL_DELAY_MS = 150L
+        private const val WHOLE_CHAPTER_IDLE_POLL_DELAY_MS = 600L
+        private const val WHOLE_CHAPTER_RETRYABLE_FAILURE_DELAY_MS = 900L
+        private const val WHOLE_CHAPTER_FAILURE_POLL_STEP_MS = 400L
+        private const val WHOLE_CHAPTER_MAX_FAILURE_DELAY_MS = 2_500L
     }
 }

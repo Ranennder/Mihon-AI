@@ -84,6 +84,7 @@ _LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\
 _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
+_HTTP_ACCESS_LOG_RE = re.compile(r'^"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/[^\"]+"\s+(?P<status>\d{3})\s+-$')
 _RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _REQUEST_DISPLAY_LABELS: dict[str, str] = {}
 _ANSI_RESET = "\x1b[0m"
@@ -1029,11 +1030,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         message = format % args
-        console = not (
-            message.startswith('"GET /api/upscale-chapter/')
-            or message.startswith('"GET /health ')
-        )
-        _emit_log_line("[%s] %s" % (self.log_date_time_string(), message), console=console)
+        if _should_skip_access_log(message):
+            return
+        _emit_log_line("[%s] %s" % (self.log_date_time_string(), message))
 
     def _authorize(self) -> bool:
         token = self.server.config.token.strip()
@@ -1556,6 +1555,7 @@ def _run_logged_subprocess(
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
                 console=_should_surface_subprocess_console_line(request_id, line),
+                log_file=_should_record_subprocess_log_line(request_id, line),
             )
 
     reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
@@ -1945,6 +1945,38 @@ def _should_surface_subprocess_console_line(request_id: str, line: str) -> bool:
         return False
     if _PROGRESS_RE.fullmatch(stripped) is not None:
         return True
+    return False
+
+
+def _should_record_subprocess_log_line(request_id: str, line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _PROGRESS_RE.fullmatch(stripped) is not None:
+        return False
+    if "/chapter-" in request_id:
+        lowered = stripped.lower()
+        return (
+            "error" in lowered or
+            "failed" in lowered or
+            "traceback" in lowered or
+            "vk_error" in lowered or
+            "device lost" in lowered
+        )
+    return False
+
+
+def _should_skip_access_log(message: str) -> bool:
+    access_match = _HTTP_ACCESS_LOG_RE.match(message)
+    if access_match is None:
+        return False
+
+    path = access_match.group("path")
+    status = int(access_match.group("status"))
+    if path == "/health":
+        return True
+    if path == "/api/upscale" or path == "/api/upscale-chapter" or path.startswith("/api/upscale-chapter/"):
+        return 200 <= status < 300
     return False
 
 
