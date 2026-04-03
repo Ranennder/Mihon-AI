@@ -175,6 +175,10 @@ class RemotePageUpscaler(
             client.newCall(requestBuilder.get().build()).execute().use { response ->
                 when {
                     response.code == 202 -> ChapterPageFetchResult.Pending
+                    response.code == 410 -> {
+                        lastErrorMessage = null
+                        ChapterPageFetchResult.Cancelled
+                    }
                     response.isSuccessful -> {
                         val responseBytes = response.body.bytes()
                         if (responseBytes.isEmpty()) {
@@ -601,6 +605,7 @@ class RemotePageUpscaler(
 
     sealed interface ChapterPageFetchResult {
         data object Pending : ChapterPageFetchResult
+        data object Cancelled : ChapterPageFetchResult
         data class Ready(val bytes: ByteArray) : ChapterPageFetchResult
         data class Failed(
             val message: String,

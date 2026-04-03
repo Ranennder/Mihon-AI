@@ -113,6 +113,9 @@ class ReaderPageUpscaler(
             if (wholeChapterRemoteMode && waitForWholeChapterCache(page, cacheFile)) {
                 return@withLock cacheFile.toBuffer()
             }
+            if (wholeChapterRemoteMode && hasActiveWholeChapterJob(page)) {
+                throw WholeChapterPagePendingException()
+            }
 
             lastFailureMessage = null
             val processedBytes = runCatching {
@@ -659,6 +662,9 @@ class ReaderPageUpscaler(
                         pendingPollCounts[pageIndex] = pendingCount
                         nextPollAt[pageIndex] = now + wholeChapterPendingBackoffMillis(pendingCount)
                     }
+                    is RemotePageUpscaler.ChapterPageFetchResult.Cancelled -> {
+                        return
+                    }
                     is RemotePageUpscaler.ChapterPageFetchResult.Ready -> {
                         target.cacheFile.parentFile?.mkdirs()
                         target.cacheFile.writeBytesAtomically(fetchResult.bytes)
@@ -820,6 +826,10 @@ class ReaderPageUpscaler(
         val mangaId: Long,
         val chapterId: Long,
         val job: Job,
+    )
+
+    class WholeChapterPagePendingException : IllegalStateException(
+        "Remote AI chapter job is still processing this page",
     )
 
     companion object {

@@ -253,8 +253,18 @@ class PagerPageHolder(
                 }
             }
         } catch (e: Throwable) {
-            logcat(LogPriority.ERROR, e)
+            if (e !is ReaderPageUpscaler.WholeChapterPagePendingException) {
+                logcat(LogPriority.ERROR, e)
+            }
             withUIContext {
+                if (e is ReaderPageUpscaler.WholeChapterPagePendingException && pageUpscaler.isEnabled()) {
+                    if (seamlessReload) {
+                        progressContainer?.isVisible = false
+                        progressIndicator?.hide()
+                    }
+                    awaitUpscaledImageAndReload()
+                    return@withUIContext
+                }
                 if (seamlessReload && requireUpscaledImage) {
                     progressContainer?.isVisible = false
                     progressIndicator?.hide()

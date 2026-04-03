@@ -269,8 +269,17 @@ class WebtoonPageHolder(
                 }
             }
         } catch (e: Throwable) {
-            logcat(LogPriority.ERROR, e)
+            if (e !is ReaderPageUpscaler.WholeChapterPagePendingException) {
+                logcat(LogPriority.ERROR, e)
+            }
             withUIContext {
+                if (e is ReaderPageUpscaler.WholeChapterPagePendingException && pageUpscaler.isEnabled()) {
+                    if (seamlessReload) {
+                        progressContainer.isVisible = false
+                    }
+                    awaitUpscaledImageAndReload(page)
+                    return@withUIContext
+                }
                 if (seamlessReload && requireUpscaledImage) {
                     progressContainer.isVisible = false
                     showAiFailureToast()
