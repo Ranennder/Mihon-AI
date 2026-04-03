@@ -84,6 +84,7 @@ _LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\
 _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
+_PAGE_PROGRESS_LABEL_RE = re.compile(r"^(?P<context>.+?) - (?P<page>\d+/\d+)$")
 _HTTP_ACCESS_LOG_RE = re.compile(r'^"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/[^\"]+"\s+(?P<status>\d{3})\s+-$')
 _RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _REQUEST_DISPLAY_LABELS: dict[str, str] = {}
@@ -2141,15 +2142,28 @@ def _format_inline_progress_message(message: str) -> str | None:
     if _PROGRESS_RE.fullmatch(body) is None:
         return None
     prefix_parts: list[str] = []
-    if timestamp_text is not None:
-        prefix_parts.append(_ansi(f"[{timestamp_text}]", _ANSI_DIM))
     if request_id is not None:
         prefix_parts.append(_ansi(f"[{request_id}]", _ANSI_BOLD, _request_style(request_id)))
         display_label = _get_request_display_label(request_id)
         if display_label:
-            prefix_parts.append(_ansi(display_label, _ANSI_WHITE))
+            prefix_parts.append(_ansi(_compact_inline_progress_label(display_label), _ANSI_WHITE))
     prefix = (" ".join(prefix_parts) + " ") if prefix_parts else ""
     return prefix + _format_console_body(body)
+
+
+def _compact_inline_progress_label(display_label: str) -> str:
+    normalized = display_label.strip()
+    if not normalized:
+        return ""
+
+    page_match = _PAGE_PROGRESS_LABEL_RE.match(normalized)
+    if page_match is not None:
+        return page_match.group("page")
+
+    if len(normalized) <= 28:
+        return normalized
+
+    return normalized[:25].rstrip() + "..."
 
 
 def _write_console_direct(message: str) -> bool:
