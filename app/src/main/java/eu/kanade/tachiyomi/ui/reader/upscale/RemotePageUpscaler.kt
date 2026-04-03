@@ -5,6 +5,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import logcat.LogPriority
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -31,6 +35,7 @@ class RemotePageUpscaler(
 ) {
 
     private val uploadWorkspace = File(app.cacheDir, "reader_ai_remote_uploads").apply { mkdirs() }
+    private val controlScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = networkHelper.nonCloudflareClient.newBuilder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
@@ -54,7 +59,9 @@ class RemotePageUpscaler(
 
     fun invalidateRemoteWorkScope() {
         val nextScope = workScope.incrementAndGet()
-        abortRemoteWork(nextScope)
+        controlScope.launch {
+            abortRemoteWork(nextScope)
+        }
     }
 
     fun prepareChapterUploadPage(

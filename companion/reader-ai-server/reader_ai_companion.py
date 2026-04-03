@@ -105,6 +105,11 @@ _INLINE_PROGRESS_VISIBLE_LENGTH = 0
 Image.MAX_IMAGE_PIXELS = None
 
 
+def _is_cancellation_message(error: BaseException | str) -> bool:
+    message = str(error).lower()
+    return "canceled" in message or "superseded" in message
+
+
 def _bundled_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
@@ -384,7 +389,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         chapter_title: str | None,
         client_id: str | None = None,
         scope_id: int | None = None,
-    ) -> ChapterUpscaleJob:
+    ) -> tuple[ChapterUpscaleJob, bool]:
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
 
@@ -405,6 +410,19 @@ class ReaderAiServer(ThreadingHTTPServer):
         )
         if not pages:
             raise RuntimeError("Chapter archive did not contain any image pages")
+
+        reusable_job = self._find_reusable_chapter_job(
+            pages=pages,
+            requested_output_format=requested_output_format,
+            model_name=model_name,
+            manga_title=manga_title,
+            chapter_title=chapter_title,
+            client_id=client_id,
+            scope_id=scope_id,
+        )
+        if reusable_job is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
+            return reusable_job, True
 
         job = ChapterUpscaleJob(
             job_id=job_id,
@@ -433,7 +451,47 @@ class ReaderAiServer(ThreadingHTTPServer):
             daemon=True,
         )
         thread.start()
-        return job
+        return job, False
+
+    def _find_reusable_chapter_job(
+        self,
+        pages: dict[int, PreparedChapterPage],
+        requested_output_format: str,
+        model_name: str,
+        manga_title: str | None,
+        chapter_title: str | None,
+        client_id: str | None,
+        scope_id: int | None,
+    ) -> ChapterUpscaleJob | None:
+        if not client_id or scope_id is None:
+            return None
+
+        normalized_output_format = _sanitize_extension(requested_output_format)
+        normalized_manga_title = (manga_title or "").strip() or None
+        normalized_chapter_title = (chapter_title or "").strip() or None
+        page_count = len(pages)
+
+        with self._chapter_jobs_lock:
+            for job in self._chapter_jobs.values():
+                if job.completed.is_set() or job.cancel_event.is_set() or job.error is not None:
+                    continue
+                if self._is_scope_stale(job.client_id, job.scope_id):
+                    continue
+                if job.client_id != client_id or job.scope_id != scope_id:
+                    continue
+                if job.model_name != model_name:
+                    continue
+                if _sanitize_extension(job.requested_output_format) != normalized_output_format:
+                    continue
+                if ((job.manga_title or "").strip() or None) != normalized_manga_title:
+                    continue
+                if ((job.chapter_title or "").strip() or None) != normalized_chapter_title:
+                    continue
+                if job.total_pages != page_count:
+                    continue
+                return job
+
+        return None
 
     def sync_client_scope(
         self,
@@ -969,6 +1027,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.NOT_FOUND, "Chapter page not found")
             return
         except RuntimeError as exc:
+            if _is_cancellation_message(exc):
+                self._send_text(HTTPStatus.GONE, str(exc))
+                return
             self.log_message("Chapter page fetch error: %s", exc)
             self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
             return
@@ -1112,6 +1173,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.GATEWAY_TIMEOUT, f"Upscale process timed out after {exc.timeout} seconds")
             return
         except Exception as exc:  # noqa: BLE001
+            if _is_cancellation_message(exc):
+                self._send_text(HTTPStatus.GONE, str(exc))
+                return
             self.log_message("[%s] Upscale error: %s", request_id, exc)
             self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
             return
@@ -1203,7 +1267,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             if archive_path.stat().st_size == 0:
                 self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is empty")
                 return
-            chapter_job = self.server.create_chapter_job(
+            chapter_job, reused_existing_job = self.server.create_chapter_job(
                 request_id=request_id,
                 archive_path=archive_path,
                 requested_output_format=output_format,
@@ -1223,12 +1287,20 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         finally:
             archive_path.unlink(missing_ok=True)
 
-        self.log_message(
-            "[%s] %s - Chapter queued (%d pages)",
-            request_id,
-            chapter_job.display_label,
-            chapter_job.total_pages,
-        )
+        if reused_existing_job:
+            self.log_message(
+                "[%s] %s - Reusing active chapter job (%d pages)",
+                request_id,
+                chapter_job.display_label,
+                chapter_job.total_pages,
+            )
+        else:
+            self.log_message(
+                "[%s] %s - Chapter queued (%d pages)",
+                request_id,
+                chapter_job.display_label,
+                chapter_job.total_pages,
+            )
         _emit_log_line(
             (
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
@@ -1246,6 +1318,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "page_count": len(chapter_job.pages),
                 "model_name": chapter_job.model_name,
                 "output_format": chapter_job.batch_output_format,
+                "reused_existing_job": reused_existing_job,
             },
         )
 
