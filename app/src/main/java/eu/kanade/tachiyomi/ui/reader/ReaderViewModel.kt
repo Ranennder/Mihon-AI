@@ -43,6 +43,7 @@ import eu.kanade.tachiyomi.util.storage.DiskUtil
 import eu.kanade.tachiyomi.util.storage.cacheImageDir
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -105,6 +106,7 @@ class ReaderViewModel @JvmOverloads constructor(
 ) : ViewModel() {
 
     private val readerPageUpscaler: ReaderPageUpscaler = Injekt.get()
+    private val loadedLegacyUpscaleObserverJobs = mutableMapOf<String, Job>()
 
     private val mutableState = MutableStateFlow(State())
     val state = mutableState.asStateFlow()
@@ -249,6 +251,8 @@ class ReaderViewModel @JvmOverloads constructor(
     }
 
     override fun onCleared() {
+        loadedLegacyUpscaleObserverJobs.values.forEach(Job::cancel)
+        loadedLegacyUpscaleObserverJobs.clear()
         val currentChapters = state.value.viewerChapters
         if (currentChapters != null) {
             currentChapters.unref()
@@ -341,6 +345,7 @@ class ReaderViewModel @JvmOverloads constructor(
         }
         updateUpscaleRetention(previousCurrentChapterId, newChapters)
         scheduleUpscaleForChapter(newChapters.currChapter)
+        syncLoadedLegacyUpscaleObservers(newChapters)
         return newChapters
     }
 
@@ -431,6 +436,7 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
         scheduleUpscaleForLoadedCompanionChapter(chapter)
+        syncLoadedLegacyUpscaleObservers(state.value.viewerChapters)
         eventChannel.trySend(Event.ReloadViewerChapters)
     }
 
@@ -802,6 +808,8 @@ class ReaderViewModel @JvmOverloads constructor(
 
     fun onUpscaleStateChanged(enabled: Boolean) {
         if (!enabled) {
+            loadedLegacyUpscaleObserverJobs.values.forEach(Job::cancel)
+            loadedLegacyUpscaleObserverJobs.clear()
             cleanupUpscaleCache(keepOnlyCurrent = true)
             return
         }
@@ -809,6 +817,7 @@ class ReaderViewModel @JvmOverloads constructor(
         state.value.viewerChapters?.let {
             updateUpscaleRetention(previousCurrentChapterId = null, viewerChapters = it)
             scheduleUpscaleForChapter(it.currChapter)
+            syncLoadedLegacyUpscaleObservers(it)
         }
     }
 
@@ -880,7 +889,7 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
-        readerPageUpscaler.retainScheduledPrefetches(pages)
+        readerPageUpscaler.retainScheduledPrefetches(retainedLoadedLegacyUpscalePages(extraPages = pages))
         readerPageUpscaler.scheduleWholeChapterRemotePrefetch(
             pages = pages,
             mangaTitle = manga?.title,
@@ -901,7 +910,7 @@ class ReaderViewModel @JvmOverloads constructor(
         if (!readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter) {
             return false
         }
-        return state.value.viewerChapters?.currChapter?.chapter?.id == chapterId
+        return chapterId != null
     }
 
     private fun scheduleUpscaleForLoadedCompanionChapter(chapter: ReaderChapter) {
@@ -950,14 +959,13 @@ class ReaderViewModel @JvmOverloads constructor(
         currentIndex: Int,
     ) {
         val prefetchPlan = buildWholeChapterUpscalePlan(pages, currentIndex)
-        val retainedPages = (
-            (prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
-                anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
-            )
-            ).distinct()
+        val retainedPages = retainedLoadedLegacyUpscalePages(
+            extraPages = prefetchPlan.map(PrefetchRequest::page),
+            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+        )
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
         (
-            prefetchPlan + loadedCompanionUpscalePages(
+            prefetchPlan + loadedLegacyUpscalePages(
                 anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
             ).map { page ->
                 PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
@@ -983,14 +991,13 @@ class ReaderViewModel @JvmOverloads constructor(
             return
         }
 
-        val retainedPages = (
-            (prefetchPlan.map(PrefetchRequest::page)) + loadedCompanionUpscalePages(
-                anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
-            )
-            ).distinct()
+        val retainedPages = retainedLoadedLegacyUpscalePages(
+            extraPages = prefetchPlan.map(PrefetchRequest::page),
+            anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
+        )
         readerPageUpscaler.retainScheduledPrefetches(retainedPages)
         (
-            prefetchPlan + loadedCompanionUpscalePages(
+            prefetchPlan + loadedLegacyUpscalePages(
                 anchorChapterId = prefetchPlan.firstOrNull()?.page?.chapter?.chapter?.id,
             ).map { page ->
                 PrefetchRequest(page = page, lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE)
@@ -1000,20 +1007,99 @@ class ReaderViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun loadedCompanionUpscalePages(anchorChapterId: Long?): List<ReaderPage> {
-        val viewerChapters = state.value.viewerChapters ?: return emptyList()
+    private fun syncLoadedLegacyUpscaleObservers(viewerChapters: ViewerChapters?) {
+        val activePages = loadedLegacyUpscalePages(anchorChapterId = null, viewerChapters = viewerChapters)
+        val activeKeys = activePages.mapTo(mutableSetOf(), ::loadedLegacyObserverKey)
+
+        loadedLegacyUpscaleObserverJobs.entries.removeIf { (key, job) ->
+            if (key in activeKeys) {
+                return@removeIf false
+            }
+            job.cancel()
+            true
+        }
+
+        activePages.forEach { page ->
+            val key = loadedLegacyObserverKey(page)
+            if (loadedLegacyUpscaleObserverJobs.containsKey(key)) {
+                return@forEach
+            }
+
+            if (page.status == Page.State.Ready) {
+                onLoadedLegacyPageReady(page)
+            }
+
+            loadedLegacyUpscaleObserverJobs[key] = page.statusFlow
+                .map { status -> status == Page.State.Ready }
+                .distinctUntilChanged()
+                .onEach { isReady ->
+                    if (isReady) {
+                        onLoadedLegacyPageReady(page)
+                    }
+                }
+                .launchIn(viewModelScope)
+        }
+    }
+
+    private fun onLoadedLegacyPageReady(page: ReaderPage) {
+        if (!readerPreferences.upscalePagesX2.get()) {
+            return
+        }
+
+        val pages = page.chapter.pages ?: return
+        readerPageUpscaler.rememberChapterMetadata(
+            pages = pages,
+            mangaTitle = manga?.title,
+        )
+
+        if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id)) {
+            page.chapter.pageLoader?.queuePages(pages)
+            scheduleUpscaleForChapterFromStart(pages)
+            return
+        }
+
+        readerPageUpscaler.retainScheduledPrefetches(retainedLoadedLegacyUpscalePages(extraPages = listOf(page)))
+        readerPageUpscaler.schedulePrefetch(
+            page = page,
+            priority = page.index,
+            lane = ReaderPageUpscaler.REMOTE_PRIMARY_LANE,
+        )
+    }
+
+    private fun retainedLoadedLegacyUpscalePages(
+        extraPages: Collection<ReaderPage> = emptyList(),
+        anchorChapterId: Long? = null,
+    ): List<ReaderPage> {
+        return (extraPages + loadedLegacyUpscalePages(anchorChapterId = anchorChapterId)).distinct()
+    }
+
+    private fun loadedLegacyUpscalePages(
+        anchorChapterId: Long?,
+        viewerChapters: ViewerChapters? = state.value.viewerChapters,
+    ): List<ReaderPage> {
+        val chapters = viewerChapters ?: return emptyList()
         return buildList {
-            viewerChapters.currChapter
+            chapters.prevChapter
+                ?.takeIf { it.chapter.id != anchorChapterId }
+                ?.pages
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::addAll)
+            chapters.currChapter
                 .takeIf { it.chapter.id != anchorChapterId }
                 ?.pages
                 ?.takeIf { it.isNotEmpty() }
                 ?.let(::addAll)
-            viewerChapters.nextChapter
+            chapters.nextChapter
                 ?.takeIf { it.chapter.id != anchorChapterId }
                 ?.pages
                 ?.takeIf { it.isNotEmpty() }
                 ?.let(::addAll)
         }
+    }
+
+    private fun loadedLegacyObserverKey(page: ReaderPage): String {
+        val chapterId = page.chapter.chapter.id ?: Long.MIN_VALUE
+        return "$chapterId:${page.index}"
     }
 
     private fun buildVisibleFirstUpscalePlan(visiblePages: List<ReaderPage>): List<PrefetchRequest> {
