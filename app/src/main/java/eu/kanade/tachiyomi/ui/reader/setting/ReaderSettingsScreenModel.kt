@@ -18,6 +18,7 @@ class ReaderSettingsScreenModel(
     private val onChangeUpscaleEnabled: (Boolean) -> Unit,
     private val onChangeAiBackend: (ReaderPreferences.AiBackendMode) -> Unit,
     private val onChangeRemoteAiModel: (ReaderPreferences.RemoteAiModel) -> Unit,
+    private val onChangeRemoteAiBatchMode: (ReaderPreferences.RemoteAiBatchMode) -> Unit,
     val preferences: ReaderPreferences = Injekt.get(),
 ) : ScreenModel {
 
@@ -41,5 +42,9 @@ class ReaderSettingsScreenModel(
 
     fun setRemoteAiModel(mode: ReaderPreferences.RemoteAiModel) {
         onChangeRemoteAiModel(mode)
+    }
+
+    fun setRemoteAiBatchMode(mode: ReaderPreferences.RemoteAiBatchMode) {
+        onChangeRemoteAiBatchMode(mode)
     }
 }

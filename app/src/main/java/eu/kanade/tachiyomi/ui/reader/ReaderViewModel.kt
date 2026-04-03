@@ -253,6 +253,7 @@ class ReaderViewModel @JvmOverloads constructor(
     override fun onCleared() {
         loadedLegacyUpscaleObserverJobs.values.forEach(Job::cancel)
         loadedLegacyUpscaleObserverJobs.clear()
+        readerPageUpscaler.invalidateRemoteWorkScope()
         val currentChapters = state.value.viewerChapters
         if (currentChapters != null) {
             currentChapters.unref()
@@ -268,6 +269,7 @@ class ReaderViewModel @JvmOverloads constructor(
      * trigger deletion of the downloaded chapters.
      */
     fun onActivityFinish() {
+        readerPageUpscaler.invalidateRemoteWorkScope()
         cleanupUpscaleCache(keepOnlyCurrent = true)
         deletePendingChapters()
     }
@@ -342,6 +344,9 @@ class ReaderViewModel @JvmOverloads constructor(
                     bookmarked = newChapters.currChapter.chapter.bookmark,
                 )
             }
+        }
+        if (previousCurrentChapterId != chapter.chapter.id) {
+            readerPageUpscaler.invalidateRemoteWorkScope()
         }
         updateUpscaleRetention(previousCurrentChapterId, newChapters)
         scheduleUpscaleForChapter(newChapters.currChapter)
@@ -807,6 +812,7 @@ class ReaderViewModel @JvmOverloads constructor(
     }
 
     fun onUpscaleStateChanged(enabled: Boolean) {
+        readerPageUpscaler.invalidateRemoteWorkScope()
         if (!enabled) {
             loadedLegacyUpscaleObserverJobs.values.forEach(Job::cancel)
             loadedLegacyUpscaleObserverJobs.clear()

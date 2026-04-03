@@ -182,10 +182,15 @@ class PendingUpscaleRequest:
     chapter_title: str | None = None
     page_index: int | None = None
     total_pages: int | None = None
+    client_id: str | None = None
+    scope_id: int | None = None
     enqueued_at: float = field(default_factory=time.perf_counter)
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    processing_started: threading.Event = field(default_factory=threading.Event, repr=False)
     result: ProcessedImage | None = None
     error: Exception | None = None
+    canceled_reason: str | None = None
 
     @property
     def batch_key(self) -> tuple[str, str, int, str] | None:
@@ -233,7 +238,10 @@ class ChapterUpscaleJob:
     pages: dict[int, PreparedChapterPage]
     manga_title: str | None = None
     chapter_title: str | None = None
+    client_id: str | None = None
+    scope_id: int | None = None
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     error: Exception | None = None
     ready_pages: set[int] = field(default_factory=set, repr=False)
     stable_output_pages: set[int] = field(default_factory=set, repr=False)
@@ -283,6 +291,12 @@ class ReaderAiServer(ThreadingHTTPServer):
         self._worker_threads: list[threading.Thread] = []
         self._chapter_jobs: dict[str, ChapterUpscaleJob] = {}
         self._chapter_jobs_lock = threading.Lock()
+        self._client_scopes: dict[str, int] = {}
+        self._client_scopes_lock = threading.Lock()
+        self._pending_requests: dict[str, PendingUpscaleRequest] = {}
+        self._pending_requests_lock = threading.Lock()
+        self._active_processes: dict[str, set[Any]] = {}
+        self._active_processes_lock = threading.Lock()
         for worker_index in range(max(1, config.max_workers)):
             workspace = self._workspace_root / f"worker-{worker_index}"
             workspace.mkdir(parents=True, exist_ok=True)
@@ -307,6 +321,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         chapter_title: str | None = None,
         page_index: int | None = None,
         total_pages: int | None = None,
+        client_id: str | None = None,
+        scope_id: int | None = None,
     ) -> ProcessedImage:
         if self.config.mode == "mock_copy":
             return ProcessedImage(body, output_format)
@@ -341,9 +357,13 @@ class ReaderAiServer(ThreadingHTTPServer):
             chapter_title=chapter_title,
             page_index=page_index,
             total_pages=total_pages,
+            client_id=client_id,
+            scope_id=scope_id,
         )
+        self._register_pending_request(request)
         self._processing_queue.put(request)
         request.completed.wait()
+        self._unregister_pending_request(request)
 
         if request.error is not None:
             raise request.error
@@ -362,6 +382,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         model_name: str,
         manga_title: str | None,
         chapter_title: str | None,
+        client_id: str | None = None,
+        scope_id: int | None = None,
     ) -> ChapterUpscaleJob:
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
@@ -398,6 +420,8 @@ class ReaderAiServer(ThreadingHTTPServer):
             pages=pages,
             manga_title=manga_title,
             chapter_title=chapter_title,
+            client_id=client_id,
+            scope_id=scope_id,
         )
         with self._chapter_jobs_lock:
             self._chapter_jobs[job_id] = job
@@ -411,11 +435,136 @@ class ReaderAiServer(ThreadingHTTPServer):
         thread.start()
         return job
 
+    def sync_client_scope(
+        self,
+        client_id: str | None,
+        scope_id: int | None,
+    ) -> None:
+        if not client_id or scope_id is None:
+            return
+        should_abort = False
+        with self._client_scopes_lock:
+            previous_scope = self._client_scopes.get(client_id)
+            if previous_scope is None or scope_id > previous_scope:
+                self._client_scopes[client_id] = scope_id
+                should_abort = True
+        if should_abort:
+            self.abort_client_work(
+                client_id=client_id,
+                scope_id=scope_id,
+                reason="Remote AI work was superseded by a newer reader state",
+            )
+
+    def abort_client_work(
+        self,
+        client_id: str,
+        scope_id: int | None = None,
+        reason: str = "Remote AI work was canceled",
+    ) -> dict[str, int]:
+        if not client_id:
+            return {"queued": 0, "chapter_jobs": 0, "processes": 0}
+
+        if scope_id is not None:
+            with self._client_scopes_lock:
+                previous_scope = self._client_scopes.get(client_id)
+                self._client_scopes[client_id] = scope_id if previous_scope is None else max(previous_scope, scope_id)
+
+        canceled_requests = 0
+        with self._pending_requests_lock:
+            requests = list(self._pending_requests.values())
+        for request in requests:
+            if request.client_id != client_id:
+                continue
+            if scope_id is not None and request.scope_id is not None and request.scope_id >= scope_id:
+                continue
+            if self._cancel_pending_request(request, reason):
+                canceled_requests += 1
+
+        canceled_jobs = 0
+        with self._chapter_jobs_lock:
+            jobs = list(self._chapter_jobs.values())
+        for job in jobs:
+            if job.client_id != client_id:
+                continue
+            if scope_id is not None and job.scope_id is not None and job.scope_id >= scope_id:
+                continue
+            if self._cancel_chapter_job(job, reason):
+                canceled_jobs += 1
+
+        terminated_processes = 0
+        with self._active_processes_lock:
+            active_processes = list(self._active_processes.get(client_id, set()))
+        for process in active_processes:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                    terminated_processes += 1
+            except Exception:
+                continue
+
+        return {
+            "queued": canceled_requests,
+            "chapter_jobs": canceled_jobs,
+            "processes": terminated_processes,
+        }
+
+    def _register_pending_request(self, request: PendingUpscaleRequest) -> None:
+        with self._pending_requests_lock:
+            self._pending_requests[request.request_id] = request
+
+    def _unregister_pending_request(self, request: PendingUpscaleRequest) -> None:
+        with self._pending_requests_lock:
+            self._pending_requests.pop(request.request_id, None)
+
+    def _register_active_process(self, client_id: str | None, process: Any) -> None:
+        if not client_id:
+            return
+        with self._active_processes_lock:
+            self._active_processes.setdefault(client_id, set()).add(process)
+
+    def _unregister_active_process(self, client_id: str | None, process: Any) -> None:
+        if not client_id:
+            return
+        with self._active_processes_lock:
+            processes = self._active_processes.get(client_id)
+            if not processes:
+                return
+            processes.discard(process)
+            if not processes:
+                self._active_processes.pop(client_id, None)
+
+    def _is_scope_stale(self, client_id: str | None, scope_id: int | None) -> bool:
+        if not client_id or scope_id is None:
+            return False
+        with self._client_scopes_lock:
+            latest_scope = self._client_scopes.get(client_id)
+        return latest_scope is not None and scope_id < latest_scope
+
+    def _cancel_pending_request(self, request: PendingUpscaleRequest, reason: str) -> bool:
+        if request.completed.is_set():
+            return False
+        request.canceled_reason = reason
+        request.cancel_event.set()
+        if not request.processing_started.is_set():
+            request.error = RuntimeError(reason)
+            request.completed.set()
+        return True
+
+    def _cancel_chapter_job(self, job: ChapterUpscaleJob, reason: str) -> bool:
+        if job.completed.is_set():
+            return False
+        job.cancel_event.set()
+        if job.error is None:
+            job.error = RuntimeError(reason)
+        return True
+
     def get_chapter_page(self, job_id: str, page_index: int) -> ProcessedImage | None:
         with self._chapter_jobs_lock:
             job = self._chapter_jobs.get(job_id)
         if job is None:
             raise KeyError(job_id)
+        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+            raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter job was canceled")
 
         produced_output_path = job.resolve_output_path(page_index)
         if produced_output_path is not None and produced_output_path.is_file():
@@ -474,11 +623,34 @@ class ReaderAiServer(ThreadingHTTPServer):
             request = self._take_next_request(backlog)
             if request is _STOP_PROCESSING:
                 return
+            if not isinstance(request, PendingUpscaleRequest):
+                continue
+            if self._is_scope_stale(request.client_id, request.scope_id) or request.cancel_event.is_set():
+                self._cancel_pending_request(
+                    request,
+                    request.canceled_reason or "Remote AI work was canceled",
+                )
+                continue
+            request.processing_started.set()
 
             batch = [request]
             try:
                 if request.batch_key is not None:
                     batch = self._collect_batch(request, backlog)
+                    filtered_batch: list[PendingUpscaleRequest] = []
+                    for item in batch:
+                        if self._is_scope_stale(item.client_id, item.scope_id) or item.cancel_event.is_set():
+                            self._cancel_pending_request(
+                                item,
+                                item.canceled_reason or "Remote AI work was canceled",
+                            )
+                            continue
+                        filtered_batch.append(item)
+                    batch = filtered_batch
+                    for item in batch:
+                        item.processing_started.set()
+                    if not batch:
+                        continue
                     if len(batch) > 1:
                         batch_display = _describe_request_batch(batch)
                         if batch_display is not None:
@@ -498,6 +670,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                         config=self.config,
                         workspace=workspace,
                         requests=batch,
+                        process_registry=self,
                     )
                     for item in batch:
                         item.result = results[item.request_id]
@@ -506,6 +679,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                         config=self.config,
                         workspace=workspace,
                         request=request,
+                        process_registry=self,
                     )
             except Exception as exc:  # noqa: BLE001
                 for item in batch:
@@ -531,6 +705,15 @@ class ReaderAiServer(ThreadingHTTPServer):
             if next_request is _STOP_PROCESSING:
                 backlog.append(next_request)
                 break
+            if not isinstance(next_request, PendingUpscaleRequest):
+                backlog.append(next_request)
+                break
+            if self._is_scope_stale(next_request.client_id, next_request.scope_id) or next_request.cancel_event.is_set():
+                self._cancel_pending_request(
+                    next_request,
+                    next_request.canceled_reason or "Remote AI work was canceled",
+                )
+                continue
             if next_request.batch_key != first_request.batch_key:
                 backlog.append(next_request)
                 break
@@ -559,6 +742,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         binary = Path(self.config.binary)
         model_dir = Path(self.config.model_dir)
         try:
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
             if not binary.is_file():
                 raise RuntimeError(f"Upscale binary not found: {binary}")
             if not model_dir.is_dir():
@@ -599,11 +784,18 @@ class ReaderAiServer(ThreadingHTTPServer):
                 cwd=binary.parent,
                 timeout=max(self.config.timeout_seconds, 1800),
                 display_label=job.display_label,
+                client_id=job.client_id,
+                cancel_event=job.cancel_event,
+                process_registry=self,
             )
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
             if completed.returncode != 0:
                 if _should_retry_with_safe_vulkan_settings(completed.details):
                     safe_config = _build_safe_vulkan_retry_config(self.config)
                     for prepared_page in job.pages.values():
+                        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                            raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
                         fallback_workspace = job.workspace / f"safe-page-{prepared_page.page_index:04d}"
                         fallback_workspace.mkdir(parents=True, exist_ok=True)
                         fallback_body = prepared_page.input_path.read_bytes()
@@ -624,7 +816,10 @@ class ReaderAiServer(ThreadingHTTPServer):
                                     native_scale=job.native_scale,
                                     target_scale=job.native_scale,
                                 ),
+                                client_id=job.client_id,
+                                scope_id=job.scope_id,
                             ),
+                            process_registry=self,
                         )
                         safe_output_path = job.output_dir / (
                             f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
@@ -647,6 +842,8 @@ class ReaderAiServer(ThreadingHTTPServer):
                     fallback_pages.append(prepared_page)
 
             for prepared_page in fallback_pages:
+                if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                    raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
                 fallback_workspace = job.workspace / f"fallback-{prepared_page.page_index:04d}"
                 fallback_workspace.mkdir(parents=True, exist_ok=True)
                 fallback_body = prepared_page.input_path.read_bytes()
@@ -667,20 +864,30 @@ class ReaderAiServer(ThreadingHTTPServer):
                             native_scale=job.native_scale,
                             target_scale=job.native_scale,
                         ),
+                        client_id=job.client_id,
+                        scope_id=job.scope_id,
                     ),
+                    process_registry=self,
                 )
                 fallback_output_path = job.output_dir / (
                     f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
                 )
                 fallback_output_path.write_bytes(processed_image.bytes)
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale finished",
             )
         except Exception as exc:  # noqa: BLE001
             job.error = exc
-            _emit_log_line(
-                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale failed: {exc}",
-            )
+            if job.cancel_event.is_set() or "canceled" in str(exc).lower() or "superseded" in str(exc).lower():
+                _emit_log_line(
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale canceled",
+                )
+            else:
+                _emit_log_line(
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale failed: {exc}",
+                )
         finally:
             job.completed.set()
 
@@ -784,6 +991,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/upscale-chapter":
             self._handle_chapter_upscale_request()
             return
+        if parsed.path == "/api/abort-client":
+            self._handle_abort_client_request()
+            return
         self._send_text(HTTPStatus.NOT_FOUND, "Not found")
 
     def _handle_single_upscale_request(self) -> None:
@@ -816,6 +1026,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         requested_batch_size = (self.headers.get("X-Reader-AI-Batch-Size") or "").strip()
         manga_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Manga-Title"))
         chapter_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Chapter-Title"))
+        client_id = _decode_optional_text_header(self.headers.get("X-Reader-AI-Client-Id"))
+        scope_id = _parse_optional_int_header((self.headers.get("X-Reader-AI-Work-Scope") or "").strip())
         page_index_header = (self.headers.get("X-Reader-AI-Page-Index") or "").strip()
         total_pages_header = (self.headers.get("X-Reader-AI-Page-Count") or "").strip()
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
@@ -840,6 +1052,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
+        self.server.sync_client_scope(client_id, scope_id)
         page_index = _parse_optional_int_header(page_index_header)
         total_pages = _parse_optional_int_header(total_pages_header)
         request_id = self.server.next_request_id()
@@ -891,6 +1104,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 chapter_title=chapter_title,
                 page_index=page_index,
                 total_pages=total_pages,
+                client_id=client_id,
+                scope_id=scope_id,
             )
         except subprocess.TimeoutExpired as exc:
             self.log_message("[%s] Upscale timeout after %s seconds", request_id, exc.timeout)
@@ -956,6 +1171,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         requested_model_name = (self.headers.get("X-Reader-AI-Model-Name") or "").strip()
         manga_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Manga-Title"))
         chapter_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Chapter-Title"))
+        client_id = _decode_optional_text_header(self.headers.get("X-Reader-AI-Client-Id"))
+        scope_id = _parse_optional_int_header((self.headers.get("X-Reader-AI-Work-Scope") or "").strip())
         if output_format not in {"jpg", "jpeg", "png", "webp"}:
             self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
             return
@@ -968,6 +1185,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
+        self.server.sync_client_scope(client_id, scope_id)
         request_id = self.server.next_request_id()
 
         upload_workspace = self.server._workspace_root / "incoming-chapters"
@@ -992,6 +1210,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 model_name=model_name,
                 manga_title=manga_title,
                 chapter_title=chapter_title,
+                client_id=client_id,
+                scope_id=scope_id,
             )
         except zipfile.BadZipFile:
             self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is not a valid zip file")
@@ -1028,6 +1248,24 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "output_format": chapter_job.batch_output_format,
             },
         )
+
+    def _handle_abort_client_request(self) -> None:
+        if not self._authorize():
+            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            return
+
+        client_id = _decode_optional_text_header(self.headers.get("X-Reader-AI-Client-Id"))
+        if not client_id:
+            self._send_text(HTTPStatus.BAD_REQUEST, "Missing X-Reader-AI-Client-Id")
+            return
+
+        scope_id = _parse_optional_int_header((self.headers.get("X-Reader-AI-Work-Scope") or "").strip())
+        summary = self.server.abort_client_work(
+            client_id=client_id,
+            scope_id=scope_id,
+            reason="Remote AI work was canceled by the reader",
+        )
+        self._send_json(HTTPStatus.OK, summary)
 
     def log_message(self, format: str, *args: Any) -> None:
         message = format % args
@@ -1092,6 +1330,7 @@ def _run_subprocess(
         config=config,
         workspace=workspace,
         request=request,
+        process_registry=None,
     )
 
 
@@ -1099,7 +1338,10 @@ def _process_single_request_in_workspace(
     config: Config,
     workspace: Path,
     request: PendingUpscaleRequest,
+    process_registry: ReaderAiServer | None,
 ) -> ProcessedImage:
+    if request.cancel_event.is_set():
+        raise RuntimeError(request.canceled_reason or "Remote AI work was canceled")
     if request.is_chunked:
         return _run_chunked_subprocess(
             config=config,
@@ -1111,6 +1353,9 @@ def _process_single_request_in_workspace(
             native_scale=request.native_scale,
             target_scale=request.native_scale,
             display_label=request.page_display_label,
+            client_id=request.client_id,
+            cancel_event=request.cancel_event,
+            process_registry=process_registry,
         )
 
     binary = Path(config.binary)
@@ -1140,6 +1385,9 @@ def _process_single_request_in_workspace(
             model_name=request.model_name,
             scale=request.native_scale,
             display_label=request.page_display_label,
+            client_id=request.client_id,
+            cancel_event=request.cancel_event,
+            process_registry=process_registry,
         )
     except RuntimeError as exc:
         if _should_retry_with_safe_vulkan_settings(str(exc)):
@@ -1155,6 +1403,9 @@ def _process_single_request_in_workspace(
                 model_name=request.model_name,
                 scale=request.native_scale,
                 display_label=request.page_display_label,
+                client_id=request.client_id,
+                cancel_event=request.cancel_event,
+                process_registry=process_registry,
             )
         if (
             preferred_output_format in JPEG_OUTPUT_FORMATS
@@ -1173,6 +1424,9 @@ def _process_single_request_in_workspace(
                 model_name=request.model_name,
                 scale=request.native_scale,
                 display_label=request.page_display_label,
+                client_id=request.client_id,
+                cancel_event=request.cancel_event,
+                process_registry=process_registry,
             )
         raise
 
@@ -1181,6 +1435,7 @@ def _run_subprocess_batch(
     config: Config,
     workspace: Path,
     requests: list[PendingUpscaleRequest],
+    process_registry: ReaderAiServer | None,
 ) -> dict[str, ProcessedImage]:
     if not requests:
         return {}
@@ -1239,6 +1494,9 @@ def _run_subprocess_batch(
         cwd=binary.parent,
         timeout=config.timeout_seconds,
         display_label=batch_display_label,
+        client_id=requests[0].client_id,
+        cancel_event=requests[0].cancel_event,
+        process_registry=process_registry,
     )
     details = completed.details
     if completed.returncode != 0:
@@ -1266,11 +1524,14 @@ def _run_subprocess_batch(
                     chapter_title=request.chapter_title,
                     page_index=request.page_index,
                     total_pages=request.total_pages,
+                    client_id=request.client_id,
+                    scope_id=request.scope_id,
                 )
                 results[request.request_id] = _process_single_request_in_workspace(
                     config=safe_config,
                     workspace=fallback_workspace,
                     request=fallback_request,
+                    process_registry=process_registry,
                 )
             return results
         raise RuntimeError(f"Upscale process failed: {details}")
@@ -1311,11 +1572,14 @@ def _run_subprocess_batch(
             chapter_title=request.chapter_title,
             page_index=request.page_index,
             total_pages=request.total_pages,
+            client_id=request.client_id,
+            scope_id=request.scope_id,
         )
         results[request.request_id] = _process_single_request_in_workspace(
             config=config,
             workspace=fallback_workspace,
             request=fallback_request,
+            process_registry=process_registry,
         )
 
     return results
@@ -1333,6 +1597,9 @@ def _run_subprocess_once(
     model_name: str,
     scale: int,
     display_label: str | None = None,
+    client_id: str | None = None,
+    cancel_event: threading.Event | None = None,
+    process_registry: ReaderAiServer | None = None,
 ) -> ProcessedImage:
     _clear_workspace_files(workspace)
     input_path = workspace / f"input.{_sanitize_extension(input_format)}"
@@ -1367,9 +1634,14 @@ def _run_subprocess_once(
         cwd=binary.parent,
         timeout=config.timeout_seconds,
         display_label=display_label,
+        client_id=client_id,
+        cancel_event=cancel_event,
+        process_registry=process_registry,
     )
     details = completed.details
 
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Remote AI work was canceled")
     if completed.returncode != 0:
         raise RuntimeError(f"Upscale process failed: {details}")
 
@@ -1531,6 +1803,9 @@ def _run_logged_subprocess(
     cwd: Path,
     timeout: int,
     display_label: str | None = None,
+    client_id: str | None = None,
+    cancel_event: threading.Event | None = None,
+    process_registry: ReaderAiServer | None = None,
 ) -> SubprocessRunResult:
     _set_request_display_label(request_id, display_label)
     process = subprocess.Popen(
@@ -1543,6 +1818,8 @@ def _run_logged_subprocess(
         errors="replace",
         bufsize=1,
     )
+    if process_registry is not None:
+        process_registry._register_active_process(client_id, process)
     output_lines: list[str] = []
 
     def reader() -> None:
@@ -1562,17 +1839,33 @@ def _run_logged_subprocess(
     reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
     reader_thread.start()
     try:
-        returncode = process.wait(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while True:
+            returncode = process.poll()
+            if returncode is not None:
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                process.kill()
+                process.wait(timeout=5)
+                returncode = process.returncode if process.returncode is not None else -9
+                break
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            time.sleep(0.05)
     except subprocess.TimeoutExpired:
         process.kill()
         reader_thread.join(timeout=1)
         _set_request_display_label(request_id, None)
+        if process_registry is not None:
+            process_registry._unregister_active_process(client_id, process)
         raise
 
     reader_thread.join(timeout=1)
     if process.stdout is not None:
         process.stdout.close()
     _set_request_display_label(request_id, None)
+    if process_registry is not None:
+        process_registry._unregister_active_process(client_id, process)
     details = "\n".join(output_lines).strip() or f"exit code {returncode}"
     return SubprocessRunResult(returncode=returncode, details=details)
 
@@ -1715,6 +2008,9 @@ def _run_chunked_subprocess(
     native_scale: int,
     target_scale: int,
     display_label: str | None = None,
+    client_id: str | None = None,
+    cancel_event: threading.Event | None = None,
+    process_registry: ReaderAiServer | None = None,
 ) -> ProcessedImage:
     binary = Path(config.binary)
     model_dir = Path(config.model_dir)
@@ -1733,6 +2029,8 @@ def _run_chunked_subprocess(
 
     try:
         for core_top in range(0, source_height, chunk_input_height):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Remote AI work was canceled")
             core_bottom = min(source_height, core_top + chunk_input_height)
             chunk_top = max(0, core_top - overlap_input)
             chunk_bottom = min(source_height, core_bottom + overlap_input)
@@ -1755,6 +2053,9 @@ def _run_chunked_subprocess(
                 model_name=model_name,
                 scale=native_scale,
                 display_label=display_label,
+                client_id=client_id,
+                cancel_event=cancel_event,
+                process_registry=process_registry,
             )
 
             with Image.open(BytesIO(processed_chunk.bytes)) as upscaled_chunk_raw:

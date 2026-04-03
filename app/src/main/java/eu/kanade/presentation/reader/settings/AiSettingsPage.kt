@@ -59,7 +59,7 @@ internal fun ColumnScope.AiPage(screenModel: ReaderSettingsScreenModel) {
             ReaderPreferences.RemoteAiBatchMode.entries.forEach { batchMode ->
                 FilterChip(
                     selected = remoteAiBatchMode == batchMode,
-                    onClick = { screenModel.preferences.remoteAiBatchMode.set(batchMode) },
+                    onClick = { screenModel.setRemoteAiBatchMode(batchMode) },
                     label = { Text(stringResource(batchMode.titleRes)) },
                 )
             }

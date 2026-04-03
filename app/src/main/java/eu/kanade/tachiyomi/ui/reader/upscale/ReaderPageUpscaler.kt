@@ -308,6 +308,21 @@ class ReaderPageUpscaler(
         }
     }
 
+    fun invalidateRemoteWorkScope() {
+        remoteRetainedPaths = emptySet()
+        forcedBlockingPages.clear()
+        remoteChapterJobs.values.forEach { it.job.cancel() }
+        remoteChapterJobs.clear()
+        remoteChapterMetadata.clear()
+        remotePrefetchScope.launch {
+            remoteQueueMutex.withLock {
+                remoteQueuedPages.clear()
+            }
+            remotePrefetchSignal.trySend(Unit)
+        }
+        remotePageUpscaler.invalidateRemoteWorkScope()
+    }
+
     fun rememberChapterMetadata(
         pages: List<ReaderPage>,
         mangaTitle: String? = null,

@@ -19,6 +19,7 @@ import java.io.File
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -35,13 +36,25 @@ class RemotePageUpscaler(
         .readTimeout(10, TimeUnit.MINUTES)
         .callTimeout(10, TimeUnit.MINUTES)
         .build()
+    private val controlClient = networkHelper.nonCloudflareClient.newBuilder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
+        .build()
     private val discovery = RemoteAiServerDiscovery(app, readerPreferences, networkHelper)
+    private val clientId = UUID.randomUUID().toString()
+    private val workScope = AtomicLong(1L)
 
     @Volatile
     private var lastErrorMessage: String? = null
 
     fun consumeLastErrorMessage(): String? {
         return lastErrorMessage.also { lastErrorMessage = null }
+    }
+
+    fun invalidateRemoteWorkScope() {
+        val nextScope = workScope.incrementAndGet()
+        abortRemoteWork(nextScope)
     }
 
     fun prepareChapterUploadPage(
@@ -74,10 +87,12 @@ class RemotePageUpscaler(
             return null
         }
 
+        val scopeId = workScope.get()
         val initialAttempt = runStartChapterJobRequest(
             baseUrlResolution = baseUrlResolution,
             pages = pages,
             metadata = metadata,
+            scopeId = scopeId,
         )
         if (initialAttempt.job != null) {
             return initialAttempt.job
@@ -96,6 +111,7 @@ class RemotePageUpscaler(
             baseUrlResolution = rediscoveredBaseUrl,
             pages = pages,
             metadata = metadata,
+            scopeId = scopeId,
         ).job
     }
 
@@ -117,6 +133,8 @@ class RemotePageUpscaler(
         val requestBuilder = Request.Builder()
             .url(requestUrl)
             .header("Accept", "image/jpeg, image/png;q=0.9")
+            .header(HEADER_CLIENT_ID, job.clientId)
+            .header(HEADER_WORK_SCOPE, job.workScope.toString())
 
         readerPreferences.remoteAiToken.get().trim()
             .takeIf { it.isNotEmpty() }
@@ -176,10 +194,12 @@ class RemotePageUpscaler(
         }
 
         val preparedImage = prepareRequestImage(source.peek().readByteArray()) ?: return null
+        val scopeId = workScope.get()
         val initialAttempt = runUpscaleRequest(
             baseUrl = baseUrlResolution.baseUrl,
             preparedImage = preparedImage,
             pageMetadata = pageMetadata,
+            scopeId = scopeId,
         )
         if (initialAttempt.bytes != null) {
             return initialAttempt.bytes
@@ -198,6 +218,7 @@ class RemotePageUpscaler(
             baseUrl = rediscoveredBaseUrl.baseUrl,
             preparedImage = preparedImage,
             pageMetadata = pageMetadata,
+            scopeId = scopeId,
         ).bytes
     }
 
@@ -205,6 +226,7 @@ class RemotePageUpscaler(
         baseUrlResolution: RemoteAiServerDiscovery.Resolution,
         pages: List<PreparedChapterUploadPage>,
         metadata: ChapterJobMetadata?,
+        scopeId: Long,
     ): ChapterJobAttempt {
         val requestUrl = "${baseUrlResolution.baseUrl}/api/upscale-chapter".toHttpUrlOrNull()
         if (requestUrl == null) {
@@ -221,6 +243,8 @@ class RemotePageUpscaler(
                 .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
                 .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
                 .header("X-Reader-AI-Page-Count", metadata?.totalPages?.toString() ?: pages.size.toString())
+                .header(HEADER_CLIENT_ID, clientId)
+                .header(HEADER_WORK_SCOPE, scopeId.toString())
 
             readerPreferences.remoteAiToken.get().trim()
                 .takeIf { it.isNotEmpty() }
@@ -260,6 +284,8 @@ class RemotePageUpscaler(
                         StartedChapterJob(
                             baseUrl = baseUrlResolution.baseUrl,
                             jobId = jobId,
+                            clientId = clientId,
+                            workScope = scopeId,
                         ),
                     )
                 }
@@ -280,6 +306,7 @@ class RemotePageUpscaler(
         baseUrl: String,
         preparedImage: PreparedImage,
         pageMetadata: PageRequestMetadata?,
+        scopeId: Long,
     ): UpscaleAttempt {
         val requestUrl = "$baseUrl/api/upscale".toHttpUrlOrNull()
         if (requestUrl == null) {
@@ -294,6 +321,8 @@ class RemotePageUpscaler(
             .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
             .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
             .header("X-Reader-AI-Batch-Size", readerPreferences.remoteAiBatchMode.get().requestBatchSize.toString())
+            .header(HEADER_CLIENT_ID, clientId)
+            .header(HEADER_WORK_SCOPE, scopeId.toString())
 
         readerPreferences.remoteAiToken.get().trim()
             .takeIf { it.isNotEmpty() }
@@ -345,6 +374,58 @@ class RemotePageUpscaler(
             .getOrElse {
                 UpscaleAttempt.failure(UpscaleFailureKind.NETWORK)
             }
+    }
+
+    private fun abortRemoteWork(scopeId: Long) {
+        val baseUrlResolution = discovery.resolveBaseUrl() ?: return
+        val initialFailure = runAbortRequest(
+            baseUrlResolution = baseUrlResolution,
+            scopeId = scopeId,
+        )
+        if (initialFailure == null) {
+            return
+        }
+        if (!baseUrlResolution.isAutoDiscovered) {
+            return
+        }
+
+        discovery.clearCachedBaseUrl()
+        val rediscoveredBaseUrl = discovery.resolveBaseUrl(forceRediscovery = true)
+            ?.takeIf { it.baseUrl != baseUrlResolution.baseUrl }
+            ?: return
+        runAbortRequest(
+            baseUrlResolution = rediscoveredBaseUrl,
+            scopeId = scopeId,
+        )
+    }
+
+    private fun runAbortRequest(
+        baseUrlResolution: RemoteAiServerDiscovery.Resolution,
+        scopeId: Long,
+    ): Throwable? {
+        val requestUrl = "${baseUrlResolution.baseUrl}/api/abort-client".toHttpUrlOrNull() ?: return null
+        val requestBuilder = Request.Builder()
+            .url(requestUrl)
+            .header("Accept", "application/json")
+            .header(HEADER_CLIENT_ID, clientId)
+            .header(HEADER_WORK_SCOPE, scopeId.toString())
+            .post(ByteArray(0).toRequestBody(null))
+
+        readerPreferences.remoteAiToken.get().trim()
+            .takeIf { it.isNotEmpty() }
+            ?.let { requestBuilder.header("X-Reader-AI-Token", it) }
+
+        return runCatching {
+            controlClient.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    error("Remote AI abort returned HTTP ${response.code}")
+                }
+            }
+        }
+            .onFailure {
+                logcat(LogPriority.WARN, it) { "Failed to abort stale remote AI work" }
+            }
+            .exceptionOrNull()
     }
 
     private fun prepareRequestImage(sourceBytes: ByteArray): PreparedImage? {
@@ -487,6 +568,8 @@ class RemotePageUpscaler(
     data class StartedChapterJob(
         val baseUrl: String,
         val jobId: String,
+        val clientId: String,
+        val workScope: Long,
     )
 
     sealed interface ChapterPageFetchResult {
@@ -560,6 +643,8 @@ class RemotePageUpscaler(
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
         private const val REMOTE_ARCHIVE_FORMAT = "zip"
         private const val REMOTE_ARCHIVE_MEDIA_TYPE = "application/zip"
+        private const val HEADER_CLIENT_ID = "X-Reader-AI-Client-Id"
+        private const val HEADER_WORK_SCOPE = "X-Reader-AI-Work-Scope"
 
         private fun encodeHeaderText(value: String): String {
             return URLEncoder.encode(value, StandardCharsets.UTF_8.name())
