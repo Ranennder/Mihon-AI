@@ -302,6 +302,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         self._pending_requests_lock = threading.Lock()
         self._active_processes: dict[str, set[Any]] = {}
         self._active_processes_lock = threading.Lock()
+        self._subprocess_slot = threading.Semaphore(1)
         for worker_index in range(max(1, config.max_workers)):
             workspace = self._workspace_root / f"worker-{worker_index}"
             workspace.mkdir(parents=True, exist_ok=True)
@@ -1881,37 +1882,43 @@ def _run_logged_subprocess(
     process_registry: ReaderAiServer | None = None,
 ) -> SubprocessRunResult:
     _set_request_display_label(request_id, display_label)
-    process = subprocess.Popen(
-        command,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
-    if process_registry is not None:
-        process_registry._register_active_process(client_id, process)
     output_lines: list[str] = []
-
-    def reader() -> None:
-        if process.stdout is None:
-            return
-        for raw_line in process.stdout:
-            line = raw_line.rstrip()
-            if not line:
-                continue
-            output_lines.append(line)
-            _emit_log_line(
-                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
-                console=_should_surface_subprocess_console_line(request_id, line),
-                log_file=_should_record_subprocess_log_line(request_id, line),
-            )
-
-    reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
-    reader_thread.start()
+    subprocess_slot = process_registry._subprocess_slot if process_registry is not None else None
+    if subprocess_slot is not None:
+        subprocess_slot.acquire()
+    process: subprocess.Popen[str] | None = None
+    reader_thread: threading.Thread | None = None
     try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        if process_registry is not None:
+            process_registry._register_active_process(client_id, process)
+
+        def reader() -> None:
+            if process is None or process.stdout is None:
+                return
+            for raw_line in process.stdout:
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                output_lines.append(line)
+                _emit_log_line(
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
+                    console=_should_surface_subprocess_console_line(request_id, line),
+                    log_file=_should_record_subprocess_log_line(request_id, line),
+                )
+
+        reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
+        reader_thread.start()
+
         deadline = time.monotonic() + timeout
         while True:
             returncode = process.poll()
@@ -1926,19 +1933,20 @@ def _run_logged_subprocess(
                 raise subprocess.TimeoutExpired(command, timeout)
             time.sleep(0.05)
     except subprocess.TimeoutExpired:
-        process.kill()
-        reader_thread.join(timeout=1)
-        _set_request_display_label(request_id, None)
-        if process_registry is not None:
-            process_registry._unregister_active_process(client_id, process)
+        if process is not None:
+            process.kill()
         raise
+    finally:
+        if reader_thread is not None:
+            reader_thread.join(timeout=1)
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+        _set_request_display_label(request_id, None)
+        if process_registry is not None and process is not None:
+            process_registry._unregister_active_process(client_id, process)
+        if subprocess_slot is not None:
+            subprocess_slot.release()
 
-    reader_thread.join(timeout=1)
-    if process.stdout is not None:
-        process.stdout.close()
-    _set_request_display_label(request_id, None)
-    if process_registry is not None:
-        process_registry._unregister_active_process(client_id, process)
     details = "\n".join(output_lines).strip() or f"exit code {returncode}"
     return SubprocessRunResult(returncode=returncode, details=details)
 
