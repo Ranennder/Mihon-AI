@@ -902,11 +902,20 @@ class ReaderViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun shouldQueueWholeChapterForRemote(chapter: ReaderChapter): Boolean {
-        return shouldQueueWholeChapterForRemote(chapter.chapter.id)
+    private fun shouldQueueWholeChapterForRemote(
+        chapter: ReaderChapter,
+        requireCurrentChapter: Boolean = false,
+    ): Boolean {
+        return shouldQueueWholeChapterForRemote(
+            chapterId = chapter.chapter.id,
+            requireCurrentChapter = requireCurrentChapter,
+        )
     }
 
-    private fun shouldQueueWholeChapterForRemote(chapterId: Long?): Boolean {
+    private fun shouldQueueWholeChapterForRemote(
+        chapterId: Long?,
+        requireCurrentChapter: Boolean = false,
+    ): Boolean {
         if (!readerPreferences.upscalePagesX2.get()) {
             return false
         }
@@ -916,7 +925,10 @@ class ReaderViewModel @JvmOverloads constructor(
         if (!readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter) {
             return false
         }
-        return chapterId != null
+        if (chapterId == null) {
+            return false
+        }
+        return !requireCurrentChapter || chapterId == state.value.viewerChapters?.currChapter?.chapter?.id
     }
 
     private fun scheduleUpscaleForLoadedCompanionChapter(chapter: ReaderChapter) {
@@ -930,7 +942,7 @@ class ReaderViewModel @JvmOverloads constructor(
             mangaTitle = manga?.title,
         )
 
-        if (shouldQueueWholeChapterForRemote(chapter)) {
+        if (shouldQueueWholeChapterForRemote(chapter, requireCurrentChapter = true)) {
             chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
@@ -1058,7 +1070,7 @@ class ReaderViewModel @JvmOverloads constructor(
             mangaTitle = manga?.title,
         )
 
-        if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id)) {
+        if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id, requireCurrentChapter = true)) {
             page.chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
@@ -1085,11 +1097,6 @@ class ReaderViewModel @JvmOverloads constructor(
     ): List<ReaderPage> {
         val chapters = viewerChapters ?: return emptyList()
         return buildList {
-            chapters.prevChapter
-                ?.takeIf { it.chapter.id != anchorChapterId }
-                ?.pages
-                ?.takeIf { it.isNotEmpty() }
-                ?.let(::addAll)
             chapters.currChapter
                 .takeIf { it.chapter.id != anchorChapterId }
                 ?.pages

@@ -27,6 +27,8 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.coroutines.coroutineContext
 
 class ReaderPageUpscaler(
@@ -554,28 +556,6 @@ class ReaderPageUpscaler(
             return
         }
 
-        val preparedPages = buildList {
-            pendingTargets.forEach { target ->
-                awaitPageReady(target.page)
-                if (target.cacheFile.isReadyCacheFile()) {
-                    return@forEach
-                }
-
-                val stream = target.page.stream ?: return@forEach
-                val sourceBytes = stream().use { input ->
-                    Buffer().readFrom(input).readByteArray()
-                }
-                val preparedPage = remotePageUpscaler.prepareChapterUploadPage(
-                    pageIndex = target.page.index,
-                    sourceBytes = sourceBytes,
-                ) ?: return
-                add(preparedPage)
-            }
-        }
-        if (preparedPages.isEmpty()) {
-            return
-        }
-
         val firstTarget = pendingTargets.first()
         val chapter = firstTarget.page.chapter.chapter
         val chapterId = chapter.id ?: return
@@ -590,10 +570,50 @@ class ReaderPageUpscaler(
             totalPages = cacheTargets.size,
         )
 
-        val chapterJob = remotePageUpscaler.startChapterJob(
-            pages = preparedPages,
-            metadata = chapterMetadata,
-        ) ?: return
+        val archiveFile = File(cacheRoot, "chapter-upload-${UUID.randomUUID()}.zip")
+        val preparedPageCount = try {
+            ZipOutputStream(archiveFile.outputStream().buffered()).use { zipOutput ->
+                var preparedPageCount = 0
+                pendingTargets.forEach { target ->
+                    awaitPageReady(target.page)
+                    if (target.cacheFile.isReadyCacheFile()) {
+                        return@forEach
+                    }
+
+                    val stream = target.page.stream ?: return@forEach
+                    val sourceBytes = stream().use { input ->
+                        Buffer().readFrom(input).readByteArray()
+                    }
+                    val preparedPage = remotePageUpscaler.prepareChapterUploadPage(
+                        pageIndex = target.page.index,
+                        sourceBytes = sourceBytes,
+                    ) ?: return
+                    val entryName = "${preparedPage.pageIndex.toString().padStart(4, '0')}.${preparedPage.extension}"
+                    zipOutput.putNextEntry(ZipEntry(entryName))
+                    zipOutput.write(preparedPage.bytes)
+                    zipOutput.closeEntry()
+                    preparedPageCount += 1
+                }
+                preparedPageCount
+            }
+        } catch (e: Throwable) {
+            archiveFile.delete()
+            throw e
+        }
+        if (preparedPageCount <= 0) {
+            archiveFile.delete()
+            return
+        }
+
+        val chapterJob = try {
+            remotePageUpscaler.startChapterJobFromArchive(
+                archiveFile = archiveFile,
+                pageCount = preparedPageCount,
+                metadata = chapterMetadata,
+            )
+        } finally {
+            archiveFile.delete()
+        } ?: return
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
         val nextPollAt = remainingTargets.keys.associateWith { 0L }.toMutableMap()
         val pendingPollCounts = mutableMapOf<Int, Int>()
