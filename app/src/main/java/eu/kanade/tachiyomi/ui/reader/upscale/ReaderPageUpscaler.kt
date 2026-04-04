@@ -27,6 +27,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.coroutines.coroutineContext
@@ -592,8 +593,17 @@ class ReaderPageUpscaler(
                         sourceBytes = sourceBytes,
                     ) ?: return
                     val entryName = "${preparedPage.pageIndex.toString().padStart(4, '0')}.${preparedPage.extension}"
-                    zipOutput.putNextEntry(ZipEntry(entryName))
-                    zipOutput.write(preparedPage.bytes)
+                    val entryBytes = preparedPage.bytes
+                    val entryCrc = CRC32().apply { update(entryBytes) }.value
+                    zipOutput.putNextEntry(
+                        ZipEntry(entryName).apply {
+                            method = ZipEntry.STORED
+                            size = entryBytes.size.toLong()
+                            compressedSize = size
+                            crc = entryCrc
+                        },
+                    )
+                    zipOutput.write(entryBytes)
                     zipOutput.closeEntry()
                     preparedPageCount += 1
                 }

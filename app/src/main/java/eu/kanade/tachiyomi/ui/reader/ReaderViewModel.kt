@@ -1070,7 +1070,7 @@ class ReaderViewModel @JvmOverloads constructor(
             mangaTitle = manga?.title,
         )
 
-        if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id, requireCurrentChapter = true)) {
+        if (shouldQueueWholeChapterForRemote(page.chapter.chapter.id, requireCurrentChapter = false)) {
             page.chapter.pageLoader?.queuePages(pages)
             scheduleUpscaleForChapterFromStart(pages)
             return
