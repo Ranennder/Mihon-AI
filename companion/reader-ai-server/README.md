@@ -75,7 +75,9 @@ Example config:
   "output_format": "jpg",
   "scale": 2,
   "tile_size": 0,
-  "gpu_id": 0,
+  "gpu_id": "auto",
+  "prefer_discrete_gpu": true,
+  "vulkan_driver_filter": "",
   "jobs": "1:2:2",
   "timeout_seconds": 180,
   "max_workers": 2,
@@ -84,6 +86,10 @@ Example config:
 ```
 
 The companion also accepts older runtime layouts with `runtime/realsr-ncnn.exe` and `runtime/models-Real-ESRGANv3-anime`.
+
+On Windows, `prefer_discrete_gpu` makes the companion ask Windows to run both the companion and the Real-ESRGAN subprocess with the high-performance GPU. It also avoids forcing `-g 0`, because adapter `0` can become the integrated GPU after display sleep or driver re-enumeration. If you need a manual Vulkan adapter, set `prefer_discrete_gpu` to `false` and set `gpu_id` to the wanted value, for example `"1"`.
+
+If Windows still picks the wrong Vulkan driver on a hybrid system, set `vulkan_driver_filter` to a substring from the desired driver manifest path, for example `"nvidia"`. Leave it empty for automatic handling.
 
 ## Local test mode
 

@@ -1,5 +1,6 @@
 name: Build & Test
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - '**'
@@ -58,14 +59,44 @@ jobs:
           name: test-report-${{ github.sha }}
           path: app/build/reports/tests/testReleaseUnitTest
 
-      - name: Upload APK
+      - name: Upload APKs
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: arm64-v8a-${{ github.sha }}
-          path: app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk
+          name: apk-${{ github.sha }}
+          path: |
+            app/build/outputs/apk/release/*-release.apk
+            app/build/outputs/apk/release/*-release-unsigned.apk
+          if-no-files-found: error
 
       - name: Upload mapping
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: mapping-${{ github.sha }}
           path: app/build/outputs/mapping/release
+
+  build_companion_windows:
+    name: Build Windows Companion
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build companion EXE
+        working-directory: companion/reader-ai-server
+        shell: cmd
+        env:
+          MIHON_AI_RELEASE_TAG: ci-${{ github.sha }}
+        run: build_windows_exe.bat
+
+      - name: Upload companion EXE
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: MihonAiCompanion-windows-${{ github.sha }}
+          path: companion/reader-ai-server/dist/MihonAiCompanion.exe
+          if-no-files-found: error

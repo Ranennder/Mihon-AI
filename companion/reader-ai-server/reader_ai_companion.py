@@ -134,7 +134,9 @@ class Config:
     output_format: str = "jpg"
     scale: int = 2
     tile_size: int = 0
-    gpu_id: int = 0
+    gpu_id: str = "auto"
+    prefer_discrete_gpu: bool = True
+    vulkan_driver_filter: str = ""
     jobs: str = "1:2:2"
     timeout_seconds: int = 180
     max_workers: int = 1
@@ -154,6 +156,9 @@ class Config:
         config = cls(**merged)
         config.batch_size = _normalize_batch_size(config.batch_size)
         config.batch_wait_milliseconds = max(0, int(config.batch_wait_milliseconds))
+        config.gpu_id = _normalize_gpu_id(config.gpu_id)
+        config.prefer_discrete_gpu = _normalize_bool(config.prefer_discrete_gpu)
+        config.vulkan_driver_filter = str(config.vulkan_driver_filter or "").strip()
         config.binary = str(_resolve_runtime_binary(config.binary, base_dir))
         config.model_dir = str(_resolve_model_dir(config.model_dir, base_dir))
         return config
@@ -822,11 +827,10 @@ class ReaderAiServer(ThreadingHTTPServer):
                 str(model_dir),
                 "-f",
                 job.batch_output_format,
-                "-g",
-                str(self.config.gpu_id),
                 "-j",
                 self.config.jobs,
             ]
+            command.extend(_upscale_gpu_command_args(self.config))
             if job.model_name and _supports_model_name_flag(binary):
                 command.extend(["-n", job.model_name])
 
@@ -998,6 +1002,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "scale": self.server.config.scale,
                 "tile_size": self.server.config.tile_size,
                 "gpu_id": self.server.config.gpu_id,
+                "prefer_discrete_gpu": self.server.config.prefer_discrete_gpu,
+                "gpu_selection": _describe_gpu_selection(self.server.config),
                 "model_name": self.server.config.model_name,
                 "batch_size": self.server.config.batch_size,
                 "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
@@ -1552,11 +1558,10 @@ def _run_subprocess_batch(
         str(model_dir),
         "-f",
         batch_output_format,
-        "-g",
-        str(config.gpu_id),
         "-j",
         config.jobs,
     ]
+    command.extend(_upscale_gpu_command_args(config))
     if model_name and _supports_model_name_flag(binary):
         command.extend(["-n", model_name])
 
@@ -1694,11 +1699,10 @@ def _run_subprocess_once(
         str(model_dir),
         "-f",
         output_format,
-        "-g",
-        str(config.gpu_id),
         "-j",
         config.jobs,
     ]
+    command.extend(_upscale_gpu_command_args(config))
     if model_name and _supports_model_name_flag(binary):
         command.extend(["-n", model_name])
 
@@ -2190,6 +2194,26 @@ def _supports_model_name_flag(binary: Path) -> bool:
     return binary.name.lower() != "realsr-ncnn.exe"
 
 
+def _upscale_gpu_command_args(config: Config) -> list[str]:
+    gpu_id = _normalize_gpu_id(config.gpu_id)
+    if gpu_id.lower() in {"auto", "default"}:
+        return []
+
+    if os.name == "nt" and config.prefer_discrete_gpu and gpu_id == "0":
+        return []
+
+    return ["-g", gpu_id]
+
+
+def _describe_gpu_selection(config: Config) -> str:
+    gpu_args = _upscale_gpu_command_args(config)
+    if gpu_args:
+        return " ".join(gpu_args)
+    if os.name == "nt" and config.prefer_discrete_gpu:
+        return "auto + Windows high-performance preference"
+    return "auto"
+
+
 def _resolve_requested_model_name(requested_model_name: str, default_model_name: str) -> str:
     if not requested_model_name:
         return default_model_name
@@ -2211,6 +2235,25 @@ def _resolve_requested_batch_size(requested_batch_size: str, default_batch_size:
         raise ValueError("Unsupported batch size. Supported values: 1 | 4") from exc
 
     return _normalize_batch_size(parsed_value)
+
+
+def _normalize_gpu_id(value: Any) -> str:
+    normalized = str(value or "").strip()
+    return normalized or "auto"
+
+
+def _normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(value)
 
 
 def _normalize_batch_size(value: int) -> int:
@@ -2636,6 +2679,164 @@ def _emit_log_text(message: str, *, console: bool = True, log_file: bool = True)
             _LOG_FILE_HANDLE.flush()
 
 
+def _configure_windows_high_performance_gpu(config: Config) -> None:
+    if os.name != "nt" or not config.prefer_discrete_gpu:
+        return
+
+    registry_targets = [Path(sys.executable).resolve()]
+    binary = Path(config.binary)
+    if binary.is_file():
+        registry_targets.append(binary.resolve())
+
+    if _set_current_process_high_performance_gpu_preference():
+        _emit_log_line("Windows GPU preference: current process set to high performance", console=False)
+
+    updated_targets = _set_windows_high_performance_gpu_registry(registry_targets)
+    if updated_targets:
+        _emit_log_line(
+            "Windows GPU preference: high performance -> " + ", ".join(path.name for path in updated_targets),
+            console=False,
+        )
+
+    selected_manifests = _select_windows_vulkan_driver_manifests(config.vulkan_driver_filter)
+    if not selected_manifests:
+        return
+
+    if os.environ.get("VK_DRIVER_FILES") or os.environ.get("VK_ICD_FILENAMES"):
+        _emit_log_line("Vulkan driver override: existing environment preserved", console=False)
+        return
+
+    manifest_value = os.pathsep.join(str(path) for path in selected_manifests)
+    os.environ["VK_DRIVER_FILES"] = manifest_value
+    os.environ["VK_ICD_FILENAMES"] = manifest_value
+    _emit_log_line(
+        "Vulkan driver override: " + ", ".join(path.name for path in selected_manifests),
+        console=False,
+    )
+
+
+def _set_current_process_high_performance_gpu_preference() -> bool:
+    try:
+        dxgi = ctypes.WinDLL("dxgi")
+        set_preference = dxgi.SetProcessDefaultGpuPreference
+        set_preference.argtypes = [ctypes.c_int]
+        set_preference.restype = ctypes.c_long
+        return set_preference(2) >= 0
+    except Exception:
+        return False
+
+
+def _set_windows_high_performance_gpu_registry(paths: list[Path]) -> list[Path]:
+    try:
+        import winreg
+    except Exception:
+        return []
+
+    key_path = r"Software\Microsoft\DirectX\UserGpuPreferences"
+    updated_paths: list[Path] = []
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            key_path,
+            0,
+            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
+        ) as key:
+            for path in paths:
+                value_name = str(path)
+                try:
+                    existing_value, _ = winreg.QueryValueEx(key, value_name)
+                except FileNotFoundError:
+                    existing_value = ""
+                next_value = _merge_windows_gpu_preference_value(str(existing_value or ""))
+                if next_value == existing_value:
+                    continue
+                winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, next_value)
+                updated_paths.append(path)
+    except OSError as exc:
+        _emit_log_line(f"Windows GPU preference failed: {exc}", console=False)
+        return updated_paths
+    return updated_paths
+
+
+def _merge_windows_gpu_preference_value(existing_value: str) -> str:
+    parts = [
+        part.strip()
+        for part in existing_value.split(";")
+        if part.strip() and not part.strip().lower().startswith("gpupreference=")
+    ]
+    return ";".join(["GpuPreference=2", *parts]) + ";"
+
+
+def _select_windows_vulkan_driver_manifests(driver_filter: str) -> list[Path]:
+    manifests = _read_windows_vulkan_driver_manifests()
+    if not manifests:
+        return []
+
+    normalized_filter = driver_filter.strip().lower()
+    if normalized_filter:
+        return [path for path in manifests if normalized_filter in str(path).lower()]
+
+    nvidia_manifests = [
+        path
+        for path in manifests
+        if _path_matches_any(path, ("nvidia", "nv-vk", "nvoglv"))
+    ]
+    if nvidia_manifests:
+        return nvidia_manifests
+
+    amd_manifests = [
+        path
+        for path in manifests
+        if _path_matches_any(path, ("amd", "radeon", "ati"))
+    ]
+    intel_or_software_manifests = [
+        path
+        for path in manifests
+        if _path_matches_any(path, ("intel", "igvk", "microsoft", "software", "swiftshader", "lavapipe"))
+    ]
+    if amd_manifests and intel_or_software_manifests:
+        return amd_manifests
+
+    return []
+
+
+def _read_windows_vulkan_driver_manifests() -> list[Path]:
+    try:
+        import winreg
+    except Exception:
+        return []
+
+    key_paths = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Khronos\Vulkan\Drivers", winreg.KEY_READ | winreg.KEY_WOW64_64KEY),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Khronos\Vulkan\Drivers", winreg.KEY_READ | winreg.KEY_WOW64_32KEY),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Khronos\Vulkan\Drivers", winreg.KEY_READ),
+    ]
+    manifests: list[Path] = []
+    seen: set[str] = set()
+    for root, key_path, access in key_paths:
+        try:
+            with winreg.OpenKey(root, key_path, 0, access) as key:
+                value_count = winreg.QueryInfoKey(key)[1]
+                for index in range(value_count):
+                    value_name, value_data, _ = winreg.EnumValue(key, index)
+                    if isinstance(value_data, int) and value_data != 0:
+                        continue
+                    manifest = Path(os.path.expandvars(value_name)).resolve()
+                    manifest_key = str(manifest).lower()
+                    if manifest_key in seen or not manifest.is_file():
+                        continue
+                    seen.add(manifest_key)
+                    manifests.append(manifest)
+        except OSError:
+            continue
+    return manifests
+
+
+def _path_matches_any(path: Path, patterns: tuple[str, ...]) -> bool:
+    normalized = str(path).lower()
+    return any(pattern in normalized for pattern in patterns)
+
+
 def _run_hidden_windows_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     kwargs: dict[str, Any] = {
         "stdout": subprocess.PIPE,
@@ -2929,7 +3130,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-format")
     parser.add_argument("--scale", type=int)
     parser.add_argument("--tile-size", type=int)
-    parser.add_argument("--gpu-id", type=int)
+    parser.add_argument("--gpu-id")
+    parser.add_argument("--prefer-discrete-gpu", dest="prefer_discrete_gpu", action="store_true", default=None)
+    parser.add_argument("--no-prefer-discrete-gpu", dest="prefer_discrete_gpu", action="store_false")
+    parser.add_argument("--vulkan-driver-filter")
     parser.add_argument("--jobs")
     parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--max-workers", type=int)
@@ -2967,6 +3171,8 @@ def main() -> int:
                 "scale": args.scale,
                 "tile_size": args.tile_size,
                 "gpu_id": args.gpu_id,
+                "prefer_discrete_gpu": args.prefer_discrete_gpu,
+                "vulkan_driver_filter": args.vulkan_driver_filter,
                 "jobs": args.jobs,
                 "timeout_seconds": args.timeout_seconds,
                 "max_workers": args.max_workers,
@@ -2975,6 +3181,7 @@ def main() -> int:
                 "max_request_megabytes": args.max_request_megabytes,
             },
         )
+        _configure_windows_high_performance_gpu(config)
 
         server = _create_server_with_duplicate_resolution(config)
         if server is None:
@@ -2986,6 +3193,7 @@ def main() -> int:
         _emit_log_line(f"Mode: {config.mode}", console=False)
         _emit_log_line(f"Binary: {config.binary}", console=False)
         _emit_log_line(f"Model dir: {config.model_dir}", console=False)
+        _emit_log_line(f"GPU selection: {_describe_gpu_selection(config)}", console=False)
         _emit_log_line(f"Live logs: enabled -> {log_path}", console=False)
         _emit_log_line("Console logging: win32 direct + fd fallback", console=False)
         try:
