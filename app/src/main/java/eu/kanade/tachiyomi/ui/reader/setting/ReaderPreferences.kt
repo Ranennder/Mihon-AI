@@ -257,6 +257,7 @@ class ReaderPreferences(
         val titleRes: StringResource,
         val requestBatchSize: Int,
         val shouldQueueWholeChapter: Boolean,
+        val shouldStreamWholeChapter: Boolean = false,
     ) {
         SINGLE(
             titleRes = MR.strings.reader_ai_remote_batch_mode_single,
@@ -272,6 +273,12 @@ class ReaderPreferences(
             titleRes = MR.strings.reader_ai_remote_batch_mode_chapter,
             requestBatchSize = 4,
             shouldQueueWholeChapter = true,
+        ),
+        CHAPTER_STREAM(
+            titleRes = MR.strings.reader_ai_remote_batch_mode_chapter_stream,
+            requestBatchSize = 1,
+            shouldQueueWholeChapter = true,
+            shouldStreamWholeChapter = true,
         ),
     }
 

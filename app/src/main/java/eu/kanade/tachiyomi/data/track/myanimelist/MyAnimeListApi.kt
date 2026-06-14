@@ -12,7 +12,9 @@ import eu.kanade.tachiyomi.data.track.myanimelist.dto.MALSearchResult
 import eu.kanade.tachiyomi.data.track.myanimelist.dto.MALUser
 import eu.kanade.tachiyomi.network.DELETE
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.HttpException
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.network.parseAs
 import eu.kanade.tachiyomi.util.PkceUtil
@@ -122,8 +124,20 @@ class MyAnimeListApi(
                 .put(formBodyBuilder.build())
                 .build()
             with(json) {
-                authClient.newCall(request)
-                    .awaitSuccess()
+                val response = authClient
+                    .newCall(request)
+                    .await()
+
+                if (!response.isSuccessful) {
+                    if (response.body.string().contains("invalid_content")) {
+                        // MAL returns unapproved titles in search but does not allow adding them to the list.
+                        throw MALTitleNotApproved()
+                    } else {
+                        throw HttpException(response.code)
+                    }
+                }
+
+                response
                     .parseAs<MALListItemStatus>()
                     .let { parseMangaItem(it, track) }
             }

@@ -169,6 +169,7 @@ class AnilistApi(val client: OkHttpClient, interceptor: AnilistInterceptor) {
                             |day
                         |}
                         |averageScore
+                        |countryOfOrigin
                     |}
                 |}
             |}

@@ -71,6 +71,8 @@ LOG_FILE_NAME = "companion.log"
 CHAPTER_ARCHIVE_FORMAT = "zip"
 CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
+CHAPTER_STREAM_POLL_SECONDS = 0.2
+CHAPTER_STREAM_HEARTBEAT_SECONDS = 15.0
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/Ranennder/Mihon-AI/releases/latest"
 COMPANION_RELEASE_ASSET_SUFFIX = "-windows.exe"
 AUTO_UPDATE_CONNECT_TIMEOUT_SECONDS = 8
@@ -84,6 +86,7 @@ _LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\
 _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
+_CHAPTER_STREAM_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/stream$")
 _PAGE_PROGRESS_LABEL_RE = re.compile(r"^(?P<context>.+?) - (?P<page>\d+/\d+)$")
 _HTTP_ACCESS_LOG_RE = re.compile(r'^"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/[^\"]+"\s+(?P<status>\d{3})\s+-$')
 _RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
@@ -660,6 +663,13 @@ class ReaderAiServer(ThreadingHTTPServer):
 
         return None
 
+    def get_chapter_page_indexes(self, job_id: str) -> list[int]:
+        with self._chapter_jobs_lock:
+            job = self._chapter_jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return sorted(job.pages.keys())
+
     def note_chapter_page_ready(self, job_id: str, page_index: int) -> None:
         with self._chapter_jobs_lock:
             job = self._chapter_jobs.get(job_id)
@@ -1015,6 +1025,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, payload)
             return
 
+        chapter_stream_match = _CHAPTER_STREAM_PATH_RE.match(parsed.path)
+        if chapter_stream_match is not None:
+            self._handle_chapter_stream_request(chapter_stream_match.group(1))
+            return
+
         chapter_page_match = _CHAPTER_PAGE_PATH_RE.match(parsed.path)
         if chapter_page_match is None:
             self._send_text(HTTPStatus.NOT_FOUND, "Not found")
@@ -1050,6 +1065,100 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
         self.server.note_chapter_page_ready(job_id, int(page_index_text))
         self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
+
+    def _handle_chapter_stream_request(self, job_id: str) -> None:
+        if not self._authorize():
+            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            return
+
+        try:
+            page_indexes = self.server.get_chapter_page_indexes(job_id)
+        except KeyError:
+            self._send_text(HTTPStatus.NOT_FOUND, "Chapter job not found")
+            return
+
+        self.close_connection = True
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-reader-ai-chapter-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        remaining_page_indexes = set(page_indexes)
+        last_heartbeat_at = time.perf_counter()
+        try:
+            self._write_chapter_stream_event(
+                {
+                    "type": "start",
+                    "page_indexes": page_indexes,
+                },
+            )
+
+            while remaining_page_indexes:
+                sent_page = False
+                for page_index in list(remaining_page_indexes):
+                    try:
+                        processed_image = self.server.get_chapter_page(job_id, page_index)
+                    except KeyError:
+                        self._write_chapter_stream_event(
+                            {
+                                "type": "error",
+                                "message": "Chapter job not found",
+                            },
+                        )
+                        return
+                    except FileNotFoundError as exc:
+                        self._write_chapter_stream_event(
+                            {
+                                "type": "error",
+                                "message": str(exc),
+                            },
+                        )
+                        return
+                    except RuntimeError as exc:
+                        self._write_chapter_stream_event(
+                            {
+                                "type": "cancelled" if _is_cancellation_message(exc) else "error",
+                                "message": str(exc),
+                            },
+                        )
+                        return
+
+                    if processed_image is None:
+                        continue
+
+                    header = json.dumps(
+                        {
+                            "type": "page",
+                            "page_index": page_index,
+                            "output_format": processed_image.output_format,
+                            "byte_count": len(processed_image.bytes),
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    self.wfile.write(header + b"\n")
+                    self.wfile.write(processed_image.bytes)
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                    self.server.note_chapter_page_ready(job_id, page_index)
+                    remaining_page_indexes.remove(page_index)
+                    sent_page = True
+
+                if not remaining_page_indexes:
+                    break
+
+                now = time.perf_counter()
+                if now - last_heartbeat_at >= CHAPTER_STREAM_HEARTBEAT_SECONDS:
+                    self._write_chapter_stream_event({"type": "heartbeat"})
+                    last_heartbeat_at = now
+
+                if not sent_page:
+                    time.sleep(CHAPTER_STREAM_POLL_SECONDS)
+
+            self._write_chapter_stream_event({"type": "done"})
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -1367,6 +1476,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _write_chapter_stream_event(self, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        self.wfile.write(body + b"\n")
+        self.wfile.flush()
 
     def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")

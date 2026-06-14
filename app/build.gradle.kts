@@ -51,11 +51,11 @@ val repoReleaseKeyPassword =
         ?: providers.environmentVariable("MIHONAI_RELEASE_KEY_PASSWORD").orNull
         ?: repoReleaseStorePassword
 val hasRepoReleaseKeystore = repoReleaseKeystoreFile.exists()
-val appVersionCodeBase = 7667
+val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
-val upstreamAppVersionName = "0.19.7"
-val mihonAiVersionName = "0.1.9"
+val upstreamAppVersionName = "0.19.9"
+val mihonAiVersionName = "0.1.10"
 
 if (Config.includeTelemetry) {
     pluginManager.apply {

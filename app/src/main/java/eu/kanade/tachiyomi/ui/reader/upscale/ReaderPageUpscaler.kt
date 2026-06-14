@@ -628,6 +628,41 @@ class ReaderPageUpscaler(
             archiveFile.delete()
         } ?: return
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
+
+        if (isRemoteWholeChapterStreamModeSelected()) {
+            when (val streamResult = remotePageUpscaler.streamChapterPages(
+                job = chapterJob,
+                pageIndexes = remainingTargets.keys,
+                onPageReady = { pageIndex, bytes ->
+                    val target = remainingTargets.remove(pageIndex) ?: return@streamChapterPages
+                    target.cacheFile.parentFile?.mkdirs()
+                    target.cacheFile.writeBytesAtomically(bytes)
+                },
+            )) {
+                RemotePageUpscaler.ChapterStreamFetchResult.Completed -> {
+                    if (remainingTargets.isEmpty()) {
+                        return
+                    }
+                    lastFailureMessage = "Remote AI chapter stream finished before all pages were ready"
+                    return
+                }
+                RemotePageUpscaler.ChapterStreamFetchResult.Cancelled -> return
+                RemotePageUpscaler.ChapterStreamFetchResult.Unsupported -> Unit
+                is RemotePageUpscaler.ChapterStreamFetchResult.Failed -> {
+                    if (!streamResult.retryable) {
+                        lastFailureMessage = streamResult.message
+                        return
+                    }
+                    logcat(LogPriority.WARN) {
+                        "Remote AI chapter stream failed, falling back to page polling: ${streamResult.message}"
+                    }
+                }
+            }
+            if (remainingTargets.isEmpty()) {
+                return
+            }
+        }
+
         val nextPollAt = remainingTargets.keys.associateWith { 0L }.toMutableMap()
         val pendingPollCounts = mutableMapOf<Int, Int>()
         val retryableFailureCounts = mutableMapOf<Int, Int>()
@@ -804,6 +839,10 @@ class ReaderPageUpscaler(
 
     private fun isRemoteWholeChapterModeSelected(): Boolean {
         return isRemoteBackendSelected() && readerPreferences.remoteAiBatchMode.get().shouldQueueWholeChapter
+    }
+
+    private fun isRemoteWholeChapterStreamModeSelected(): Boolean {
+        return isRemoteBackendSelected() && readerPreferences.remoteAiBatchMode.get().shouldStreamWholeChapter
     }
 
     private fun buildRemoteChapterJobKey(

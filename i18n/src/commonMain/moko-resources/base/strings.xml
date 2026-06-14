@@ -548,6 +548,7 @@
     <string name="reader_ai_remote_batch_mode_single">1 at a time</string>
     <string name="reader_ai_remote_batch_mode_four">4 at a time</string>
     <string name="reader_ai_remote_batch_mode_chapter">Chapter</string>
+    <string name="reader_ai_remote_batch_mode_chapter_stream">Chapter stream</string>
     <string name="pref_reader_ai_remote_url">Remote AI server URL</string>
     <string name="reader_ai_remote_url_auto_hint">Leave the URL blank to auto-discover the companion on Wi-Fi.</string>
     <string name="reader_ai_remote_url_auto_discovered">Auto-discovered companion: %s</string>

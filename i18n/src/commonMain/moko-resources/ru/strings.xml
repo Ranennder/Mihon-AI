@@ -124,6 +124,7 @@
     <string name="reader_ai_remote_batch_mode_single">По 1</string>
     <string name="reader_ai_remote_batch_mode_four">По 4</string>
     <string name="reader_ai_remote_batch_mode_chapter">Глава</string>
+    <string name="reader_ai_remote_batch_mode_chapter_stream">Поток</string>
     <string name="pref_reader_ai_remote_url">URL удаленного AI-сервера</string>
     <string name="reader_ai_remote_url_auto_hint">Оставьте URL пустым, чтобы автоматически найти companion по Wi-Fi.</string>
     <string name="reader_ai_remote_url_auto_discovered">Автообнаруженный companion: %s</string>

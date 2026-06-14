@@ -215,6 +215,131 @@ class RemotePageUpscaler(
             }
     }
 
+    fun streamChapterPages(
+        job: StartedChapterJob,
+        pageIndexes: Set<Int>,
+        onPageReady: (pageIndex: Int, bytes: ByteArray) -> Unit,
+    ): ChapterStreamFetchResult {
+        lastErrorMessage = null
+
+        val requestUrl = "${job.baseUrl}/api/upscale-chapter/${job.jobId}/stream".toHttpUrlOrNull()
+        if (requestUrl == null) {
+            lastErrorMessage = "Remote AI chapter stream URL is invalid"
+            return ChapterStreamFetchResult.Failed(
+                message = lastErrorMessage!!,
+                retryable = false,
+            )
+        }
+
+        val requestBuilder = Request.Builder()
+            .url(requestUrl)
+            .header("Accept", REMOTE_CHAPTER_STREAM_MEDIA_TYPE)
+            .header(HEADER_CLIENT_ID, job.clientId)
+            .header(HEADER_WORK_SCOPE, job.workScope.toString())
+
+        readerPreferences.remoteAiToken.get().trim()
+            .takeIf { it.isNotEmpty() }
+            ?.let { requestBuilder.header("X-Reader-AI-Token", it) }
+
+        return runCatching {
+            client.newCall(requestBuilder.get().build()).execute().use { response ->
+                when {
+                    response.code == 404 -> return@use ChapterStreamFetchResult.Unsupported
+                    response.code == 410 -> return@use ChapterStreamFetchResult.Cancelled
+                    !response.isSuccessful -> {
+                        lastErrorMessage = response.body.string()
+                            .takeIf(String::isNotBlank)
+                            ?: "Remote AI chapter stream returned HTTP ${response.code}"
+                        return@use ChapterStreamFetchResult.Failed(
+                            message = lastErrorMessage!!,
+                            retryable = response.code >= 500,
+                        )
+                    }
+                }
+
+                readChapterPageStream(
+                    responseSource = response.body.source(),
+                    pageIndexes = pageIndexes,
+                    onPageReady = onPageReady,
+                )
+            }
+        }
+            .onFailure {
+                lastErrorMessage = it.message ?: "Remote AI chapter stream failed"
+                logcat(LogPriority.WARN, it) { "Failed to stream remote AI chapter pages" }
+            }
+            .getOrElse {
+                ChapterStreamFetchResult.Failed(
+                    message = lastErrorMessage ?: "Remote AI chapter stream failed",
+                    retryable = true,
+                )
+            }
+    }
+
+    private fun readChapterPageStream(
+        responseSource: BufferedSource,
+        pageIndexes: Set<Int>,
+        onPageReady: (pageIndex: Int, bytes: ByteArray) -> Unit,
+    ): ChapterStreamFetchResult {
+        while (true) {
+            val eventLine = responseSource.readUtf8Line()
+                ?: return ChapterStreamFetchResult.Failed(
+                    message = "Remote AI chapter stream closed before completion",
+                    retryable = true,
+                )
+            if (eventLine.isBlank()) {
+                continue
+            }
+
+            val event = JSONObject(eventLine)
+            when (event.optString("type")) {
+                "start", "heartbeat" -> Unit
+                "done" -> return ChapterStreamFetchResult.Completed
+                "cancelled" -> return ChapterStreamFetchResult.Cancelled
+                "error" -> {
+                    lastErrorMessage = event.optString("message")
+                        .takeIf(String::isNotBlank)
+                        ?: "Remote AI chapter stream returned an error"
+                    return ChapterStreamFetchResult.Failed(
+                        message = lastErrorMessage!!,
+                        retryable = false,
+                    )
+                }
+                "page" -> {
+                    val pageIndex = event.optInt("page_index", -1)
+                    val byteCount = event.optLong("byte_count", -1L)
+                    if (pageIndex < 0 || byteCount <= 0L) {
+                        lastErrorMessage = "Remote AI chapter stream page frame is invalid"
+                        return ChapterStreamFetchResult.Failed(
+                            message = lastErrorMessage!!,
+                            retryable = true,
+                        )
+                    }
+
+                    val responseBytes = responseSource.readByteArray(byteCount)
+                    val frameSeparator = responseSource.readByte()
+                    if (frameSeparator != '\n'.code.toByte()) {
+                        lastErrorMessage = "Remote AI chapter stream page frame ended unexpectedly"
+                        return ChapterStreamFetchResult.Failed(
+                            message = lastErrorMessage!!,
+                            retryable = true,
+                        )
+                    }
+                    if (pageIndex in pageIndexes) {
+                        onPageReady(pageIndex, responseBytes)
+                    }
+                }
+                else -> {
+                    lastErrorMessage = "Remote AI chapter stream returned an unknown event"
+                    return ChapterStreamFetchResult.Failed(
+                        message = lastErrorMessage!!,
+                        retryable = true,
+                    )
+                }
+            }
+        }
+    }
+
     fun upscaleSource(
         source: BufferedSource,
         pageMetadata: PageRequestMetadata? = null,
@@ -613,6 +738,16 @@ class RemotePageUpscaler(
         ) : ChapterPageFetchResult
     }
 
+    sealed interface ChapterStreamFetchResult {
+        data object Completed : ChapterStreamFetchResult
+        data object Unsupported : ChapterStreamFetchResult
+        data object Cancelled : ChapterStreamFetchResult
+        data class Failed(
+            val message: String,
+            val retryable: Boolean,
+        ) : ChapterStreamFetchResult
+    }
+
     private data class PreparedImage(
         val bytes: ByteArray,
         val mediaType: String,
@@ -675,6 +810,7 @@ class RemotePageUpscaler(
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
         private const val REMOTE_ARCHIVE_FORMAT = "zip"
         private const val REMOTE_ARCHIVE_MEDIA_TYPE = "application/zip"
+        private const val REMOTE_CHAPTER_STREAM_MEDIA_TYPE = "application/x-reader-ai-chapter-stream"
         private const val HEADER_CLIENT_ID = "X-Reader-AI-Client-Id"
         private const val HEADER_WORK_SCOPE = "X-Reader-AI-Work-Scope"
 

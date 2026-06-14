@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.10
+
+- Update Mihon base version marker to `0.19.9`.
+- Pull in upstream dependency updates from Mihon `0.19.9`.
+- Add upstream fixes for MAL unapproved-title errors, AniList publishing type display, and tall-image splitting.
+- Add a fourth Remote batch mode, `Chapter stream`, which receives completed chapter pages over one long-lived companion connection with polling fallback.
+
 ## v0.1.9
 
 - Prefer discrete GPUs for the Windows companion and Real-ESRGAN subprocess.
