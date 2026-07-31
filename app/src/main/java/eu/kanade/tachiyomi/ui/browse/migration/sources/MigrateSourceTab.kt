@@ -10,7 +10,6 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.browse.MigrateSourceScreen
 import eu.kanade.presentation.components.TabContent
 import eu.kanade.tachiyomi.ui.browse.migration.manga.MigrateMangaScreen
-import kotlinx.collections.immutable.persistentListOf
 import tachiyomi.i18n.MR
 
 @Composable
@@ -21,7 +20,7 @@ fun Screen.migrateSourceTab(): TabContent {
 
     return TabContent(
         titleRes = MR.strings.label_migration,
-        actions = persistentListOf(),
+        actions = emptyList(),
         content = { contentPadding, _ ->
             MigrateSourceScreen(
                 state = state,

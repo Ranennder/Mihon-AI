@@ -20,8 +20,6 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.relativeDateText
 import eu.kanade.presentation.util.isTabletUi
-import kotlinx.collections.immutable.ImmutableList
-import kotlinx.collections.immutable.ImmutableMap
 import kotlinx.coroutines.launch
 import mihon.feature.upcoming.components.UpcomingItem
 import mihon.feature.upcoming.components.calendar.Calendar
@@ -121,8 +119,8 @@ private fun DateHeading(
 @Composable
 private fun UpcomingScreenSmallImpl(
     listState: LazyListState,
-    items: ImmutableList<UpcomingUIModel>,
-    events: ImmutableMap<LocalDate, Int>,
+    items: List<UpcomingUIModel>,
+    events: Map<LocalDate, Int>,
     paddingValues: PaddingValues,
     selectedYearMonth: YearMonth,
     setSelectedYearMonth: (YearMonth) -> Unit,
@@ -172,8 +170,8 @@ private fun UpcomingScreenSmallImpl(
 @Composable
 private fun UpcomingScreenLargeImpl(
     listState: LazyListState,
-    items: ImmutableList<UpcomingUIModel>,
-    events: ImmutableMap<LocalDate, Int>,
+    items: List<UpcomingUIModel>,
+    events: Map<LocalDate, Int>,
     paddingValues: PaddingValues,
     selectedYearMonth: YearMonth,
     setSelectedYearMonth: (YearMonth) -> Unit,

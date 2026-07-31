@@ -26,7 +26,7 @@ internal class RemoteAiServerDiscovery(
         val isAutoDiscovered: Boolean,
     )
 
-    private val client = networkHelper.nonCloudflareClient.newBuilder()
+    private val client = networkHelper.client.newBuilder()
         .connectTimeout(DISCOVERY_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
         .readTimeout(DISCOVERY_READ_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
         .callTimeout(DISCOVERY_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)

@@ -630,15 +630,17 @@ class ReaderPageUpscaler(
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
 
         if (isRemoteWholeChapterStreamModeSelected()) {
-            when (val streamResult = remotePageUpscaler.streamChapterPages(
-                job = chapterJob,
-                pageIndexes = remainingTargets.keys,
-                onPageReady = { pageIndex, bytes ->
-                    val target = remainingTargets.remove(pageIndex) ?: return@streamChapterPages
-                    target.cacheFile.parentFile?.mkdirs()
-                    target.cacheFile.writeBytesAtomically(bytes)
-                },
-            )) {
+            when (
+                val streamResult = remotePageUpscaler.streamChapterPages(
+                    job = chapterJob,
+                    pageIndexes = remainingTargets.keys,
+                    onPageReady = { pageIndex, bytes ->
+                        val target = remainingTargets.remove(pageIndex) ?: return@streamChapterPages
+                        target.cacheFile.parentFile?.mkdirs()
+                        target.cacheFile.writeBytesAtomically(bytes)
+                    },
+                )
+            ) {
                 RemotePageUpscaler.ChapterStreamFetchResult.Completed -> {
                     if (remainingTargets.isEmpty()) {
                         return

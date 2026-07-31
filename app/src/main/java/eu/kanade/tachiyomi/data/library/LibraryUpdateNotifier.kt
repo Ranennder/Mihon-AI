@@ -43,7 +43,6 @@ import java.text.NumberFormat
 
 class LibraryUpdateNotifier(
     private val context: Context,
-
     private val securityPreferences: SecurityPreferences = Injekt.get(),
     private val sourceManager: SourceManager = Injekt.get(),
 ) {

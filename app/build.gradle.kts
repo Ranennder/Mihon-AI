@@ -11,6 +11,7 @@ plugins {
     alias(mihonx.plugins.spotless)
 
     alias(libs.plugins.aboutLibraries)
+    alias(libs.plugins.androidx.baselineProfile)
     alias(libs.plugins.kotlin.serialization)
 }
 
@@ -54,8 +55,8 @@ val hasRepoReleaseKeystore = repoReleaseKeystoreFile.exists()
 val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
-val upstreamAppVersionName = "0.19.9"
-val mihonAiVersionName = "0.1.10"
+val upstreamAppVersionName = "0.20.1"
+val mihonAiVersionName = "0.1.11"
 
 if (Config.includeTelemetry) {
     pluginManager.apply {
@@ -106,16 +107,16 @@ android {
     }
 
     buildTypes {
-        val debug by getting {
+        val debug = getByName("debug") {
             if (hasStableDevKeystore) {
                 signingConfig = signingConfigs.getByName("stableDev")
             }
             applicationIdSuffix = ".dev"
             isPseudoLocalesEnabled = true
         }
-        val release by getting {
-            isMinifyEnabled = Config.enableCodeShrink
-            isShrinkResources = Config.enableCodeShrink
+        val release = getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (hasRepoReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("mihonAiRelease")
             }
@@ -143,7 +144,6 @@ android {
             applicationIdSuffix = ".debug"
 
             versionNameSuffix = debug.versionNameSuffix
-            signingConfig = debug.signingConfig
 
             matchingFallbacks.addAll(commonMatchingFallbacks)
 
@@ -152,20 +152,16 @@ android {
         create("benchmark") {
             initWith(release)
 
-            isDebuggable = false
-            isProfileable = true
             versionNameSuffix = "-benchmark"
             applicationIdSuffix = ".benchmark"
-
-            signingConfig = debug.signingConfig
 
             matchingFallbacks.addAll(commonMatchingFallbacks)
         }
     }
 
     sourceSets {
-        getByName("preview").res.srcDirs("src/debug/res")
-        getByName("benchmark").res.srcDirs("src/debug/res")
+        getByName("preview").res.directories.add("src/debug/res")
+        getByName("benchmark").res.directories.add("src/debug/res")
     }
 
     splits {
@@ -214,10 +210,6 @@ android {
         viewBinding = true
         buildConfig = true
         aidl = true
-
-        // Disable some unused things
-        renderScript = false
-        shaders = false
     }
 
     lint {
@@ -241,12 +233,18 @@ kotlin {
             "-opt-in=kotlinx.coroutines.FlowPreview",
             "-opt-in=kotlinx.coroutines.InternalCoroutinesApi",
             "-opt-in=kotlinx.serialization.ExperimentalSerializationApi",
-            "-Xannotation-default-target=param-property",
         )
     }
 }
 
+baselineProfile {
+    baselineProfileOutputDir = "baselineProfiles"
+    mergeIntoMain = true
+}
+
 dependencies {
+    baselineProfile(projects.baselineProfile)
+
     implementation(projects.i18n)
     implementation(projects.core.archive)
     implementation(projects.core.common)
@@ -278,9 +276,10 @@ dependencies {
     implementation(libs.androidx.sqlite.bundled)
 
     implementation(libs.kotlin.reflect)
-    implementation(libs.kotlinx.collections.immutable)
 
     implementation(libs.bundles.kotlinx.coroutines)
+
+    implementation(libs.sqldelight.async)
 
     // AndroidX libraries
     implementation(libs.androidx.annotation)
@@ -328,7 +327,9 @@ dependencies {
         exclude(module = "image-decoder")
     }
     implementation(libs.image.decoder)
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    // LiteRT is the maintained successor to TensorFlow Lite and keeps the
+    // org.tensorflow.lite Java API while using AGP 9-compatible namespaces.
+    implementation("com.google.ai.edge.litert:litert:1.4.2")
 
     // UI libraries
     implementation(libs.material)
@@ -386,11 +387,5 @@ androidComponents {
         // Only excluding in standard flavor because this breaks
         // Layout Inspector's Compose tree
         it.packaging.resources.excludes.add("META-INF/*.version")
-    }
-}
-
-buildscript {
-    dependencies {
-        classpath(libs.kotlin.gradle)
     }
 }

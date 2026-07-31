@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.11
+
+- Update the Mihon base from `0.19.9` to `0.20.1`.
+- Add TachiyomiX 1.6 extension and extension-store support.
+- Add Hikka and MangaBaka tracking.
+- Add configurable vertical chapter navigation and upstream reader, download, backup, and stability fixes.
+
 ## v0.1.10
 
 - Update Mihon base version marker to `0.19.9`.

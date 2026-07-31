@@ -23,8 +23,8 @@ import java.io.File
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -36,12 +36,12 @@ class RemotePageUpscaler(
 
     private val uploadWorkspace = File(app.cacheDir, "reader_ai_remote_uploads").apply { mkdirs() }
     private val controlScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val client = networkHelper.nonCloudflareClient.newBuilder()
+    private val client = networkHelper.client.newBuilder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
         .callTimeout(10, TimeUnit.MINUTES)
         .build()
-    private val controlClient = networkHelper.nonCloudflareClient.newBuilder()
+    private val controlClient = networkHelper.client.newBuilder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .callTimeout(5, TimeUnit.SECONDS)
