@@ -11,7 +11,6 @@ import eu.kanade.tachiyomi.data.backup.models.BackupManga
 import eu.kanade.tachiyomi.data.backup.models.BackupTracking
 import tachiyomi.data.Database
 import tachiyomi.data.MemoColumnAdapter
-import tachiyomi.data.MemoColumnAdapter.encode
 import tachiyomi.data.UpdateStrategyColumnAdapter
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.chapter.interactor.GetChaptersByMangaId
@@ -285,7 +284,7 @@ class MangaRestorer(
         restoreCategories(manga, categories, backupCategories)
         restoreChapters(manga, chapters)
         restoreTracking(manga, tracks)
-        restoreHistory(history)
+        restoreHistory(manga, history)
         restoreExcludedScanlators(manga, excludedScanlators)
         updateManga.awaitUpdateFetchInterval(manga, now, currentFetchWindow)
         return manga
@@ -325,16 +324,16 @@ class MangaRestorer(
         }
     }
 
-    private suspend fun restoreHistory(backupHistory: List<BackupHistory>) {
+    private suspend fun restoreHistory(manga: Manga, backupHistory: List<BackupHistory>) {
         val toUpdate = backupHistory.mapNotNull { history ->
             val dbHistory = database.historyQueries
-                .getHistoryByChapterUrl(history.url)
+                .getHistoryByChapterUrlAndMangaId(history.url, manga.id)
                 .awaitAsOneOrNull()
             val item = history.getHistoryImpl()
 
             if (dbHistory == null) {
                 val chapter = database.chaptersQueries
-                    .getChapterByUrl(history.url)
+                    .getChapterByUrlAndMangaId(history.url, manga.id)
                     .awaitAsOneOrNull()
                 return@mapNotNull if (chapter == null) {
                     // Chapter doesn't exist; skip

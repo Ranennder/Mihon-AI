@@ -55,8 +55,8 @@ val hasRepoReleaseKeystore = repoReleaseKeystoreFile.exists()
 val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
-val upstreamAppVersionName = "0.20.1"
-val mihonAiVersionName = "0.1.11"
+val upstreamAppVersionName = "0.20.2"
+val mihonAiVersionName = "0.1.12"
 
 if (Config.includeTelemetry) {
     pluginManager.apply {
@@ -248,6 +248,7 @@ dependencies {
     implementation(projects.i18n)
     implementation(projects.core.archive)
     implementation(projects.core.common)
+    implementation(projects.core.viewmodel)
     implementation(projects.coreMetadata)
     implementation(projects.sourceApi)
     implementation(projects.sourceLocal)

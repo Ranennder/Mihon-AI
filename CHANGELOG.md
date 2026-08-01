@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.12
+
+- Update the Mihon base from `0.20.1` to `0.20.2`.
+- Add the Tokyo Night theme and upstream library search improvements.
+- Improve the in-app update prompt and resumable image downloads.
+- Fix backup restore dropping library entries with duplicate chapters.
+- Include upstream extension installation, reader navigation, tracking, and stability fixes.
+
 ## v0.1.11
 
 - Update the Mihon base from `0.19.9` to `0.20.1`.

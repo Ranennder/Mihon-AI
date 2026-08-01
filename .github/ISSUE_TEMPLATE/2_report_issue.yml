@@ -52,7 +52,7 @@ body:
       label: Mihon AI version
       description: You can find your app version in **More -> About**.
       placeholder: |
-        Example: "0.1.0"
+        Example: "0.1.12"
     validations:
       required: true
 

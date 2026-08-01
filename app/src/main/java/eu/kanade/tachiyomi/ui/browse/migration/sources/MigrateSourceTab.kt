@@ -3,7 +3,8 @@ package eu.kanade.tachiyomi.ui.browse.migration.sources
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import cafe.adriel.voyager.core.model.rememberScreenModel
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.lifecycle.viewmodel.compose.viewModel
 import cafe.adriel.voyager.core.screen.Screen
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -15,8 +16,8 @@ import tachiyomi.i18n.MR
 @Composable
 fun Screen.migrateSourceTab(): TabContent {
     val navigator = LocalNavigator.currentOrThrow
-    val screenModel = rememberScreenModel { MigrateSourceScreenModel() }
-    val state by screenModel.state.collectAsState()
+    val viewModel = viewModel<MigrateSourceViewModel>()
+    val state by viewModel.state.collectAsState()
 
     return TabContent(
         titleRes = MR.strings.label_migration,
@@ -28,8 +29,8 @@ fun Screen.migrateSourceTab(): TabContent {
                 onClickItem = { source ->
                     navigator.push(MigrateMangaScreen(source.id))
                 },
-                onToggleSortingDirection = screenModel::toggleSortingDirection,
-                onToggleSortingMode = screenModel::toggleSortingMode,
+                onToggleSortingDirection = viewModel::toggleSortingDirection,
+                onToggleSortingMode = viewModel::toggleSortingMode,
             )
         },
     )
