@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.13
+
+- Add an optional HTTP 429 retry strategy for library updates.
+- Wait a random 5–15 seconds before one immediate retry.
+- Retry entries still rate-limited once more after the main library pass, using the same delay and retry behavior.
+
 ## v0.1.12
 
 - Update the Mihon base from `0.20.1` to `0.20.2`.
