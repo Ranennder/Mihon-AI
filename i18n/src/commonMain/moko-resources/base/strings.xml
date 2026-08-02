@@ -551,6 +551,8 @@
     <string name="reader_ai_remote_model_fast">Fast</string>
     <string name="reader_ai_remote_model_detailed">Detailed</string>
     <string name="pref_reader_ai_remote_batch_mode">Remote batch mode</string>
+    <string name="pref_reader_ai_remote_direct_download">Companion downloads pages directly (beta)</string>
+    <string name="pref_reader_ai_remote_direct_download_summary">For whole-chapter modes, sends page URLs and site session data to the companion so images travel site → companion → phone. Unsupported sources fall back to phone upload.</string>
     <string name="reader_ai_remote_batch_mode_single">1 at a time</string>
     <string name="reader_ai_remote_batch_mode_four">4 at a time</string>
     <string name="reader_ai_remote_batch_mode_chapter">Chapter</string>

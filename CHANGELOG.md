@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.14
+
+- Add an optional direct-download beta mode for Remote PC whole-chapter upscaling.
+- Let the phone pass page URLs, request headers, and matching site cookies to the companion so source images travel directly from the site to the PC.
+- Fall back to the existing phone upload path for unsupported requests or direct-download failures.
+
 ## v0.1.13
 
 - Add an optional HTTP 429 retry strategy for library updates.

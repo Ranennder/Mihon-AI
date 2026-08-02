@@ -16,6 +16,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
+import org.json.JSONArray
 import org.json.JSONObject
 import tachiyomi.core.common.util.system.logcat
 import java.io.ByteArrayOutputStream
@@ -31,7 +32,7 @@ import java.util.zip.ZipOutputStream
 class RemotePageUpscaler(
     app: Application,
     private val readerPreferences: ReaderPreferences,
-    networkHelper: NetworkHelper,
+    private val networkHelper: NetworkHelper,
 ) {
 
     private val uploadWorkspace = File(app.cacheDir, "reader_ai_remote_uploads").apply { mkdirs() }
@@ -75,6 +76,21 @@ class RemotePageUpscaler(
             bytes = preparedImage.bytes,
             extension = preparedImage.extension,
         )
+    }
+
+    fun downloadSourcePage(request: Request): ByteArray? {
+        return runCatching {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    lastErrorMessage = "Phone fallback download returned HTTP ${response.code}"
+                    return@use null
+                }
+                response.body.bytes().takeIf(ByteArray::isNotEmpty)
+            }
+        }.onFailure {
+            lastErrorMessage = it.message ?: "Phone fallback download failed"
+            logcat(LogPriority.WARN, it) { "Failed to download source page during direct-mode fallback" }
+        }.getOrNull()
     }
 
     fun startChapterJob(
@@ -144,6 +160,86 @@ class RemotePageUpscaler(
             metadata = metadata,
             scopeId = scopeId,
         ).job
+    }
+
+    fun startDirectChapterJob(
+        pages: List<DirectChapterPage>,
+        metadata: ChapterJobMetadata? = null,
+    ): StartedChapterJob? {
+        lastErrorMessage = null
+        if (pages.isEmpty()) return null
+        val resolution = discovery.resolveBaseUrl() ?: return null
+        val scopeId = workScope.get()
+        val payload = JSONObject().apply {
+            put(
+                "pages",
+                JSONArray().apply {
+                    pages.forEach { page ->
+                        put(
+                            JSONObject().apply {
+                                put("page_index", page.pageIndex)
+                                put("url", page.request.url.toString())
+                                put(
+                                    "headers",
+                                    JSONObject().apply {
+                                        page.request.headers.forEach { (name, value) ->
+                                            if (!name.equals("Host", true) && !name.equals("Cookie", true)) {
+                                                put(name, value)
+                                            }
+                                        }
+                                        val cookies = networkHelper.cookieJar.loadForRequest(page.request.url)
+                                        if (cookies.isNotEmpty()) {
+                                            put(
+                                                "Cookie",
+                                                cookies.joinToString("; ") { "${it.name}=${it.value}" },
+                                            )
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                    }
+                },
+            )
+        }.toString()
+        return runStartDirectChapterJobRequest(resolution, payload, metadata, scopeId)
+    }
+
+    private fun runStartDirectChapterJobRequest(
+        resolution: RemoteAiServerDiscovery.Resolution,
+        payload: String,
+        metadata: ChapterJobMetadata?,
+        scopeId: Long,
+    ): StartedChapterJob? {
+        val url = "${resolution.baseUrl}/api/upscale-chapter-direct".toHttpUrlOrNull() ?: return null
+        val builder = Request.Builder().url(url)
+            .header("Accept", "application/json")
+            .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
+            .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
+            .header(HEADER_CLIENT_ID, clientId)
+            .header(HEADER_WORK_SCOPE, scopeId.toString())
+        readerPreferences.remoteAiToken.get().trim().takeIf(String::isNotEmpty)
+            ?.let { builder.header("X-Reader-AI-Token", it) }
+        metadata?.mangaTitle?.takeIf(String::isNotBlank)
+            ?.let { builder.header("X-Reader-AI-Manga-Title", encodeHeaderText(it)) }
+        metadata?.chapterTitle?.takeIf(String::isNotBlank)
+            ?.let { builder.header("X-Reader-AI-Chapter-Title", encodeHeaderText(it)) }
+        return runCatching {
+            client.newCall(
+                builder.post(payload.toRequestBody("application/json".toMediaType())).build(),
+            ).execute().use { response ->
+                if (!response.isSuccessful) {
+                    lastErrorMessage =
+                        response.body.string().ifBlank { "Direct chapter request returned HTTP ${response.code}" }
+                    return@use null
+                }
+                val jobId = JSONObject(response.body.string()).optString("job_id").trim()
+                if (jobId.isEmpty()) null else StartedChapterJob(resolution.baseUrl, jobId, clientId, scopeId)
+            }
+        }.onFailure {
+            lastErrorMessage = it.message ?: "Direct chapter request failed"
+            logcat(LogPriority.WARN, it) { "Failed to start direct remote AI chapter job" }
+        }.getOrNull()
     }
 
     fun fetchChapterPage(
@@ -707,6 +803,8 @@ class RemotePageUpscaler(
         val bytes: ByteArray,
         val extension: String,
     )
+
+    data class DirectChapterPage(val pageIndex: Int, val request: Request)
 
     data class PageRequestMetadata(
         val mangaTitle: String?,

@@ -25,8 +25,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_plus, urlparse
+from urllib.request import HTTPRedirectHandler
 from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
+from urllib.request import build_opener
 
 from PIL import Image
 
@@ -88,6 +89,18 @@ _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
 _CHAPTER_STREAM_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/stream$")
 _PAGE_PROGRESS_LABEL_RE = re.compile(r"^(?P<context>.+?) - (?P<page>\d+/\d+)$")
+
+
+class _SafePageRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request: UrlRequest, fp: Any, code: int, msg: str, headers: Any, new_url: str) -> UrlRequest | None:
+        redirected = super().redirect_request(request, fp, code, msg, headers, new_url)
+        if redirected is not None and urlparse(request.full_url).hostname != urlparse(new_url).hostname:
+            for header_name in ("Cookie", "Authorization", "Proxy-Authorization"):
+                redirected.remove_header(header_name)
+        return redirected
+
+
+_DIRECT_PAGE_OPENER = build_opener(_SafePageRedirectHandler())
 _HTTP_ACCESS_LOG_RE = re.compile(r'^"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/[^\"]+"\s+(?P<status>\d{3})\s+-$')
 _RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _REQUEST_DISPLAY_LABELS: dict[str, str] = {}
@@ -1168,6 +1181,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/upscale-chapter":
             self._handle_chapter_upscale_request()
             return
+        if parsed.path == "/api/upscale-chapter-direct":
+            self._handle_direct_chapter_upscale_request()
+            return
         if parsed.path == "/api/abort-client":
             self._handle_abort_client_request()
             return
@@ -1437,6 +1453,72 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "reused_existing_job": reused_existing_job,
             },
         )
+
+    def _handle_direct_chapter_upscale_request(self) -> None:
+        if not self._authorize():
+            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            return
+        try:
+            body_size = int(self.headers.get("Content-Length") or "0")
+            if body_size <= 0 or body_size > 4 * 1024 * 1024:
+                raise ValueError("Invalid direct chapter manifest size")
+            manifest = json.loads(self.rfile.read(body_size).decode("utf-8"))
+            pages = manifest.get("pages")
+            if not isinstance(pages, list) or not pages:
+                raise ValueError("Direct chapter manifest has no pages")
+
+            request_id = self.server.next_request_id()
+            incoming = self.server._workspace_root / "incoming-chapters"
+            incoming.mkdir(parents=True, exist_ok=True)
+            archive_path = incoming / f"{request_id}.zip"
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                for item in pages:
+                    page_index = int(item["page_index"])
+                    page_url = str(item["url"])
+                    if urlparse(page_url).scheme not in {"http", "https"}:
+                        raise ValueError("Only HTTP(S) page URLs are supported")
+                    raw_headers = item.get("headers") or {}
+                    headers = {str(k): str(v) for k, v in raw_headers.items() if str(k).lower() not in {"host", "content-length"}}
+                    request = UrlRequest(page_url, headers=headers, method="GET")
+                    with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response:
+                        image = response.read(100 * 1024 * 1024 + 1)
+                        if len(image) > 100 * 1024 * 1024:
+                            raise ValueError(f"Page {page_index} exceeds 100 MiB")
+                    try:
+                        with Image.open(BytesIO(image)) as source_image:
+                            detected_format = (source_image.format or "jpg").lower()
+                        extension = ".jpg" if detected_format == "jpeg" else f".{detected_format}"
+                    except Exception as exc:  # noqa: BLE001
+                        raise ValueError(f"Page {page_index} is not a valid image") from exc
+                    archive.writestr(f"{page_index:04d}.{_sanitize_extension(extension)}", image)
+
+            output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
+            model_name = _resolve_requested_model_name(
+                requested_model_name=(self.headers.get("X-Reader-AI-Model-Name") or "").strip(),
+                default_model_name=self.server.config.model_name,
+            )
+            manga_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Manga-Title"))
+            chapter_title = _decode_optional_text_header(self.headers.get("X-Reader-AI-Chapter-Title"))
+            client_id = _decode_optional_text_header(self.headers.get("X-Reader-AI-Client-Id"))
+            scope_id = _parse_optional_int_header((self.headers.get("X-Reader-AI-Work-Scope") or "").strip())
+            self.server.sync_client_scope(client_id, scope_id)
+            chapter_job, reused = self.server.create_chapter_job(
+                request_id=request_id,
+                archive_path=archive_path,
+                requested_output_format=output_format,
+                model_name=model_name,
+                manga_title=manga_title,
+                chapter_title=chapter_title,
+                client_id=client_id,
+                scope_id=scope_id,
+            )
+            self._send_json(HTTPStatus.ACCEPTED, {"job_id": chapter_job.job_id, "page_count": len(chapter_job.pages), "reused_existing_job": reused})
+        except Exception as exc:  # noqa: BLE001
+            self.log_message("Direct chapter error: %s", exc)
+            self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
+        finally:
+            if "archive_path" in locals():
+                archive_path.unlink(missing_ok=True)
 
     def _handle_abort_client_request(self) -> None:
         if not self._authorize():

@@ -574,51 +574,77 @@ class ReaderPageUpscaler(
             totalPages = cacheTargets.size,
         )
 
-        val archiveFile = File(cacheRoot, "chapter-upload-${UUID.randomUUID()}.zip")
-        val preparedPageCount = try {
-            ZipOutputStream(archiveFile.outputStream().buffered()).use { zipOutput ->
-                var preparedPageCount = 0
-                pendingTargets.forEach { target ->
-                    awaitPageReady(target.page)
-                    if (target.cacheFile.isReadyCacheFile()) {
-                        return@forEach
-                    }
-
-                    val stream = target.page.stream ?: return@forEach
-                    val sourceBytes = stream().use { input ->
-                        Buffer().readFrom(input).readByteArray()
-                    }
-                    val preparedPage = remotePageUpscaler.prepareChapterUploadPage(
-                        pageIndex = target.page.index,
-                        sourceBytes = sourceBytes,
-                    ) ?: return
-                    val entryName = "${preparedPage.pageIndex.toString().padStart(4, '0')}.${preparedPage.extension}"
-                    val entryBytes = preparedPage.bytes
-                    val entryCrc = CRC32().apply { update(entryBytes) }.value
-                    zipOutput.putNextEntry(
-                        ZipEntry(entryName).apply {
-                            method = ZipEntry.STORED
-                            size = entryBytes.size.toLong()
-                            compressedSize = size
-                            crc = entryCrc
-                        },
-                    )
-                    zipOutput.write(entryBytes)
-                    zipOutput.closeEntry()
-                    preparedPageCount += 1
-                }
-                preparedPageCount
+        val directChapterJob = if (readerPreferences.remoteAiDirectDownload.get()) {
+            val directPages = pendingTargets.mapNotNull { target ->
+                val request = runCatching { target.page.remoteImageRequest?.invoke() }.getOrNull()
+                    ?: return@mapNotNull null
+                if (request.method != "GET" || request.body != null) return@mapNotNull null
+                RemotePageUpscaler.DirectChapterPage(target.page.index, request)
             }
-        } catch (e: Throwable) {
-            archiveFile.delete()
-            throw e
+            if (directPages.size == pendingTargets.size) {
+                remotePageUpscaler.startDirectChapterJob(directPages, chapterMetadata)
+            } else {
+                null
+            }
+        } else {
+            null
         }
-        if (preparedPageCount <= 0) {
+
+        val archiveFile = File(cacheRoot, "chapter-upload-${UUID.randomUUID()}.zip")
+        val preparedPageCount = if (directChapterJob != null) {
+            0
+        } else {
+            try {
+                ZipOutputStream(archiveFile.outputStream().buffered()).use { zipOutput ->
+                    var preparedPageCount = 0
+                    pendingTargets.forEach { target ->
+                        if (!readerPreferences.remoteAiDirectDownload.get()) {
+                            awaitPageReady(target.page)
+                        }
+                        if (target.cacheFile.isReadyCacheFile()) {
+                            return@forEach
+                        }
+
+                        val sourceBytes = target.page.stream?.invoke()?.use { input ->
+                            Buffer().readFrom(input).readByteArray()
+                        } ?: target.page.remoteImageRequest?.invoke()?.let(remotePageUpscaler::downloadSourcePage)
+                        if (sourceBytes == null) return@forEach
+                        val preparedPage = remotePageUpscaler.prepareChapterUploadPage(
+                            pageIndex = target.page.index,
+                            sourceBytes = sourceBytes,
+                        ) ?: return
+                        val entryName = buildString {
+                            append(preparedPage.pageIndex.toString().padStart(4, '0'))
+                            append('.')
+                            append(preparedPage.extension)
+                        }
+                        val entryBytes = preparedPage.bytes
+                        val entryCrc = CRC32().apply { update(entryBytes) }.value
+                        zipOutput.putNextEntry(
+                            ZipEntry(entryName).apply {
+                                method = ZipEntry.STORED
+                                size = entryBytes.size.toLong()
+                                compressedSize = size
+                                crc = entryCrc
+                            },
+                        )
+                        zipOutput.write(entryBytes)
+                        zipOutput.closeEntry()
+                        preparedPageCount += 1
+                    }
+                    preparedPageCount
+                }
+            } catch (e: Throwable) {
+                archiveFile.delete()
+                throw e
+            }
+        }
+        if (directChapterJob == null && preparedPageCount != pendingTargets.size) {
             archiveFile.delete()
             return
         }
 
-        val chapterJob = try {
+        val chapterJob = directChapterJob ?: try {
             remotePageUpscaler.startChapterJobFromArchive(
                 archiveFile = archiveFile,
                 pageCount = preparedPageCount,

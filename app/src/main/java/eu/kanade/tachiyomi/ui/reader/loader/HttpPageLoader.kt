@@ -77,7 +77,14 @@ internal class HttpPageLoader(
         }
         return pages.mapIndexed { index, page ->
             // Don't trust sources and use our own indexing
-            ReaderPage(index, page.url, page.imageUrl)
+            ReaderPage(index, page.url, page.imageUrl).also { readerPage ->
+                readerPage.remoteImageRequest = {
+                    if (readerPage.imageUrl.isNullOrEmpty()) {
+                        readerPage.imageUrl = source.getImageUrl(readerPage)
+                    }
+                    source.mihonAiImageRequest(readerPage)
+                }
+            }
         }
     }
 

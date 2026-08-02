@@ -96,6 +96,8 @@ class ReaderPreferences(
         preferenceStore.getEnum("pref_reader_ai_remote_model", RemoteAiModel.FAST)
     val remoteAiBatchMode: Preference<RemoteAiBatchMode> =
         preferenceStore.getEnum("pref_reader_ai_remote_batch_mode", RemoteAiBatchMode.SINGLE)
+    val remoteAiDirectDownload: Preference<Boolean> =
+        preferenceStore.getBoolean("pref_reader_ai_remote_direct_download", false)
     val remoteAiDiscoveredBaseUrl: Preference<String> =
         preferenceStore.getString(Preference.appStateKey("reader_ai_remote_discovered_url"), "")
 

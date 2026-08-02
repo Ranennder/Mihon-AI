@@ -881,7 +881,9 @@ class ReaderViewModel @JvmOverloads constructor(
         )
 
         if (shouldQueueWholeChapterForRemote(chapter)) {
-            chapter.pageLoader?.queuePages(pages)
+            if (!readerPreferences.remoteAiDirectDownload.get()) {
+                chapter.pageLoader?.queuePages(pages)
+            }
             scheduleUpscaleForChapterFromStart(pages)
             return
         }

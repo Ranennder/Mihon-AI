@@ -8,6 +8,7 @@ Small HTTP server for `Mihon AI` remote upscale mode.
 - accepts page image bytes from Mihon
 - runs a local GPU upscale executable
 - returns the processed image back to the phone
+- can optionally download chapter pages directly using URLs and per-site session data supplied by the phone
 
 ## Recommended layout
 
@@ -37,6 +38,8 @@ If the runtime is bundled during the PyInstaller build, the `.exe` also works st
    - `AI backend` -> `Remote PC`
    - `Remote AI server URL` -> `http://YOUR_PC_IP:8765`
    - `Remote AI server token` -> the same token as in `reader_ai_server.json` if you use one
+
+For the beta direct route, select a whole-chapter batch mode and enable `Companion downloads pages directly`. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading the chapter from the phone.
 
 ## Build the `.exe`
 

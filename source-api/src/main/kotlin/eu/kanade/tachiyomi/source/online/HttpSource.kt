@@ -409,6 +409,9 @@ abstract class HttpSource : CatalogueSource {
             .awaitSuccess()
     }
 
+    /** Builds the exact image request for trusted in-app consumers such as Remote AI. */
+    fun mihonAiImageRequest(page: Page): Request = imageRequest(page)
+
     /**
      * Returns the request for getting the source image. Override only if it's needed to override
      * the url, send different headers or request method like POST.

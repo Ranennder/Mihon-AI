@@ -81,6 +81,7 @@ object SettingsReaderScreen : SearchableSettings {
         val rawAiBackendMode by readerPreferences.aiBackendMode.collectAsState()
         val remoteAiBaseUrl by readerPreferences.remoteAiBaseUrl.collectAsState()
         val remoteAiDiscoveredBaseUrl by readerPreferences.remoteAiDiscoveredBaseUrl.collectAsState()
+        val remoteAiBatchMode by readerPreferences.remoteAiBatchMode.collectAsState()
         val aiBackendMode = ReaderPreferences.normalizeAiBackendMode(rawAiBackendMode)
         val remoteAiStatus = remoteAiServerStatusText(
             manualUrl = remoteAiBaseUrl,
@@ -167,6 +168,14 @@ object SettingsReaderScreen : SearchableSettings {
                         .associateWith { stringResource(it.titleRes) },
                     title = stringResource(MR.strings.pref_reader_ai_remote_batch_mode),
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = readerPreferences.remoteAiDirectDownload,
+                    title = stringResource(MR.strings.pref_reader_ai_remote_direct_download),
+                    subtitle = stringResource(MR.strings.pref_reader_ai_remote_direct_download_summary),
+                    enabled = upscaleEnabled &&
+                        aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE &&
+                        remoteAiBatchMode.shouldQueueWholeChapter,
                 ),
                 Preference.PreferenceItem.EditTextPreference(
                     preference = readerPreferences.remoteAiToken,
