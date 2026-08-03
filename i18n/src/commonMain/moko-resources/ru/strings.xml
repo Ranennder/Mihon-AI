@@ -123,6 +123,8 @@
     <string name="pref_reader_ai_remote_batch_mode">Режим Remote batch</string>
     <string name="pref_reader_ai_remote_direct_download">Клиент загружает страницы напрямую (бета)</string>
     <string name="pref_reader_ai_remote_direct_download_summary">В режиме целой главы передаёт клиенту URL и данные сессии сайта: сайт → клиент → телефон. Для несовместимых источников используется обычная загрузка через телефон.</string>
+    <string name="pref_reader_ai_internet_access">Доступ через интернет (бета)</string>
+    <string name="pref_reader_ai_internet_access_summary">В общей Wi-Fi сети автоматически связывается с клиентом и сохраняет его временный HTTPS-адрес для работы вне дома.</string>
     <string name="reader_ai_remote_batch_mode_single">По 1</string>
     <string name="reader_ai_remote_batch_mode_four">По 4</string>
     <string name="reader_ai_remote_batch_mode_chapter">Глава</string>

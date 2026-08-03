@@ -100,6 +100,10 @@ class ReaderPreferences(
         preferenceStore.getBoolean("pref_reader_ai_remote_direct_download", false)
     val remoteAiDiscoveredBaseUrl: Preference<String> =
         preferenceStore.getString(Preference.appStateKey("reader_ai_remote_discovered_url"), "")
+    val remoteAiInternetBaseUrl: Preference<String> =
+        preferenceStore.getString(Preference.appStateKey("reader_ai_internet_url"), "")
+    val remoteAiInternetAccess: Preference<Boolean> =
+        preferenceStore.getBoolean("pref_reader_ai_internet_access", false)
 
     fun selectedAiBackendMode(): AiBackendMode {
         return normalizeAiBackendMode(aiBackendMode.get())

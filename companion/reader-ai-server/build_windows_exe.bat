@@ -9,6 +9,13 @@ if not defined RELEASE_TAG set "RELEASE_TAG="
 
 set "RUNTIME_DIR=%MIHONAI_RUNTIME_DIR%"
 if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime"
+set "CLOUDFLARED_EXE=%TEMP%\mihon-cloudflared.exe"
+
+if not exist "%CLOUDFLARED_EXE%" (
+  echo Downloading Cloudflare Tunnel runtime
+  powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile '%CLOUDFLARED_EXE%'"
+  if errorlevel 1 exit /b 1
+)
 
 if not exist "%RUNTIME_DIR%\realesrgan-ncnn-vulkan.exe" (
   echo Preparing Windows runtime in %RUNTIME_DIR%
@@ -30,6 +37,7 @@ call %PYTHON_CMD% -m PyInstaller ^
   --onefile ^
   --name MihonAiCompanion ^
   --add-data "%RUNTIME_DIR%;runtime" ^
+  --add-binary "%CLOUDFLARED_EXE%;." ^
   reader_ai_companion.py
 
 echo.

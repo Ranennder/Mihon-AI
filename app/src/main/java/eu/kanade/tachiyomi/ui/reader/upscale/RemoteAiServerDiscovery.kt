@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.util.system.isConnectedToWifi
 import logcat.LogPriority
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import tachiyomi.core.common.util.system.logcat
 import java.net.Inet4Address
@@ -36,17 +37,37 @@ internal class RemoteAiServerDiscovery(
     private val discoveryLock = Any()
 
     fun resolveBaseUrl(forceRediscovery: Boolean = false): Resolution? {
-        manualBaseUrl()?.let { return Resolution(it, isAutoDiscovered = false) }
+        if (readerPreferences.remoteAiInternetAccess.get() && (!app.isConnectedToWifi() || forceRediscovery)) {
+            internetBaseUrl()?.let { return Resolution(it, isAutoDiscovered = true) }
+        }
+
+        manualBaseUrl()?.let {
+            if (app.isConnectedToWifi() && readerPreferences.remoteAiInternetAccess.get()) {
+                probeCandidate(it)
+            }
+            return Resolution(it, isAutoDiscovered = false)
+        }
 
         if (!forceRediscovery) {
-            cachedDiscoveredBaseUrl()?.let { return Resolution(it, isAutoDiscovered = true) }
+            cachedDiscoveredBaseUrl()?.let {
+                probeCandidate(it)
+                return Resolution(it, isAutoDiscovered = true)
+            }
         }
 
         return synchronized(discoveryLock) {
-            manualBaseUrl()?.let { return@synchronized Resolution(it, isAutoDiscovered = false) }
+            manualBaseUrl()?.let {
+                if (readerPreferences.remoteAiInternetAccess.get()) {
+                    probeCandidate(it)
+                }
+                return@synchronized Resolution(it, isAutoDiscovered = false)
+            }
 
             if (!forceRediscovery) {
-                cachedDiscoveredBaseUrl()?.let { return@synchronized Resolution(it, isAutoDiscovered = true) }
+                cachedDiscoveredBaseUrl()?.let {
+                    probeCandidate(it)
+                    return@synchronized Resolution(it, isAutoDiscovered = true)
+                }
             }
 
             val discoveredBaseUrl = discoverOnLocalNetwork()
@@ -55,7 +76,7 @@ internal class RemoteAiServerDiscovery(
                 Resolution(discoveredBaseUrl, isAutoDiscovered = true)
             } else {
                 readerPreferences.remoteAiDiscoveredBaseUrl.delete()
-                null
+                internetBaseUrl()?.let { Resolution(it, isAutoDiscovered = true) }
             }
         }
     }
@@ -76,6 +97,10 @@ internal class RemoteAiServerDiscovery(
             .trim()
             .trimEnd('/')
             .takeIf { it.isNotEmpty() }
+    }
+
+    private fun internetBaseUrl(): String? {
+        return readerPreferences.remoteAiInternetBaseUrl.get().trim().trimEnd('/').takeIf(String::isNotEmpty)
     }
 
     private fun discoverOnLocalNetwork(): String? {
@@ -167,6 +192,16 @@ internal class RemoteAiServerDiscovery(
                     return@use null
                 }
 
+                payload.optString("internet_url").trim().takeIf(String::isNotEmpty)?.let {
+                    readerPreferences.remoteAiInternetBaseUrl.set(it.trimEnd('/'))
+                }
+                payload.optString("pairing_token").trim().takeIf(String::isNotEmpty)?.let {
+                    readerPreferences.remoteAiToken.set(it)
+                }
+                if (readerPreferences.remoteAiInternetAccess.get()) {
+                    enableInternetAccess(baseUrl)
+                }
+
                 baseUrl
             }
         }
@@ -176,11 +211,39 @@ internal class RemoteAiServerDiscovery(
             .getOrNull()
     }
 
+    private fun enableInternetAccess(baseUrl: String) {
+        val request = Request.Builder()
+            .url("$baseUrl/api/enable-internet")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        runCatching {
+            client.newBuilder()
+                .readTimeout(INTERNET_PAIRING_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .callTimeout(INTERNET_PAIRING_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .build()
+                .newCall(request)
+                .execute()
+                .use { response ->
+                    if (!response.isSuccessful) return@use
+                    val payload = JSONObject(response.body.string())
+                    payload.optString("internet_url").trim().takeIf(String::isNotEmpty)?.let {
+                        readerPreferences.remoteAiInternetBaseUrl.set(it.trimEnd('/'))
+                    }
+                    payload.optString("pairing_token").trim().takeIf(String::isNotEmpty)?.let {
+                        readerPreferences.remoteAiToken.set(it)
+                    }
+                }
+        }.onFailure {
+            logcat(LogPriority.DEBUG, it) { "Failed to pair with companion internet tunnel" }
+        }
+    }
+
     private companion object {
         private const val DEFAULT_DISCOVERY_PORT = 8765
         private const val DISCOVERY_PARALLELISM = 24
         private const val DISCOVERY_CONNECT_TIMEOUT_MILLIS = 250L
         private const val DISCOVERY_READ_TIMEOUT_MILLIS = 250L
         private const val DISCOVERY_CALL_TIMEOUT_MILLIS = 400L
+        private const val INTERNET_PAIRING_TIMEOUT_SECONDS = 20L
     }
 }

@@ -177,6 +177,12 @@ object SettingsReaderScreen : SearchableSettings {
                         aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE &&
                         remoteAiBatchMode.shouldQueueWholeChapter,
                 ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = readerPreferences.remoteAiInternetAccess,
+                    title = stringResource(MR.strings.pref_reader_ai_internet_access),
+                    subtitle = stringResource(MR.strings.pref_reader_ai_internet_access_summary),
+                    enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                ),
                 Preference.PreferenceItem.EditTextPreference(
                     preference = readerPreferences.remoteAiToken,
                     title = stringResource(MR.strings.pref_reader_ai_remote_token),

@@ -41,6 +41,8 @@ If the runtime is bundled during the PyInstaller build, the `.exe` also works st
 
 For the beta direct route, select a whole-chapter batch mode and enable `Companion downloads pages directly`. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading the chapter from the phone.
 
+To use the companion away from home, enable `Internet access (beta)` in Mihon while the phone and PC are on the same Wi-Fi. Mihon starts the bundled Cloudflare Quick Tunnel through the local companion and saves its temporary HTTPS address and pairing token automatically. No router configuration, QR code, account, or separate software installation is required. The address changes whenever the companion restarts, so pair again on the same Wi-Fi after each restart.
+
 ## Build the `.exe`
 
 If you only have the Python script, build a standalone executable on Windows:

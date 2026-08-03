@@ -5,11 +5,13 @@ import argparse
 import ctypes
 import json
 import itertools
+import ipaddress
 import locale
 import mimetypes
 import os
 import queue
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -308,6 +310,10 @@ class ReaderAiServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], config: Config):
         super().__init__(server_address, ReaderAiRequestHandler)
         self.config = config
+        self.pairing_token = secrets.token_urlsafe(32)
+        self.public_url: str | None = None
+        self.tunnel_process: subprocess.Popen[str] | None = None
+        self.tunnel_lock = threading.Lock()
         self._workspace_root_owner = tempfile.TemporaryDirectory(prefix="mihon-ai-server-")
         self._workspace_root = Path(self._workspace_root_owner.name)
         self._chapter_jobs_root = self._workspace_root / "chapter-jobs"
@@ -1035,6 +1041,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "companion_release_tag": current_release_tag,
                 "auto_update_enabled": current_release_tag is not None,
             }
+            if self._is_local_request():
+                payload["internet_url"] = self.server.public_url
+                payload["pairing_token"] = self.server.config.token.strip() or self.server.pairing_token
             self._send_json(HTTPStatus.OK, payload)
             return
 
@@ -1175,6 +1184,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/enable-internet":
+            self._handle_enable_internet_request()
+            return
         if parsed.path == "/api/upscale":
             self._handle_single_upscale_request()
             return
@@ -1188,6 +1200,29 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._handle_abort_client_request()
             return
         self._send_text(HTTPStatus.NOT_FOUND, "Not found")
+
+    def _handle_enable_internet_request(self) -> None:
+        if not self._is_local_request():
+            self._send_text(HTTPStatus.FORBIDDEN, "Internet pairing is available only on the local network")
+            return
+        _start_quick_tunnel(self.server)
+        for _ in range(150):
+            if self.server.public_url:
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "internet_url": self.server.public_url,
+                        "pairing_token": self.server.config.token.strip() or self.server.pairing_token,
+                    },
+                )
+                return
+            time.sleep(0.1)
+        self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, "Internet tunnel did not become ready")
+
+    def _is_local_request(self) -> bool:
+        if self.headers.get("CF-Connecting-IP"):
+            return False
+        return ipaddress.ip_address(self.client_address[0]).is_private
 
     def _handle_single_upscale_request(self) -> None:
         if not self._authorize():
@@ -1546,9 +1581,12 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def _authorize(self) -> bool:
         token = self.server.config.token.strip()
-        if not token:
-            return True
-        return self.headers.get("X-Reader-AI-Token", "") == token
+        supplied_token = self.headers.get("X-Reader-AI-Token", "")
+        if token:
+            return supplied_token == token
+        if self.headers.get("CF-Connecting-IP"):
+            return supplied_token == self.server.pairing_token
+        return not supplied_token or supplied_token == self.server.pairing_token
 
     def _send_binary(self, status: HTTPStatus, body: bytes, output_format: str) -> None:
         mime = mimetypes.types_map.get(f".{output_format}", "application/octet-stream")
@@ -3340,6 +3378,38 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _start_quick_tunnel(server: ReaderAiServer) -> None:
+    with server.tunnel_lock:
+        if server.tunnel_process is not None and server.tunnel_process.poll() is None:
+            return
+        server.public_url = None
+    executable_name = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+    cloudflared = _bundled_root() / executable_name
+    if not cloudflared.is_file():
+        _emit_log_line("Internet access unavailable: bundled cloudflared was not found")
+        return
+    process = subprocess.Popen(
+        [str(cloudflared), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{server.config.port}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    server.tunnel_process = process
+
+    def read_output() -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
+            if match and server.public_url is None:
+                server.public_url = match.group(0)
+                _emit_log_line(f"Internet access ready: {server.public_url}")
+
+    threading.Thread(target=read_output, name="mihon-ai-tunnel", daemon=True).start()
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True, write_through=True)
@@ -3397,6 +3467,8 @@ def main() -> int:
         except KeyboardInterrupt:
             _emit_log_text("\nShutting down...\n")
         finally:
+            if server.tunnel_process is not None:
+                server.tunnel_process.terminate()
             server.server_close()
         return 0
     finally:

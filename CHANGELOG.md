@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.15
+
+- Bundle an automatic Cloudflare Quick Tunnel into the Windows companion for plug-and-play internet access.
+- Pair the phone automatically while it is on the same local network, transferring the temporary HTTPS address and session token without QR codes or manual URL entry.
+- Prefer the local companion on Wi-Fi and use the saved internet address when away from the local network.
+
 ## v0.1.14
 
 - Add an optional direct-download beta mode for Remote PC whole-chapter upscaling.
