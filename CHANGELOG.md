@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.19
+
+- Fix Windows self-update replacement failing while the PyInstaller executable is still temporarily locked.
+- Retry replacement for up to one minute, verify the installed file size, and write a visible `.update.log` beside the companion.
+
 ## v0.1.18
 
 - Add a persistent AI performance journal in Mihon with request durations, status codes, transfer sizes, and safe endpoint details.
