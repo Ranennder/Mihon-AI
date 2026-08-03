@@ -12,6 +12,7 @@ import tachiyomi.core.common.util.system.logcat
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
+import java.util.UUID
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -28,6 +29,14 @@ internal class RemoteAiServerDiscovery(
     )
 
     private val client = networkHelper.client.newBuilder()
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header(HEADER_TRACE_ID, UUID.randomUUID().toString())
+                    .build(),
+            )
+        }
+        .eventListener(AiPerformanceLog.eventListener(app))
         .connectTimeout(DISCOVERY_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
         .readTimeout(DISCOVERY_READ_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
         .callTimeout(DISCOVERY_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
@@ -245,5 +254,6 @@ internal class RemoteAiServerDiscovery(
         private const val DISCOVERY_READ_TIMEOUT_MILLIS = 250L
         private const val DISCOVERY_CALL_TIMEOUT_MILLIS = 400L
         private const val INTERNET_PAIRING_TIMEOUT_SECONDS = 20L
+        private const val HEADER_TRACE_ID = "X-Reader-AI-Trace-Id"
     }
 }

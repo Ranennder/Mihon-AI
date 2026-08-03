@@ -835,6 +835,8 @@ class ReaderAiServer(ThreadingHTTPServer):
     def _run_chapter_job(self, job: ChapterUpscaleJob) -> None:
         binary = Path(self.config.binary)
         model_dir = Path(self.config.model_dir)
+        started_at = time.perf_counter()
+        queue_wait_seconds = max(0.0, time.time() - job.created_at)
         try:
             if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
                 raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
@@ -969,7 +971,12 @@ class ReaderAiServer(ThreadingHTTPServer):
             if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
                 raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
             _emit_log_line(
-                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale finished",
+                (
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - "
+                    f"Chapter upscale finished in {time.perf_counter() - started_at:.2f}s "
+                    f"(queue={queue_wait_seconds:.2f}s, fallback={len(fallback_pages)}, "
+                    f"output={_format_compact_bytes(sum(path.stat().st_size for path in job.output_dir.iterdir() if path.is_file()))})"
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             job.error = exc
@@ -1185,6 +1192,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        trace_id = (self.headers.get("X-Reader-AI-Trace-Id") or "none").strip()
+        _emit_log_line(
+            f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [trace={trace_id}] POST {parsed.path} from {self.client_address[0]}",
+            console=False,
+        )
         if parsed.path == "/api/enable-internet":
             self._handle_enable_internet_request()
             return

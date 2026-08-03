@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.18
+
+- Add a persistent AI performance journal in Mihon with request durations, status codes, transfer sizes, and safe endpoint details.
+- Add copy and clear journal actions to the reader AI settings.
+- Correlate phone and companion requests with shared trace IDs, and expand companion chapter timing summaries.
+
 ## v0.1.17
 
 - Fix the Windows companion auto-updater failing before its GitHub request because of a missing network import.

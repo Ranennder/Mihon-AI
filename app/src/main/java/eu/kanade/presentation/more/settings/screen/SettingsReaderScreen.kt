@@ -5,6 +5,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.widget.BasePreferenceWidget
@@ -14,6 +15,8 @@ import eu.kanade.presentation.reader.settings.remoteAiServerUrlPreferenceSubtitl
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
+import eu.kanade.tachiyomi.ui.reader.upscale.AiPerformanceLog
+import eu.kanade.tachiyomi.util.system.copyToClipboard
 import eu.kanade.tachiyomi.util.system.hasDisplayCutout
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.pluralStringResource
@@ -75,6 +78,7 @@ object SettingsReaderScreen : SearchableSettings {
 
     @Composable
     private fun getDisplayGroup(readerPreferences: ReaderPreferences): Preference.PreferenceGroup {
+        val context = LocalContext.current
         val fullscreenPref = readerPreferences.fullscreen
         val fullscreen by fullscreenPref.collectAsState()
         val upscaleEnabled by readerPreferences.upscalePagesX2.collectAsState()
@@ -188,6 +192,19 @@ object SettingsReaderScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_reader_ai_remote_token),
                     allowBlank = true,
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_reader_ai_performance_log),
+                    subtitle = stringResource(MR.strings.pref_reader_ai_performance_log_summary),
+                    enabled = aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                    onClick = {
+                        context.copyToClipboard("Mihon AI performance log", AiPerformanceLog.read(context))
+                    },
+                ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_reader_ai_performance_log_clear),
+                    enabled = aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                    onClick = { AiPerformanceLog.clear(context) },
                 ),
             ),
         )

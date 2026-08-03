@@ -30,7 +30,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 class RemotePageUpscaler(
-    app: Application,
+    private val app: Application,
     private val readerPreferences: ReaderPreferences,
     private val networkHelper: NetworkHelper,
 ) {
@@ -38,11 +38,27 @@ class RemotePageUpscaler(
     private val uploadWorkspace = File(app.cacheDir, "reader_ai_remote_uploads").apply { mkdirs() }
     private val controlScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = networkHelper.client.newBuilder()
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header(HEADER_TRACE_ID, UUID.randomUUID().toString())
+                    .build(),
+            )
+        }
+        .eventListener(AiPerformanceLog.eventListener(app))
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
         .callTimeout(10, TimeUnit.MINUTES)
         .build()
     private val controlClient = networkHelper.client.newBuilder()
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header(HEADER_TRACE_ID, UUID.randomUUID().toString())
+                    .build(),
+            )
+        }
+        .eventListener(AiPerformanceLog.eventListener(app))
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .callTimeout(5, TimeUnit.SECONDS)
@@ -910,6 +926,7 @@ class RemotePageUpscaler(
         private const val REMOTE_ARCHIVE_MEDIA_TYPE = "application/zip"
         private const val REMOTE_CHAPTER_STREAM_MEDIA_TYPE = "application/x-reader-ai-chapter-stream"
         private const val HEADER_CLIENT_ID = "X-Reader-AI-Client-Id"
+        private const val HEADER_TRACE_ID = "X-Reader-AI-Trace-Id"
         private const val HEADER_WORK_SCOPE = "X-Reader-AI-Work-Scope"
 
         private fun encodeHeaderText(value: String): String {
