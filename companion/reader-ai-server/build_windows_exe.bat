@@ -9,7 +9,7 @@ if not defined RELEASE_TAG set "RELEASE_TAG="
 
 set "RUNTIME_DIR=%MIHONAI_RUNTIME_DIR%"
 if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime"
-set "CLOUDFLARED_EXE=%TEMP%\mihon-cloudflared.exe"
+set "CLOUDFLARED_EXE=%TEMP%\cloudflared.exe"
 
 if not exist "%CLOUDFLARED_EXE%" (
   echo Downloading Cloudflare Tunnel runtime

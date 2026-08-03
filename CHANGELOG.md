@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.16
+
+- Fix the one-file Windows companion failing to locate its bundled Cloudflare Tunnel executable.
+- Keep Cloudflare Tunnel embedded inside the companion; no separate installation or executable is required.
+
 ## v0.1.15
 
 - Bundle an automatic Cloudflare Quick Tunnel into the Windows companion for plug-and-play internet access.

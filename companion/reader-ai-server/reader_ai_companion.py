@@ -3383,9 +3383,12 @@ def _start_quick_tunnel(server: ReaderAiServer) -> None:
         if server.tunnel_process is not None and server.tunnel_process.poll() is None:
             return
         server.public_url = None
-    executable_name = "cloudflared.exe" if os.name == "nt" else "cloudflared"
-    cloudflared = _bundled_root() / executable_name
-    if not cloudflared.is_file():
+    executable_names = ("cloudflared.exe", "mihon-cloudflared.exe") if os.name == "nt" else ("cloudflared",)
+    cloudflared = next(
+        (candidate for name in executable_names if (candidate := _bundled_root() / name).is_file()),
+        None,
+    )
+    if cloudflared is None:
         _emit_log_line("Internet access unavailable: bundled cloudflared was not found")
         return
     process = subprocess.Popen(
