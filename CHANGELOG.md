@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.17
+
+- Fix the Windows companion auto-updater failing before its GitHub request because of a missing network import.
+- Show the current/latest version check and update errors directly in the companion console.
+- Stop suppressing the next update check after an automatic restart.
+
 ## v0.1.16
 
 - Fix the one-file Windows companion failing to locate its bundled Cloudflare Tunnel executable.

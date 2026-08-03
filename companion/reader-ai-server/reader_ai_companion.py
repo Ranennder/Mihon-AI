@@ -30,6 +30,7 @@ from urllib.parse import unquote_plus, urlparse
 from urllib.request import HTTPRedirectHandler
 from urllib.request import Request as UrlRequest
 from urllib.request import build_opener
+from urllib.request import urlopen
 
 from PIL import Image
 
@@ -3222,7 +3223,9 @@ def _maybe_perform_self_update(*, skip_self_update: bool) -> bool:
         release_payload = _fetch_latest_release_payload(current_tag)
         latest_tag = _normalize_release_tag(str(release_payload.get("tag_name") or ""))
         if latest_tag is None:
+            _emit_log_line("Auto-update: GitHub returned an invalid release version")
             return False
+        _emit_log_line(f"Auto-update: current {current_tag}, latest {latest_tag}")
         latest_version = _parse_release_tag(latest_tag)
         if latest_version is None or latest_version <= current_version:
             return False
@@ -3231,7 +3234,6 @@ def _maybe_perform_self_update(*, skip_self_update: bool) -> bool:
         if selected_asset is None:
             _emit_log_line(
                 f"Auto-update: latest release {latest_tag} has no Windows companion asset",
-                console=False,
             )
             return False
 
@@ -3244,7 +3246,6 @@ def _maybe_perform_self_update(*, skip_self_update: bool) -> bool:
         _download_release_asset(asset_url, downloaded_executable, latest_tag)
         _emit_log_line(f"Auto-update: installing {latest_tag} and restarting companion")
         relaunch_arguments = [argument for argument in sys.argv[1:] if argument != "--skip-self-update"]
-        relaunch_arguments.append("--skip-self-update")
         _launch_windows_self_replace(
             current_executable=current_executable,
             downloaded_executable=downloaded_executable,
@@ -3252,7 +3253,7 @@ def _maybe_perform_self_update(*, skip_self_update: bool) -> bool:
         )
         return True
     except Exception as exc:  # noqa: BLE001
-        _emit_log_line(f"Auto-update check failed: {exc}", console=False)
+        _emit_log_line(f"Auto-update check failed: {exc}")
         return False
 
 
