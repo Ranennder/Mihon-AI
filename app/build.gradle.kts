@@ -55,8 +55,8 @@ val hasRepoReleaseKeystore = repoReleaseKeystoreFile.exists()
 val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
-val upstreamAppVersionName = "0.20.2"
-val mihonAiVersionName = "0.1.19"
+val upstreamAppVersionName = "0.20.4"
+val mihonAiVersionName = "0.1.20"
 
 if (Config.includeTelemetry) {
     pluginManager.apply {
@@ -281,6 +281,8 @@ dependencies {
     implementation(libs.bundles.kotlinx.coroutines)
 
     implementation(libs.sqldelight.async)
+
+    implementation(libs.kotlinx.datetime)
 
     // AndroidX libraries
     implementation(libs.androidx.annotation)

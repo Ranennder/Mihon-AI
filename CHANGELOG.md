@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.20
+
+- Update the Mihon base from 0.20.2 to 0.20.4.
+- Fix relative dates that could incorrectly appear as today.
+- Fix partial MyAnimeList dates and reader pages that could load indefinitely.
+- Add category filters to Updates and Upcoming, plus the latest WebView compatibility fixes.
+- Preserve Mihon AI remote upscaling, diagnostics, companion auto-update, and HTTP 429 library retry behavior.
+
 ## v0.1.19
 
 - Fix Windows self-update replacement failing while the PyInstaller executable is still temporarily locked.

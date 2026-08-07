@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="about_based_on_mihon">На базе Mihon</string>
     <string name="action_add">Добавить</string>
     <string name="action_add_category">Добавить категорию</string>
     <string name="action_bookmark">Добавить закладку</string>
@@ -113,31 +112,6 @@
     <string name="portrait">Портретная</string>
     <string name="pref_acra_summary">Помогает исправлять все возможные ошибки. Данные пользователя не передаются</string>
     <string name="pref_auto_update_manga_sync">Обновлять прогресс после прочтения</string>
-    <string name="pref_reader_upscale_x2">AI-апскейл x4</string>
-    <string name="pref_reader_upscale_x2_summary">Показывать постоянный переключатель AI в читалке</string>
-    <string name="pref_reader_ai_backend">AI backend</string>
-    <string name="reader_ai_backend_cpu">CPU</string>
-    <string name="reader_ai_backend_gpu">GPU (Vulkan)</string>
-    <string name="reader_ai_backend_npu">NPU (NNAPI)</string>
-    <string name="reader_ai_backend_remote">Remote PC</string>
-    <string name="pref_reader_ai_remote_batch_mode">Режим Remote batch</string>
-    <string name="pref_reader_ai_remote_direct_download">Клиент загружает страницы напрямую (бета)</string>
-    <string name="pref_reader_ai_remote_direct_download_summary">В режиме целой главы передаёт клиенту URL и данные сессии сайта: сайт → клиент → телефон. Для несовместимых источников используется обычная загрузка через телефон.</string>
-    <string name="pref_reader_ai_internet_access">Доступ через интернет (бета)</string>
-    <string name="pref_reader_ai_internet_access_summary">В общей Wi-Fi сети автоматически связывается с клиентом и сохраняет его временный HTTPS-адрес для работы вне дома.</string>
-    <string name="pref_reader_ai_performance_log">Копировать журнал производительности AI</string>
-    <string name="pref_reader_ai_performance_log_summary">Копирует маршруты запросов, длительность, коды ответов и объёмы передачи для отладки телефона и клиента.</string>
-    <string name="pref_reader_ai_performance_log_clear">Очистить журнал производительности AI</string>
-    <string name="reader_ai_remote_batch_mode_single">По 1</string>
-    <string name="reader_ai_remote_batch_mode_four">По 4</string>
-    <string name="reader_ai_remote_batch_mode_chapter">Глава</string>
-    <string name="reader_ai_remote_batch_mode_chapter_stream">Поток</string>
-    <string name="pref_reader_ai_remote_url">URL удаленного AI-сервера</string>
-    <string name="reader_ai_remote_url_auto_hint">Оставьте URL пустым, чтобы автоматически найти companion по Wi-Fi.</string>
-    <string name="reader_ai_remote_url_auto_discovered">Автообнаруженный companion: %s</string>
-    <string name="reader_ai_remote_url_auto_active">Используется автообнаруженный companion: %s</string>
-    <string name="pref_reader_ai_remote_token">Токен удаленного AI-сервера</string>
-    <string name="reader_ai_failed">AI-апскейл не сработал, показана исходная страница</string>
     <string name="pref_category_about">Информация</string>
     <string name="pref_category_advanced">Дополнительно</string>
     <string name="pref_category_downloads">Загрузки</string>
@@ -417,7 +391,6 @@
     <string name="pref_read_with_tapping_inverted">Зоны касания наоборот</string>
     <string name="unknown_status">Неизвестный статус</string>
     <string name="unknown_author">Неизвестный автор</string>
-    <string name="updated_version">Обновлено до %1$s</string>
     <string name="whats_new">Что нового</string>
     <string name="download_insufficient_space">Не удалось загрузить главы из-за малого объема хранилища</string>
     <string name="action_global_search_query">Искать \"%1$s\" глобально</string>
@@ -589,7 +562,6 @@
     <string name="skipped_reason_not_caught_up">Пропущено, т.к есть непрочитанные главы</string>
     <string name="skipped_reason_not_started">Пропущено, т.к серия не начата</string>
     <string name="learn_more">Нажать для подробностей</string>
-    <string name="notification_update_error">%1$d обновление(ий) не удалось</string>
     <string name="rotation_reverse_portrait">Портретная наоборот</string>
     <string name="action_move_to_top_all_for_series">Переместить серию в начало</string>
     <string name="disabled_nav">Отключено</string>
@@ -660,7 +632,6 @@
     <string name="pref_advanced_summary">Выгрузка журнала сбоев, оптимизация батареи</string>
     <string name="crash_screen_title">Ой, ошибочка вышла!</string>
     <string name="crash_screen_description">%s столкнулось с непредвиденной ошибкой. Мы рекомендуем поделиться журналом сбоев в нашем Discord-сервере в ветке поддержки.</string>
-    <string name="crash_screen_description_report">%s столкнулось с непредвиденной ошибкой. Сохраните журнал сбоев и приложите его к баг-репорту.</string>
     <string name="unknown_title">Неизвестное название</string>
     <string name="invalid_location">Недопустимое расположение: %s</string>
     <string name="error_user_agent_string_invalid">Недопустимый параметр user agent</string>
@@ -732,7 +703,6 @@
     <string name="library_sync_complete">Синхронизация библиотеки завершена</string>
     <string name="syncing_library">Синхронизация библиотеки</string>
     <string name="information_cloudflare_help">Нажмите здесь, чтобы получить помощь с Cloudflare</string>
-    <string name="information_cloudflare_notice">Защита Cloudflare может мешать загрузке в WebView.</string>
     <string name="download_cache_invalidated">Пересоздаётся индекс загрузок</string>
     <string name="create_backup_file_error">Не удалось создать файл резервной копии</string>
     <string name="track_activity_name">Вход в сервис отслеживания</string>
@@ -913,7 +883,6 @@
     <string name="migrationListScreen.migrateDialog.cancelLabel">Отменить</string>
     <string name="pref_hide_missing_chapter_indicators">Скрывать индикаторы отсутствующих глав</string>
     <string name="pref_display_images_description">Отрисововать изображения в описаниях серий</string>
-    <string name="label_donate">Спонсорство</string>
     <string name="pref_disallow_non_ascii_filenames">Не позволять наименования файлов в виде non-ASCII</string>
     <string name="pref_disallow_non_ascii_filenames_details">Обеспечивает совместимость с некоторыми носителями информации, которые не поддерживают Unicode. Когда этот функция включена, вам нужно будет вручную переименовать папки серий и источников, заменив non-ASCII символы на шестнадцатеричные UTF-8 в нижнем регистре. Файлы глав можно не переименовать.</string>
     <string name="pref_download_concurrent_sources">Параллельные загрузки с источников</string>
@@ -953,4 +922,6 @@
     <string name="theme_tokyonight">Токийская Ночь</string>
     <string name="pref_library_update_retry_rate_limit">Повторять обновления при ограничении запросов</string>
     <string name="pref_library_update_retry_rate_limit_summary">При ошибке HTTP 429 подождать 5–15 секунд и повторить один раз, а после обновления библиотеки ещё раз пройти оставшиеся записи с той же логикой</string>
+    <string name="pref_filter_update_categories_details">Обновления в исключённых категориях не будут показываться, даже если они находятся во включённых категориях.</string>
+    <string name="pref_filter_upcoming_categories_details">Серии в исключённых категориях не будут показываться, даже если находятся в любых включённых категориях.</string>
 </resources>

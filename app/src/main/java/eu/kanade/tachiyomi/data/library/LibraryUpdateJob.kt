@@ -37,6 +37,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import logcat.LogPriority
 import mihon.domain.chapter.interactor.FilterChaptersForDownload
 import mihon.domain.source.interactor.UpdateMangaFromRemote
@@ -66,8 +68,6 @@ import tachiyomi.i18n.MR
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.File
-import java.time.Instant
-import java.time.ZonedDateTime
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.atomics.AtomicBoolean
@@ -75,6 +75,7 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.random.Random
+import kotlin.time.Clock
 
 @OptIn(ExperimentalAtomicApi::class)
 class LibraryUpdateJob(private val context: Context, workerParams: WorkerParameters) :
@@ -111,7 +112,7 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
 
         setForegroundSafely()
 
-        libraryPreferences.lastUpdatedTimestamp.set(Instant.now().toEpochMilli())
+        libraryPreferences.lastUpdatedTimestamp.set(Clock.System.now().toEpochMilliseconds())
 
         val categoryId = inputData.getLong(KEY_CATEGORY, -1L)
         addMangaToQueue(categoryId)
@@ -170,7 +171,11 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
 
         val restrictions = libraryPreferences.autoUpdateMangaRestrictions.get()
         val skippedUpdates = mutableListOf<Pair<Manga, String?>>()
-        val (_, fetchWindowUpperBound) = fetchInterval.getWindow(ZonedDateTime.now())
+        val timeZone = TimeZone.currentSystemDefault()
+        val (_, fetchWindowUpperBound) = fetchInterval.getWindow(
+            Clock.System.now().toLocalDateTime(timeZone).date,
+            timeZone,
+        )
 
         mangaToUpdate = listToUpdate
             .filter {
@@ -238,7 +243,8 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
         val failedUpdates = CopyOnWriteArrayList<Pair<Manga, String?>>()
         val rateLimitedUpdates = CopyOnWriteArrayList<LibraryManga>()
         val hasDownloads = AtomicBoolean(false)
-        val fetchWindow = fetchInterval.getWindow(ZonedDateTime.now())
+        val timeZone = TimeZone.currentSystemDefault()
+        val fetchWindow = fetchInterval.getWindow(Clock.System.now().toLocalDateTime(timeZone).date, timeZone)
         val retryRateLimitedUpdates = libraryPreferences.retryLibraryUpdateOnRateLimit.get()
 
         suspend fun updateLibraryManga(
