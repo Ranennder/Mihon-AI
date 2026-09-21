@@ -5,27 +5,35 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import eu.kanade.domain.base.BasePreferences
+import eu.kanade.domain.base.ExtensionInstallerPreference
 import eu.kanade.tachiyomi.extension.installer.Installer
 import eu.kanade.tachiyomi.extension.model.Extension
 import eu.kanade.tachiyomi.extension.model.InstallStep
 import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.storage.getUriCompat
 import eu.kanade.tachiyomi.util.system.isPackageInstalled
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import logcat.LogPriority
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import tachiyomi.core.common.util.system.logcat
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * The installer which installs, updates and uninstalls the extensions.
@@ -34,14 +42,16 @@ import java.io.File
  */
 internal class ExtensionInstaller(
     private val context: Context,
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    private val httpClient: OkHttpClient = Injekt.get<NetworkHelper>().client,
+    private val extensionInstaller: ExtensionInstallerPreference = Injekt.get<BasePreferences>().extensionInstaller,
 ) {
 
-    private val scope = CoroutineScope(Dispatchers.IO)
-    private val activeJobs = mutableMapOf<String, Job>()
-    private val activeSteps = mutableMapOf<Long, MutableStateFlow<InstallStep>>()
-    private val extensionInstaller = Injekt.get<BasePreferences>().extensionInstaller
-
-    private val httpClient: OkHttpClient = Injekt.get<NetworkHelper>().client
+    private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val activeSteps = ConcurrentHashMap<Long, MutableStateFlow<InstallStep>>()
+    private val activeDownloadIds = ConcurrentHashMap<String, Long>()
+    private val activeCalls = ConcurrentHashMap<Long, Call>()
+    private val downloadIds = AtomicLong()
 
     /**
      * Adds the given extension to the downloads queue and returns an observable containing its
@@ -51,51 +61,68 @@ internal class ExtensionInstaller(
      * @param extension The extension to install.
      * @param isUpdateForPrivatelyInstalled If this is an update for a privately installed extension
      */
+    @Synchronized
     fun downloadAndInstall(
         url: String,
         extension: Extension,
         isUpdateForPrivatelyInstalled: Boolean = false,
     ): Flow<InstallStep> {
-        val downloadId = extension.pkgName.hashCode().toLong()
         cancelInstall(extension.pkgName)
+        val downloadId = downloadIds.incrementAndGet()
 
         val step = MutableStateFlow(InstallStep.Pending)
         activeSteps[downloadId] = step
+        activeDownloadIds[extension.pkgName] = downloadId
 
-        val job = scope.launch {
-            val tmpFile = File(context.cacheDir, "extension_${extension.pkgName}.apk")
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val tmpFile = File(context.cacheDir, "extension_${extension.pkgName}_$downloadId.apk")
+            var handedToInstaller = false
             try {
                 step.value = InstallStep.Downloading
                 val request = Request.Builder().url(url).build()
-                val response = httpClient.newCall(request).execute()
-
-                if (!response.isSuccessful) {
-                    throw Exception("Failed to download extension")
-                }
-                response.body.byteStream().use { input ->
-                    tmpFile.outputStream().use { output ->
-                        input.copyTo(output)
+                val call = httpClient.newCall(request)
+                activeCalls[downloadId] = call
+                ensureActive()
+                call.awaitSuccess().use { response ->
+                    response.body.byteStream().use { input ->
+                        tmpFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
                     }
                 }
 
-                step.value = InstallStep.Installing
-                installApk(downloadId, tmpFile, isUpdateForPrivatelyInstalled)
-            } catch (e: Exception) {
-                if (e is InterruptedException) {
-                    // Canceled
-                } else {
-                    logcat(LogPriority.ERROR, e)
-                    step.value = InstallStep.Error
+                synchronized(this@ExtensionInstaller) {
+                    ensureActive()
+                    step.value = InstallStep.Installing
+                    installApk(downloadId, tmpFile, isUpdateForPrivatelyInstalled)
+                    handedToInstaller = true
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ensureActive()
+                logcat(LogPriority.ERROR, e)
+                step.value = InstallStep.Error
+            } finally {
+                activeCalls.remove(downloadId)?.cancel()
+                if (!handedToInstaller) tmpFile.delete()
             }
         }
 
         activeJobs[extension.pkgName] = job
+        job.start()
 
         return step.asStateFlow()
             .onCompletion {
-                activeJobs.remove(extension.pkgName)
+                synchronized(this@ExtensionInstaller) {
+                    activeJobs.remove(extension.pkgName, job)
+                    activeDownloadIds.remove(extension.pkgName, downloadId)
+                    if (!step.value.isCompleted()) {
+                        Installer.cancelInstallQueue(context, downloadId)
+                    }
+                }
                 activeSteps.remove(downloadId)
+                activeCalls.remove(downloadId)?.cancel()
                 job.cancel()
             }
     }
@@ -156,9 +183,13 @@ internal class ExtensionInstaller(
     /**
      * Cancels extension install and remove from download manager and installer.
      */
+    @Synchronized
     fun cancelInstall(pkgName: String) {
         activeJobs.remove(pkgName)?.cancel()
-        Installer.cancelInstallQueue(context, pkgName.hashCode().toLong())
+        val downloadId = activeDownloadIds.remove(pkgName) ?: return
+        activeCalls.remove(downloadId)?.cancel()
+        activeSteps.remove(downloadId)?.value = InstallStep.Idle
+        Installer.cancelInstallQueue(context, downloadId)
     }
 
     /**

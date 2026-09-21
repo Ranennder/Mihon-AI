@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import filecmp
 import json
 import itertools
 import ipaddress
@@ -77,6 +78,7 @@ CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
 CHAPTER_STREAM_POLL_SECONDS = 0.2
 CHAPTER_STREAM_HEARTBEAT_SECONDS = 15.0
+INTERNET_TUNNEL_START_TIMEOUT_SECONDS = 45.0
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/Ranennder/Mihon-AI/releases/latest"
 COMPANION_RELEASE_ASSET_SUFFIX = "-windows.exe"
 AUTO_UPDATE_CONNECT_TIMEOUT_SECONDS = 8
@@ -316,6 +318,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         self.public_url: str | None = None
         self.tunnel_process: subprocess.Popen[str] | None = None
         self.tunnel_lock = threading.Lock()
+        self.tunnel_state_changed = threading.Event()
+        self.tunnel_error: str | None = None
         self._workspace_root_owner = tempfile.TemporaryDirectory(prefix="mihon-ai-server-")
         self._workspace_root = Path(self._workspace_root_owner.name)
         self._chapter_jobs_root = self._workspace_root / "chapter-jobs"
@@ -551,8 +555,11 @@ class ReaderAiServer(ThreadingHTTPServer):
                 headers = {
                     str(key): str(value)
                     for key, value in raw_headers.items()
-                    if str(key).lower() not in {"host", "content-length"}
+                    if str(key).lower() not in {"host", "content-length", "accept-encoding"}
                 }
+                # urllib does not decode gzip/Brotli like the phone's HTTP client.
+                # Keep source/session headers, but request the original image bytes.
+                headers["Accept-Encoding"] = "identity"
                 request = UrlRequest(page_url, headers=headers, method="GET")
                 _emit_log_line(
                     f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
@@ -563,6 +570,8 @@ class ReaderAiServer(ThreadingHTTPServer):
                 with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response:
                     total = max(0, int(response.headers.get("Content-Length") or "0"))
                     while True:
+                        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                            raise RuntimeError("Chapter upscale was canceled")
                         chunk = response.read(64 * 1024)
                         if not chunk:
                             break
@@ -591,7 +600,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         except Exception as exc:  # noqa: BLE001
             job.error = exc
             job.completed.set()
-            self.log_message("[%s] Direct chapter job error: %s", job.request_id, exc)
+            _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] Direct chapter job error: {exc}")
 
     def get_chapter_page_progress(self, job_id: str, page_index: int) -> tuple[str, int | None]:
         with self._chapter_jobs_lock:
@@ -647,6 +656,18 @@ class ReaderAiServer(ThreadingHTTPServer):
                 if ((job.chapter_title or "").strip() or None) != normalized_chapter_title:
                     continue
                 if job.total_pages != page_count:
+                    continue
+                if job.pages.keys() != pages.keys():
+                    continue
+                # Individual asynchronous uploads can have the same chapter title,
+                # scope and page count but contain entirely different images.
+                # Direct jobs still downloading have placeholder files and must not
+                # be mistaken for an uploaded chapter with the same metadata.
+                if not all(
+                    job.pages[index].input_path.is_file()
+                    and filecmp.cmp(page.input_path, job.pages[index].input_path, shallow=False)
+                    for index, page in pages.items()
+                ):
                     continue
                 return job
 
@@ -1351,18 +1372,20 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.FORBIDDEN, "Internet pairing is available only on the local network")
             return
         _start_quick_tunnel(self.server)
-        for _ in range(150):
-            if self.server.public_url:
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "internet_url": self.server.public_url,
-                        "pairing_token": self.server.config.token.strip() or self.server.pairing_token,
-                    },
-                )
-                return
-            time.sleep(0.1)
-        self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, "Internet tunnel did not become ready")
+        self.server.tunnel_state_changed.wait(INTERNET_TUNNEL_START_TIMEOUT_SECONDS)
+        with self.server.tunnel_lock:
+            public_url = self.server.public_url
+            error = self.server.tunnel_error
+        if public_url:
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "internet_url": public_url,
+                    "pairing_token": self.server.config.token.strip() or self.server.pairing_token,
+                },
+            )
+            return
+        self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, error or "Internet tunnel did not become ready")
 
     def _is_local_request(self) -> bool:
         if self.headers.get("CF-Connecting-IP"):
@@ -3529,32 +3552,75 @@ def _start_quick_tunnel(server: ReaderAiServer) -> None:
         if server.tunnel_process is not None and server.tunnel_process.poll() is None:
             return
         server.public_url = None
-    executable_names = ("cloudflared.exe", "mihon-cloudflared.exe") if os.name == "nt" else ("cloudflared",)
-    cloudflared = next(
-        (candidate for name in executable_names if (candidate := _bundled_root() / name).is_file()),
-        None,
-    )
-    if cloudflared is None:
-        _emit_log_line("Internet access unavailable: bundled cloudflared was not found")
-        return
-    process = subprocess.Popen(
-        [str(cloudflared), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{server.config.port}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    server.tunnel_process = process
+        server.tunnel_error = None
+        server.tunnel_state_changed.clear()
+        executable_names = ("cloudflared.exe", "mihon-cloudflared.exe") if os.name == "nt" else ("cloudflared",)
+        cloudflared = next(
+            (
+                candidate
+                for root in (_bundled_root(), _app_root())
+                for name in executable_names
+                if (candidate := root / name).is_file()
+            ),
+            None,
+        )
+        if cloudflared is None:
+            cloudflared = next((path for name in executable_names if (path := shutil.which(name))), None)
+        if cloudflared is None:
+            server.tunnel_error = "Internet access unavailable: cloudflared was not found"
+            server.tunnel_state_changed.set()
+            _emit_log_line(server.tunnel_error)
+            return
+        try:
+            # Quick tunnels default to QUIC, which fails on networks blocking UDP.
+            # Explicit HTTP/2 uses TCP without waiting for QUIC retries.
+            process = subprocess.Popen(
+                [
+                    str(cloudflared), "tunnel", "--no-autoupdate", "--protocol", "http2",
+                    "--url", f"http://127.0.0.1:{server.server_port}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            server.tunnel_error = f"Internet tunnel could not start: {exc}"
+            server.tunnel_state_changed.set()
+            _emit_log_line(server.tunnel_error)
+            return
+        server.tunnel_process = process
 
     def read_output() -> None:
-        if process.stdout is None:
-            return
-        for line in process.stdout:
-            match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
-            if match and server.public_url is None:
-                server.public_url = match.group(0)
-                _emit_log_line(f"Internet access ready: {server.public_url}")
+        candidate_url: str | None = None
+        connected = False
+        last_error: str | None = None
+        try:
+            for line in process.stdout or ():
+                _emit_log_line(f"[cloudflared] {line.rstrip()}", console=False)
+                if re.search(r"\bERR\b", line):
+                    last_error = line.strip()
+                match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
+                if match:
+                    candidate_url = match.group(0)
+                if "Registered tunnel connection" in line:
+                    connected = True
+                with server.tunnel_lock:
+                    if server.tunnel_process is not process:
+                        return
+                    # The URL banner is printed before a connection exists.
+                    if candidate_url and connected and server.public_url is None:
+                        server.public_url = candidate_url
+                        server.tunnel_state_changed.set()
+                        _emit_log_line(f"Internet access ready: {server.public_url}")
+        finally:
+            with server.tunnel_lock:
+                if server.tunnel_process is process:
+                    server.public_url = None
+                    server.tunnel_error = last_error or "Internet tunnel stopped"
+                    server.tunnel_state_changed.set()
+                    _emit_log_line(server.tunnel_error)
 
     threading.Thread(target=read_output, name="mihon-ai-tunnel", daemon=True).start()
 

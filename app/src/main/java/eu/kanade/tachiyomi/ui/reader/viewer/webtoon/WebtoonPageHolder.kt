@@ -20,6 +20,7 @@ import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderProgressIndicator
 import eu.kanade.tachiyomi.ui.webview.WebViewActivity
 import eu.kanade.tachiyomi.util.system.dpToPx
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -27,7 +28,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import logcat.LogPriority
-import okio.Buffer
 import okio.BufferedSource
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
@@ -88,6 +88,7 @@ class WebtoonPageHolder(
     private var cacheWatchJob: Job? = null
     private var aiProgressJob: Job? = null
     private var forceBlockingReload = false
+    private var forceUpscaleReload = false
     private var keepCurrentImageUntilReady = false
 
     init {
@@ -115,8 +116,10 @@ class WebtoonPageHolder(
     fun reloadImage(
         forceBlocking: Boolean,
         seamless: Boolean = false,
+        retryUpscale: Boolean = false,
     ) {
         forceBlockingReload = forceBlocking
+        forceUpscaleReload = retryUpscale
         keepCurrentImageUntilReady = seamless
         loadJob?.cancel()
         cacheWatchJob?.cancel()
@@ -232,23 +235,22 @@ class WebtoonPageHolder(
         val page = page ?: return
         val blockingReload = forceBlockingReload
         forceBlockingReload = false
+        val retryUpscale = forceUpscaleReload
+        forceUpscaleReload = false
         val seamlessReload = keepCurrentImageUntilReady
         keepCurrentImageUntilReady = false
         val requireUpscaledImage = pageUpscaler.isEnabled()
         if (requireUpscaledImage) startAiProgress(page)
         val cacheAvailableBeforeLoad = pageUpscaler.hasCachedPage(page)
 
-        val streamFn = page.stream ?: return
-
         try {
             val (source, isAnimated) = withIOContext {
-                val originalSource = streamFn().use { Buffer().readFrom(it) }
                 val upscaledSource = pageUpscaler.processPage(
                     page = page,
-                    source = originalSource,
                     allowBlocking = blockingReload || requireUpscaledImage,
                     schedulePrefetchOnMiss = !(blockingReload || requireUpscaledImage),
                     fallbackToSourceOnFailure = !requireUpscaledImage,
+                    forceReload = retryUpscale,
                 )
                 val source = process(upscaledSource)
                 val isAnimated = ImageUtil.isAnimatedAndSupported(source)
@@ -276,6 +278,7 @@ class WebtoonPageHolder(
                 }
             }
         } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             if (e !is ReaderPageUpscaler.WholeChapterPagePendingException) {
                 logcat(LogPriority.ERROR, e)
             }
@@ -370,6 +373,16 @@ class WebtoonPageHolder(
                     reloadImage(forceBlocking = false, seamless = true)
                     return@launch
                 }
+                if (pageUpscaler.progress(expectedPage).value.stage == ReaderPageUpscaler.UpscaleStage.FAILED) {
+                    stopAiProgress()
+                    setError(
+                        IllegalStateException(
+                            pageUpscaler.consumeLastFailureMessage()
+                                ?: context.stringResource(MR.strings.reader_ai_failed),
+                        ),
+                    )
+                    return@launch
+                }
                 delay(500)
             }
         }
@@ -441,7 +454,14 @@ class WebtoonPageHolder(
             errorLayout = ReaderErrorBinding.inflate(LayoutInflater.from(context), frame, true)
             errorLayout?.root?.layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, (parentHeight * 0.8).toInt())
             errorLayout?.actionRetry?.setOnClickListener {
-                page?.let { it.chapter.pageLoader?.retryPage(it) }
+                page?.let {
+                    if (it.status == Page.State.Ready && pageUpscaler.isEnabled()) {
+                        reloadImage(forceBlocking = true, retryUpscale = true)
+                    } else {
+                        it.chapter.pageLoader?.retryPage(it)
+                        reloadImage(forceBlocking = false)
+                    }
+                }
             }
         }
 

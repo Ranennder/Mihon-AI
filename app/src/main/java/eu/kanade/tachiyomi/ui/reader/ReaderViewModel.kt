@@ -1350,6 +1350,7 @@ class ReaderViewModel @JvmOverloads constructor(
         // Copy file in background.
         viewModelScope.launchNonCancellable {
             try {
+                page.prepareStream?.invoke()
                 val uri = imageSaver.save(
                     image = Image.Page(
                         inputStream = page.stream!!,
@@ -1385,9 +1386,10 @@ class ReaderViewModel @JvmOverloads constructor(
 
         val filename = generateFilename(manga, page)
 
-        try {
-            viewModelScope.launchNonCancellable {
+        viewModelScope.launchNonCancellable {
+            try {
                 destDir.deleteRecursively()
+                page.prepareStream?.invoke()
                 val uri = imageSaver.save(
                     image = Image.Page(
                         inputStream = page.stream!!,
@@ -1396,9 +1398,9 @@ class ReaderViewModel @JvmOverloads constructor(
                     ),
                 )
                 eventChannel.send(if (copyToClipboard) Event.CopyImage(uri) else Event.ShareImage(uri, page))
+            } catch (e: Throwable) {
+                logcat(LogPriority.ERROR, e)
             }
-        } catch (e: Throwable) {
-            logcat(LogPriority.ERROR, e)
         }
     }
 
@@ -1409,11 +1411,9 @@ class ReaderViewModel @JvmOverloads constructor(
         val page = (state.value.dialog as? Dialog.PageActions)?.page
         if (page?.status != Page.State.Ready) return
         val manga = manga ?: return
-        val stream = page.stream ?: return
-
         viewModelScope.launchNonCancellable {
             val result = try {
-                manga.editCover(Injekt.get(), stream())
+                manga.editCover(Injekt.get(), page.openStream())
                 if (manga.isLocal() || manga.favorite) {
                     SetAsCoverResult.Success
                 } else {

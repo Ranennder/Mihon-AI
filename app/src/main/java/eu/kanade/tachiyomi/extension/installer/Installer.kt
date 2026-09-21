@@ -28,7 +28,8 @@ abstract class Installer(private val service: Service) {
 
     private val cancelReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1).takeIf { it >= 0 } ?: return
+            if (!intent.hasExtra(EXTRA_DOWNLOAD_ID)) return
+            val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1)
             cancelQueue(downloadId)
         }
     }
@@ -98,6 +99,9 @@ abstract class Installer(private val service: Service) {
         if (!ready) {
             return
         }
+        if (waitingInstall.load() != null) {
+            return
+        }
         if (queue.isEmpty()) {
             service.stopSelf()
             return
@@ -117,7 +121,9 @@ abstract class Installer(private val service: Service) {
         LocalBroadcastManager.getInstance(service).unregisterReceiver(cancelReceiver)
         queue.forEach { extensionManager.updateInstallStep(it.downloadId, InstallStep.Error) }
         queue.clear()
-        waitingInstall.store(null)
+        waitingInstall.exchange(null)?.let {
+            extensionManager.updateInstallStep(it.downloadId, InstallStep.Error)
+        }
     }
 
     protected fun getActiveEntry(): Entry? = waitingInstall.load()
@@ -129,7 +135,9 @@ abstract class Installer(private val service: Service) {
      */
     private fun cancelQueue(downloadId: Long) {
         val waitingInstall = this.waitingInstall.load()
-        val toCancel = queue.find { it.downloadId == downloadId } ?: waitingInstall ?: return
+        val toCancel = queue.find { it.downloadId == downloadId }
+            ?: waitingInstall?.takeIf { it.downloadId == downloadId }
+            ?: return
         if (cancelEntry(toCancel)) {
             queue.remove(toCancel)
             if (waitingInstall == toCancel) {

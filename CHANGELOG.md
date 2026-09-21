@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.23
+
+- Fix switching from a saved LAN companion to internet access, and show pairing progress or errors in AI settings.
+- Wait for an established Cloudflare connection and use HTTP/2 for networks that block QUIC.
+- Use asynchronous jobs for single-page HTTPS uploads so GPU processing does not hold a proxy request open.
+- Defer original image downloads on the phone in direct companion mode, preserve source cookies, and enable direct downloads in every batch mode.
+- Make AI image retry invalidate the cached result and protect the retry from stale chapter responses.
+- Resolve duplicate extension versions consistently, refresh installed versions after updates, and fix installation cancellation races.
+- Fall back to phone uploads for remaining pages when an accepted direct chapter download fails, and prevent different page uploads from reusing the same companion job.
+- Fetch complete Git history in Android CI builds so the APK version code increases between releases.
+
 ## v0.1.22
 
 - Use direct website-to-PC downloads for single-page remote upscaling instead of preparing and uploading the image on the phone.

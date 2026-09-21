@@ -13,4 +13,10 @@ open class ReaderPage(
 
     open lateinit var chapter: ReaderChapter
     var remoteImageRequest: (suspend () -> Request?)? = null
+    var prepareStream: (suspend () -> Unit)? = null
+
+    suspend fun openStream(): InputStream {
+        prepareStream?.invoke()
+        return checkNotNull(stream) { "Page source is unavailable" }.invoke()
+    }
 }

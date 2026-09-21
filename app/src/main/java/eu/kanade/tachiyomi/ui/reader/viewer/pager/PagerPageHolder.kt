@@ -17,6 +17,7 @@ import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderProgressIndicator
 import eu.kanade.tachiyomi.ui.webview.WebViewActivity
 import eu.kanade.tachiyomi.widget.ViewPagerAdapter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -24,7 +25,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import logcat.LogPriority
-import okio.Buffer
 import okio.BufferedSource
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
@@ -73,6 +73,7 @@ class PagerPageHolder(
     private var cacheWatchJob: Job? = null
     private var aiProgressJob: Job? = null
     private var forceBlockingReload = false
+    private var forceUpscaleReload = false
     private var keepCurrentImageUntilReady = false
 
     init {
@@ -96,8 +97,10 @@ class PagerPageHolder(
     fun reloadImage(
         forceBlocking: Boolean,
         seamless: Boolean = false,
+        retryUpscale: Boolean = false,
     ) {
         forceBlockingReload = forceBlocking
+        forceUpscaleReload = retryUpscale
         keepCurrentImageUntilReady = seamless
         loadJob?.cancel()
         cacheWatchJob?.cancel()
@@ -202,23 +205,22 @@ class PagerPageHolder(
 
         val blockingReload = forceBlockingReload
         forceBlockingReload = false
+        val retryUpscale = forceUpscaleReload
+        forceUpscaleReload = false
         val seamlessReload = keepCurrentImageUntilReady
         keepCurrentImageUntilReady = false
         val requireUpscaledImage = pageUpscaler.isEnabled()
         if (requireUpscaledImage) startAiProgress()
         val cacheAvailableBeforeLoad = pageUpscaler.hasCachedPage(page)
 
-        val streamFn = page.stream ?: return
-
         try {
             val (source, isAnimated, background) = withIOContext {
-                val originalSource = streamFn().use { Buffer().readFrom(it) }
                 val upscaledSource = pageUpscaler.processPage(
                     page = page,
-                    source = originalSource,
                     allowBlocking = blockingReload || requireUpscaledImage,
                     schedulePrefetchOnMiss = !(blockingReload || requireUpscaledImage),
                     fallbackToSourceOnFailure = !requireUpscaledImage,
+                    forceReload = retryUpscale,
                 )
                 val source = process(item, upscaledSource)
                 val isAnimated = ImageUtil.isAnimatedAndSupported(source)
@@ -258,6 +260,7 @@ class PagerPageHolder(
                 }
             }
         } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             if (e !is ReaderPageUpscaler.WholeChapterPagePendingException) {
                 logcat(LogPriority.ERROR, e)
             }
@@ -291,6 +294,16 @@ class PagerPageHolder(
                 }
                 if (pageUpscaler.hasCachedPage(page)) {
                     reloadImage(forceBlocking = false, seamless = true)
+                    return@launch
+                }
+                if (pageUpscaler.progress(page).value.stage == ReaderPageUpscaler.UpscaleStage.FAILED) {
+                    stopAiProgress()
+                    setError(
+                        IllegalStateException(
+                            pageUpscaler.consumeLastFailureMessage()
+                                ?: context.stringResource(MR.strings.reader_ai_failed),
+                        ),
+                    )
                     return@launch
                 }
                 delay(500)
@@ -447,7 +460,12 @@ class PagerPageHolder(
             errorLayout = ReaderErrorBinding.inflate(LayoutInflater.from(context), this, true)
             errorLayout?.actionRetry?.viewer = viewer
             errorLayout?.actionRetry?.setOnClickListener {
-                page.chapter.pageLoader?.retryPage(page)
+                if (page.status == Page.State.Ready && pageUpscaler.isEnabled()) {
+                    reloadImage(forceBlocking = true, retryUpscale = true)
+                } else {
+                    page.chapter.pageLoader?.retryPage(page)
+                    reloadImage(forceBlocking = false)
+                }
             }
         }
 

@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.LocalView
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.widget.BasePreferenceWidget
 import eu.kanade.presentation.reader.settings.AiBackendSelector
+import eu.kanade.presentation.reader.settings.rememberRemoteAiInternetStatus
 import eu.kanade.presentation.reader.settings.remoteAiServerStatusText
 import eu.kanade.presentation.reader.settings.remoteAiServerUrlPreferenceSubtitle
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
@@ -85,7 +86,7 @@ object SettingsReaderScreen : SearchableSettings {
         val rawAiBackendMode by readerPreferences.aiBackendMode.collectAsState()
         val remoteAiBaseUrl by readerPreferences.remoteAiBaseUrl.collectAsState()
         val remoteAiDiscoveredBaseUrl by readerPreferences.remoteAiDiscoveredBaseUrl.collectAsState()
-        val remoteAiBatchMode by readerPreferences.remoteAiBatchMode.collectAsState()
+        val internetStatus = rememberRemoteAiInternetStatus(readerPreferences)
         val aiBackendMode = ReaderPreferences.normalizeAiBackendMode(rawAiBackendMode)
         val remoteAiStatus = remoteAiServerStatusText(
             manualUrl = remoteAiBaseUrl,
@@ -177,14 +178,12 @@ object SettingsReaderScreen : SearchableSettings {
                     preference = readerPreferences.remoteAiDirectDownload,
                     title = stringResource(MR.strings.pref_reader_ai_remote_direct_download),
                     subtitle = stringResource(MR.strings.pref_reader_ai_remote_direct_download_summary),
-                    enabled = upscaleEnabled &&
-                        aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE &&
-                        remoteAiBatchMode.shouldQueueWholeChapter,
+                    enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.remoteAiInternetAccess,
                     title = stringResource(MR.strings.pref_reader_ai_internet_access),
-                    subtitle = stringResource(MR.strings.pref_reader_ai_internet_access_summary),
+                    subtitle = internetStatus ?: stringResource(MR.strings.pref_reader_ai_internet_access_summary),
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
                 ),
                 Preference.PreferenceItem.EditTextPreference(

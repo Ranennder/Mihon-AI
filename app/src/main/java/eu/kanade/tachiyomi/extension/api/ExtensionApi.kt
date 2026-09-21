@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.api
 import android.content.Context
 import eu.kanade.tachiyomi.extension.model.Extension
 import eu.kanade.tachiyomi.extension.model.LoadResult
+import eu.kanade.tachiyomi.extension.model.withLatestVersions
 import eu.kanade.tachiyomi.extension.util.ExtensionLoader
 import mihon.domain.extension.interactor.UpdateExtensionStores
 import mihon.domain.extension.repository.ExtensionStoreRepository
@@ -16,7 +17,7 @@ internal class ExtensionApi {
     private val updateExtensionStores: UpdateExtensionStores by injectLazy()
 
     suspend fun findExtensions(): List<Extension.Available> {
-        return withIOContext { repository.fetchExtensions() }
+        return withIOContext { repository.fetchExtensions().withLatestVersions() }
     }
 
     suspend fun checkForUpdates(context: Context) {

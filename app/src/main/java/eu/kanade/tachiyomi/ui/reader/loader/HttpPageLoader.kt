@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
+import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withIOContext
 import uy.kohesive.injekt.Injekt
@@ -32,6 +35,7 @@ internal class HttpPageLoader(
     private val chapter: ReaderChapter,
     private val source: HttpSource,
     private val chapterCache: ChapterCache = Injekt.get(),
+    private val readerPreferences: ReaderPreferences = Injekt.get(),
 ) : PageLoader() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -78,6 +82,19 @@ internal class HttpPageLoader(
         return pages.mapIndexed { index, page ->
             // Don't trust sources and use our own indexing
             ReaderPage(index, page.url, page.imageUrl).also { readerPage ->
+                val sourceLock = Mutex()
+                readerPage.prepareStream = {
+                    sourceLock.withLock {
+                        if (readerPage.imageUrl.isNullOrEmpty()) {
+                            readerPage.imageUrl = source.getImageUrl(readerPage)
+                        }
+                        val imageUrl = checkNotNull(readerPage.imageUrl)
+                        if (!chapterCache.isImageInCache(imageUrl)) {
+                            chapterCache.putImageToCache(imageUrl, source.getImage(readerPage))
+                        }
+                        readerPage.stream = { chapterCache.getImageFile(imageUrl).inputStream() }
+                    }
+                }
                 readerPage.remoteImageRequest = {
                     if (readerPage.imageUrl.isNullOrEmpty()) {
                         readerPage.imageUrl = source.getImageUrl(readerPage)
@@ -95,7 +112,9 @@ internal class HttpPageLoader(
         val imageUrl = page.imageUrl
 
         // Check if the image has been deleted
-        if (page.status == Page.State.Ready && imageUrl != null && !chapterCache.isImageInCache(imageUrl)) {
+        if (page.status == Page.State.Ready && imageUrl != null &&
+            !shouldDeferSourceDownload() && !chapterCache.isImageInCache(imageUrl)
+        ) {
             page.status = Page.State.Queue
         }
 
@@ -125,7 +144,7 @@ internal class HttpPageLoader(
      * Retries a page. This method is only called from user interaction on the viewer.
      */
     override fun retryPage(page: ReaderPage) {
-        if (page.status is Page.State.Error) {
+        if (page.status == Page.State.Ready || page.status is Page.State.Error) {
             page.status = Page.State.Queue
         }
         queue.offer(PriorityPage(page, PriorityPage.RETRY))
@@ -134,7 +153,9 @@ internal class HttpPageLoader(
     override fun queuePages(pages: List<ReaderPage>) {
         pages.forEach { page ->
             val imageUrl = page.imageUrl
-            if (page.status == Page.State.Ready && imageUrl != null && !chapterCache.isImageInCache(imageUrl)) {
+            if (page.status == Page.State.Ready && imageUrl != null &&
+                !shouldDeferSourceDownload() && !chapterCache.isImageInCache(imageUrl)
+            ) {
                 page.status = Page.State.Queue
             }
             if (page.status is Page.State.Error) {
@@ -202,7 +223,7 @@ internal class HttpPageLoader(
             }
             val imageUrl = page.imageUrl!!
 
-            if (force || !chapterCache.isImageInCache(imageUrl)) {
+            if (force || (!shouldDeferSourceDownload() && !chapterCache.isImageInCache(imageUrl))) {
                 page.status = Page.State.DownloadImage
                 val imageResponse = source.getImage(page)
                 chapterCache.putImageToCache(imageUrl, imageResponse)
@@ -217,6 +238,10 @@ internal class HttpPageLoader(
             }
         }
     }
+
+    private fun shouldDeferSourceDownload(): Boolean = readerPreferences.upscalePagesX2.get() &&
+        readerPreferences.selectedAiBackendMode() == ReaderPreferences.AiBackendMode.REMOTE &&
+        readerPreferences.remoteAiDirectDownload.get()
 }
 
 /**

@@ -22,7 +22,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import logcat.LogPriority
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
@@ -191,31 +193,16 @@ class ExtensionManager(
             return
         }
 
-        val installedExtensionsMap = installedExtensionMapFlow.value.toMutableMap()
-        var changed = false
-        for ((pkgName, extension) in installedExtensionsMap) {
-            val availableExt = availableExtensions.find { it.pkgName == pkgName }
-
-            if (availableExt == null && !extension.isObsolete) {
-                installedExtensionsMap[pkgName] = extension.copy(isObsolete = true)
-                changed = true
-            } else if (availableExt != null) {
-                val hasUpdate = extension.updateExists(availableExt)
-                if (extension.hasUpdate != hasUpdate) {
-                    installedExtensionsMap[pkgName] = extension.copy(
-                        hasUpdate = hasUpdate,
-                        store = availableExt.store,
-                    )
-                } else {
-                    installedExtensionsMap[pkgName] = extension.copy(
-                        store = availableExt.store,
-                    )
-                }
-                changed = true
+        val availableByPackage = availableExtensions.associateBy { it.pkgName }
+        installedExtensionMapFlow.update { installedExtensions ->
+            installedExtensions.mapValues { (pkgName, extension) ->
+                val availableExt = availableByPackage[pkgName]
+                extension.copy(
+                    hasUpdate = availableExt != null && extension.updateExists(availableExt),
+                    isObsolete = availableExt == null,
+                    store = availableExt?.store,
+                )
             }
-        }
-        if (changed) {
-            installedExtensionMapFlow.value = installedExtensionsMap
         }
         updatePendingUpdatesCount()
     }
@@ -242,6 +229,21 @@ class ExtensionManager(
         val availableExt = availableExtensionMapFlow.value[extension.pkgName] ?: return emptyFlow()
         val isUpdateForPrivatelyInstalled = !extension.isShared
         return installer.downloadAndInstall(availableExt.apkUrl, availableExt, isUpdateForPrivatelyInstalled)
+            .onEach { step ->
+                if (step == InstallStep.Installed) {
+                    // Reconcile the version before clearing the update indicator, even if the
+                    // package broadcast is delayed or not delivered by the device's installer.
+                    when (val result = ExtensionLoader.loadExtensionFromPkgName(context, extension.pkgName)) {
+                        is LoadResult.Success -> registerUpdatedExtension(result.extension.withUpdateCheck())
+                        is LoadResult.Untrusted -> {
+                            installedExtensionMapFlow.update { it - result.extension.pkgName }
+                            untrustedExtensionMapFlow.update { it + result.extension }
+                        }
+                        else -> Unit
+                    }
+                    updatePendingUpdatesCount()
+                }
+            }
     }
 
     fun cancelInstallUpdateExtension(extension: Extension) {
@@ -281,7 +283,7 @@ class ExtensionManager(
 
         trustExtension.trust(extension.pkgName, extension.versionCode, extension.signatureHash)
 
-        untrustedExtensionMapFlow.value -= extension.pkgName
+        untrustedExtensionMapFlow.update { it - extension.pkgName }
 
         ExtensionLoader.loadExtensionFromPkgName(context, extension.pkgName)
             .let { it as? LoadResult.Success }
@@ -294,7 +296,7 @@ class ExtensionManager(
      * @param extension The extension to be registered.
      */
     private fun registerNewExtension(extension: Extension.Installed) {
-        installedExtensionMapFlow.value += extension
+        installedExtensionMapFlow.update { it + extension }
     }
 
     /**
@@ -304,7 +306,7 @@ class ExtensionManager(
      * @param extension The extension to be registered.
      */
     private fun registerUpdatedExtension(extension: Extension.Installed) {
-        installedExtensionMapFlow.value += extension
+        installedExtensionMapFlow.update { it + extension }
     }
 
     /**
@@ -314,8 +316,8 @@ class ExtensionManager(
      * @param pkgName The package name of the uninstalled application.
      */
     private fun unregisterExtension(pkgName: String) {
-        installedExtensionMapFlow.value -= pkgName
-        untrustedExtensionMapFlow.value -= pkgName
+        installedExtensionMapFlow.update { it - pkgName }
+        untrustedExtensionMapFlow.update { it - pkgName }
     }
 
     /**
@@ -334,8 +336,8 @@ class ExtensionManager(
         }
 
         override fun onExtensionUntrusted(extension: Extension.Untrusted) {
-            installedExtensionMapFlow.value -= extension.pkgName
-            untrustedExtensionMapFlow.value += extension
+            installedExtensionMapFlow.update { it - extension.pkgName }
+            untrustedExtensionMapFlow.update { it + extension }
             updatePendingUpdatesCount()
         }
 
@@ -350,11 +352,12 @@ class ExtensionManager(
      * Extension method to set the update field of an installed extension.
      */
     private fun Extension.Installed.withUpdateCheck(): Extension.Installed {
-        return if (updateExists()) {
-            copy(hasUpdate = true)
-        } else {
-            this
-        }
+        val availableExtension = availableExtensionMapFlow.value[pkgName]
+        return copy(
+            hasUpdate = updateExists(availableExtension),
+            store = availableExtension?.store,
+            isObsolete = availableExtension == null && isObsolete,
+        )
     }
 
     private fun Extension.Installed.updateExists(availableExtension: Extension.Available? = null): Boolean {

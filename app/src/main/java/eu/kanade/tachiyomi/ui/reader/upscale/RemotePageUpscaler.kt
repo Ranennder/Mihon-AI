@@ -201,20 +201,13 @@ class RemotePageUpscaler(
                                 put("url", page.request.url.toString())
                                 put(
                                     "headers",
-                                    JSONObject().apply {
-                                        page.request.headers.forEach { (name, value) ->
-                                            if (!name.equals("Host", true) && !name.equals("Cookie", true)) {
-                                                put(name, value)
-                                            }
-                                        }
-                                        val cookies = networkHelper.cookieJar.loadForRequest(page.request.url)
-                                        if (cookies.isNotEmpty()) {
-                                            put(
-                                                "Cookie",
-                                                cookies.joinToString("; ") { "${it.name}=${it.value}" },
-                                            )
-                                        }
-                                    },
+                                    JSONObject(
+                                        directDownloadHeaders(
+                                            page.request,
+                                            networkHelper.cookieJar.loadForRequest(page.request.url),
+                                            networkHelper.defaultUserAgentProvider(),
+                                        ),
+                                    ),
                                 )
                             },
                         )
@@ -222,7 +215,13 @@ class RemotePageUpscaler(
                 },
             )
         }.toString()
-        return runStartDirectChapterJobRequest(resolution, payload, metadata, scopeId)
+        val attempt = runStartDirectChapterJobRequest(resolution, payload, metadata, scopeId)
+        if (attempt.job != null) return attempt.job
+        if (!resolution.isAutoDiscovered || attempt.failureKind != UpscaleFailureKind.NETWORK) return null
+        discovery.clearCachedBaseUrl()
+        val alternative = discovery.resolveBaseUrl(forceRediscovery = true)
+            ?.takeIf { it.baseUrl != resolution.baseUrl } ?: return null
+        return runStartDirectChapterJobRequest(alternative, payload, metadata, scopeId).job
     }
 
     fun upscaleDirectPage(
@@ -239,13 +238,24 @@ class RemotePageUpscaler(
                 totalPages = 1,
             ),
         ) ?: return null
-        repeat(DIRECT_PAGE_MAX_POLLS) {
+        return awaitSinglePage(job, onProgress)
+    }
+
+    private fun awaitSinglePage(
+        job: StartedChapterJob,
+        onProgress: (ProgressStage, Int) -> Unit,
+    ): ByteArray? {
+        val deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(10)
+        var networkFailures = 0
+        while (System.nanoTime() < deadline) {
+            if (job.workScope != workScope.get()) return null
             when (
                 val result = fetchChapterPage(job, 0) { percent ->
                     onProgress(ProgressStage.DOWNLOADING_TO_PHONE, percent)
                 }
             ) {
                 is ChapterPageFetchResult.Pending -> {
+                    networkFailures = 0
                     val stage = when (result.stage) {
                         "downloading_to_pc" -> ProgressStage.DOWNLOADING_TO_PC
                         else -> ProgressStage.UPSCALING
@@ -256,12 +266,16 @@ class RemotePageUpscaler(
                 is ChapterPageFetchResult.Ready -> return normalizeResponseImage(result.bytes)
                 is ChapterPageFetchResult.Cancelled -> return null
                 is ChapterPageFetchResult.Failed -> {
+                    if (result.retryable && ++networkFailures <= 3) {
+                        Thread.sleep(DIRECT_PAGE_POLL_DELAY_MS)
+                        continue
+                    }
                     lastErrorMessage = result.message
                     return null
                 }
             }
         }
-        lastErrorMessage = "Timed out waiting for direct remote AI page"
+        lastErrorMessage = "Timed out waiting for remote AI page"
         return null
     }
 
@@ -270,8 +284,9 @@ class RemotePageUpscaler(
         payload: String,
         metadata: ChapterJobMetadata?,
         scopeId: Long,
-    ): StartedChapterJob? {
-        val url = "${resolution.baseUrl}/api/upscale-chapter-direct".toHttpUrlOrNull() ?: return null
+    ): ChapterJobAttempt {
+        val url = "${resolution.baseUrl}/api/upscale-chapter-direct".toHttpUrlOrNull()
+            ?: return ChapterJobAttempt.failure(UpscaleFailureKind.CONFIGURATION)
         val builder = Request.Builder().url(url)
             .header("Accept", "application/json")
             .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
@@ -291,15 +306,20 @@ class RemotePageUpscaler(
                 if (!response.isSuccessful) {
                     lastErrorMessage =
                         response.body.string().ifBlank { "Direct chapter request returned HTTP ${response.code}" }
-                    return@use null
+                    return@use ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
                 }
                 val jobId = JSONObject(response.body.string()).optString("job_id").trim()
-                if (jobId.isEmpty()) null else StartedChapterJob(resolution.baseUrl, jobId, clientId, scopeId)
+                if (jobId.isEmpty()) {
+                    lastErrorMessage = "Direct chapter response did not include a job id"
+                    ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
+                } else {
+                    ChapterJobAttempt.success(StartedChapterJob(resolution.baseUrl, jobId, clientId, scopeId))
+                }
             }
         }.onFailure {
             lastErrorMessage = it.message ?: "Direct chapter request failed"
             logcat(LogPriority.WARN, it) { "Failed to start direct remote AI chapter job" }
-        }.getOrNull()
+        }.getOrElse { ChapterJobAttempt.failure(UpscaleFailureKind.NETWORK) }
     }
 
     fun fetchChapterPage(
@@ -705,6 +725,29 @@ class RemotePageUpscaler(
             return UpscaleAttempt.failure(UpscaleFailureKind.CONFIGURATION)
         }
 
+        // Public proxies can close an idle request before a slow GPU finishes. Submit
+        // one page through the asynchronous chapter API and poll for its result.
+        if (requestUrl.isHttps) {
+            val archiveFile = createChapterArchive(
+                listOf(PreparedChapterUploadPage(0, preparedImage.bytes, preparedImage.extension)),
+            )
+            val attempt = try {
+                runStartChapterJobRequest(
+                    baseUrlResolution = RemoteAiServerDiscovery.Resolution(baseUrl, isAutoDiscovered = false),
+                    archiveFile = archiveFile,
+                    pageCount = 1,
+                    metadata = ChapterJobMetadata(pageMetadata?.mangaTitle, pageMetadata?.chapterTitle, 1),
+                    scopeId = scopeId,
+                    onUploadProgress = { onProgress(ProgressStage.UPLOADING_TO_PC, it) },
+                )
+            } finally {
+                archiveFile.delete()
+            }
+            val job = attempt.job ?: return UpscaleAttempt.failure(attempt.failureKind ?: UpscaleFailureKind.SERVER)
+            return awaitSinglePage(job, onProgress)?.let(UpscaleAttempt::success)
+                ?: UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
+        }
+
         val requestBuilder = Request.Builder()
             .url(requestUrl)
             .header("Accept", "image/jpeg, image/png;q=0.9")
@@ -1086,7 +1129,6 @@ class RemotePageUpscaler(
     }
 
     companion object {
-        private const val DIRECT_PAGE_MAX_POLLS = 2_400
         private const val DIRECT_PAGE_POLL_DELAY_MS = 250L
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
         private const val REMOTE_ARCHIVE_FORMAT = "zip"

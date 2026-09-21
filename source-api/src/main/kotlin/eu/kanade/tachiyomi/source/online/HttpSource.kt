@@ -410,7 +410,15 @@ abstract class HttpSource : CatalogueSource {
     }
 
     /** Builds the exact image request for trusted in-app consumers such as Remote AI. */
-    fun mihonAiImageRequest(page: Page): Request = imageRequest(page)
+    fun mihonAiImageRequest(page: Page): Request {
+        val request = imageRequest(page)
+        if (request.header("Cookie") != null) return request
+        val cookies = client.cookieJar.loadForRequest(request.url)
+        if (cookies.isEmpty()) return request
+        return request.newBuilder()
+            .header("Cookie", cookies.joinToString("; ") { "${it.name}=${it.value}" })
+            .build()
+    }
 
     /**
      * Returns the request for getting the source image. Override only if it's needed to override

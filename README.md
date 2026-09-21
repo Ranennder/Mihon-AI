@@ -70,6 +70,8 @@ Notes:
 - The companion listens on port `8765`.
 - Auto-discovery works inside the same LAN.
 - You can still set the server URL manually if you prefer.
+- For use away from home, enable `Internet access (beta)` in AI settings while the phone and PC are on the same Wi-Fi. Wait until the settings show a saved HTTPS address, then switch to mobile data or another network. Repeat pairing after restarting the companion because its temporary address changes.
+- Enable `Companion downloads pages directly` to download originals on the PC in any batch mode. The phone downloads an original only when a source needs the normal upload fallback or you request a source-image action such as saving it.
 
 ### GPU
 

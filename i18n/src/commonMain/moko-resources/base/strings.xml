@@ -552,9 +552,12 @@
     <string name="reader_ai_remote_model_detailed">Detailed</string>
     <string name="pref_reader_ai_remote_batch_mode">Remote batch mode</string>
     <string name="pref_reader_ai_remote_direct_download">Companion downloads pages directly (beta)</string>
-    <string name="pref_reader_ai_remote_direct_download_summary">For whole-chapter modes, sends page URLs and site session data to the companion so images travel site → companion → phone. Unsupported sources fall back to phone upload.</string>
+    <string name="pref_reader_ai_remote_direct_download_summary">Sends page URLs and site session data to the companion so images travel site → companion → phone. Unsupported sources fall back to phone upload.</string>
     <string name="pref_reader_ai_internet_access">Internet access (beta)</string>
     <string name="pref_reader_ai_internet_access_summary">While on the same Wi-Fi, automatically pairs with the companion and saves its temporary HTTPS address for use away from home.</string>
+    <string name="reader_ai_internet_pairing">Connecting to the companion for internet access…</string>
+    <string name="reader_ai_internet_saved">Saved internet address: %1$s. Pair again on the same Wi-Fi after restarting the companion.</string>
+    <string name="reader_ai_internet_pairing_failed">Internet pairing failed: %1$s. Check that the phone and PC are on the same Wi-Fi, then turn internet access off and on to retry.</string>
     <string name="pref_reader_ai_performance_log">Copy AI performance log</string>
     <string name="pref_reader_ai_performance_log_summary">Copies request routes, durations, response codes, and transfer sizes for phone ↔ companion debugging.</string>
     <string name="pref_reader_ai_performance_log_clear">Clear AI performance log</string>

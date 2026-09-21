@@ -39,9 +39,11 @@ If the runtime is bundled during the PyInstaller build, the `.exe` also works st
    - `Remote AI server URL` -> `http://YOUR_PC_IP:8765`
    - `Remote AI server token` -> the same token as in `reader_ai_server.json` if you use one
 
-For the beta direct route, select a whole-chapter batch mode and enable `Companion downloads pages directly`. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading the chapter from the phone.
+For the beta direct route, enable `Companion downloads pages directly`. It works for individual pages and whole-chapter batches. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading images from the phone.
 
 To use the companion away from home, enable `Internet access (beta)` in Mihon while the phone and PC are on the same Wi-Fi. Mihon starts the bundled Cloudflare Quick Tunnel through the local companion and saves its temporary HTTPS address and pairing token automatically. No router configuration, QR code, account, or separate software installation is required. The address changes whenever the companion restarts, so pair again on the same Wi-Fi after each restart.
+
+Pairing waits for the tunnel connection to register and uses HTTP/2 over TCP. Tunnel startup errors are recorded in `companion.log`. When running the Python script, install `cloudflared` on `PATH` or place it next to the script.
 
 ## Build the `.exe`
 
@@ -105,3 +107,13 @@ python3 reader_ai_companion.py --mode mock_copy --host 127.0.0.1 --port 8765
 ```
 
 That just echoes the uploaded image back, which is useful for checking the HTTP pipeline.
+
+## Regression tests
+
+With Pillow installed, run from this directory:
+
+```bash
+python3 -m unittest discover -s . -p 'test_*.py' -v
+```
+
+The tests use local HTTP servers and substitute the GPU and cloudflared processes. They cover direct downloads, asynchronous uploads, authentication, tunnel readiness, and safe job reuse without requiring a Windows GPU.

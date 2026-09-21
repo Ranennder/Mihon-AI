@@ -932,4 +932,7 @@
     <string name="reader_ai_progress_downloading_phone">Отправка улучшенного изображения на телефон</string>
     <string name="reader_ai_progress_ready">Улучшенное изображение готово</string>
     <string name="reader_ai_progress_failed">Ошибка AI-обработки</string>
+    <string name="reader_ai_internet_pairing">Подключение к компаньону для доступа через интернет…</string>
+    <string name="reader_ai_internet_saved">Сохранён интернет-адрес: %1$s. После перезапуска компаньона повторите сопряжение в одной сети Wi-Fi.</string>
+    <string name="reader_ai_internet_pairing_failed">Не удалось настроить доступ через интернет: %1$s. Подключите телефон и ПК к одной сети Wi-Fi, затем выключите и включите доступ через интернет для повторной попытки.</string>
 </resources>

@@ -180,8 +180,13 @@ class ExtensionsViewModel(
     private suspend fun Flow<InstallStep>.collectToInstallUpdate(extension: Extension) =
         this
             .onEach { installStep -> addDownloadState(extension, installStep) }
-            .takeWhile { installStep -> installStep != InstallStep.Installed }
-            .onCompletion { removeDownloadState(extension) }
+            .takeWhile { installStep -> !installStep.isCompleted() }
+            .onCompletion {
+                // Keep the retry action visible after a failure, but release the completed job.
+                if (currentDownloads.value[extension.pkgName] != InstallStep.Error) {
+                    removeDownloadState(extension)
+                }
+            }
             .collect()
 
     fun uninstallExtension(extension: Extension) {
