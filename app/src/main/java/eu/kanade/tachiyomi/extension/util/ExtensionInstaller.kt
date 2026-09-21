@@ -32,7 +32,9 @@ import okhttp3.CacheControl
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
+import tachiyomi.i18n.MR
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.File
@@ -63,6 +65,7 @@ internal class ExtensionInstaller(
     private val activeSteps = ConcurrentHashMap<Long, MutableStateFlow<InstallStep>>()
     private val activeDownloadIds = ConcurrentHashMap<String, Long>()
     private val activeCalls = ConcurrentHashMap<Long, Call>()
+    private val installErrors = ConcurrentHashMap<String, String>()
     private val downloadIds = AtomicLong()
     private val legacyInstallMutex = Mutex()
 
@@ -82,6 +85,7 @@ internal class ExtensionInstaller(
         verifyDownloadedUpdate: Boolean = false,
     ): Flow<InstallStep> {
         cancelInstall(extension.pkgName)
+        installErrors.remove(extension.pkgName)
         val downloadId = downloadIds.incrementAndGet()
 
         val step = MutableStateFlow(InstallStep.Pending)
@@ -124,6 +128,13 @@ internal class ExtensionInstaller(
                         "Downloaded extension ${extension.pkgName} has version $downloadedVersion, " +
                             "but the update requires ${extension.versionCode}"
                     }
+                    if (!isUpdateForPrivatelyInstalled &&
+                        extensionInstaller.get() != BasePreferences.ExtensionInstaller.PRIVATE
+                    ) {
+                        findExtensionSignatureMismatch(context, tmpFile, extension.pkgName)?.let { mismatch ->
+                            error(context.stringResource(MR.strings.ext_install_signature_mismatch) + "\n" + mismatch)
+                        }
+                    }
                 }
 
                 val startInstallation = {
@@ -151,7 +162,7 @@ internal class ExtensionInstaller(
             } catch (e: Exception) {
                 ensureActive()
                 logcat(LogPriority.ERROR, e)
-                step.value = InstallStep.Error
+                updateInstallStep(downloadId, InstallStep.Error, e.message ?: e.javaClass.simpleName)
             } finally {
                 activeCalls.remove(downloadId)?.cancel()
                 if (!handedToInstaller) tmpFile.delete()
@@ -214,11 +225,15 @@ internal class ExtensionInstaller(
             if (ExtensionLoader.installPrivateExtensionFile(context, tempFile)) {
                 updateInstallStep(downloadId, InstallStep.Installed)
             } else {
-                updateInstallStep(downloadId, InstallStep.Error)
+                updateInstallStep(
+                    downloadId,
+                    InstallStep.Error,
+                    "Private installer rejected the extension APK. See the crash log for details.",
+                )
             }
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e) { "Failed to read downloaded extension file." }
-            updateInstallStep(downloadId, InstallStep.Error)
+            updateInstallStep(downloadId, InstallStep.Error, e.message ?: e.javaClass.simpleName)
         }
 
         tempFile.delete()
@@ -259,9 +274,22 @@ internal class ExtensionInstaller(
      * @param downloadId The id of the download.
      * @param step New install step.
      */
-    fun updateInstallStep(downloadId: Long, step: InstallStep) {
-        activeSteps[downloadId]?.let { it.value = step }
+    @Synchronized
+    fun updateInstallStep(downloadId: Long, step: InstallStep, errorMessage: String? = null) {
+        val activeStep = activeSteps[downloadId] ?: return
+        if (step == InstallStep.Error && errorMessage != null) {
+            val pkgName = activeDownloadIds.entries.firstOrNull { it.value == downloadId }?.key
+            if (pkgName != null) recordInstallError(pkgName, errorMessage)
+        }
+        activeStep.value = step
     }
+
+    fun recordInstallError(pkgName: String, message: String) {
+        installErrors[pkgName] = message
+        logcat(LogPriority.ERROR) { "Extension install failed for $pkgName: $message" }
+    }
+
+    fun getInstallError(pkgName: String): String? = installErrors[pkgName]
 
     companion object {
         const val APK_MIME = "application/vnd.android.package-archive"

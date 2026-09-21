@@ -18,7 +18,10 @@ import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -97,6 +100,7 @@ class ExtensionManagerTest {
         coEvery { api.findExtensions() } returns listOf(available)
         every { installer.downloadAndInstall(available.apkUrl, available, false, true) } returns
             flowOf(InstallStep.Installing, InstallStep.Installed)
+        every { installer.recordInstallError(any(), any()) } returns Unit
         manager = ExtensionManager(context, preferences, mockk<TrustExtension>(), api, { installer }, {})
     }
 
@@ -119,6 +123,12 @@ class ExtensionManagerTest {
         }
         assertEquals(65L, current.versionCode)
         verify { installer.downloadAndInstall(available.apkUrl, available, false, true) }
+        verify {
+            installer.recordInstallError(
+                installed.pkgName,
+                match { it.contains("expected 1.6.68 (106068), loaded 1.4.65 (65)") },
+            )
+        }
     }
 
     @Test
@@ -127,6 +137,81 @@ class ExtensionManagerTest {
         coEvery { ExtensionLoader.loadExtensionFromPkgName(context, installed.pkgName) } returns LoadResult.Error
 
         assertEquals(InstallStep.Error, manager.updateExtension(installed).first { it.isCompleted() })
+    }
+
+    @Test
+    fun `a late load failure cannot overwrite the replacement attempt`() {
+        assertLateVerificationCannotChangeReplacement(LoadResult.Error)
+    }
+
+    @Test
+    fun `a late old package cannot register or clear the replacement attempt`() {
+        assertLateVerificationCannotChangeReplacement(LoadResult.Success(installed))
+    }
+
+    private fun assertLateVerificationCannotChangeReplacement(lateResult: LoadResult) = runBlocking {
+        withTimeout(5_000) {
+            manager.findAvailableExtensions()
+            val verificationStarted = CompletableDeferred<Unit>()
+            val releaseVerification = CompletableDeferred<LoadResult>()
+            val replacementSteps = MutableStateFlow(InstallStep.Installing)
+            every { installer.downloadAndInstall(available.apkUrl, available, false, true) } returnsMany listOf(
+                flowOf(InstallStep.Installed),
+                replacementSteps,
+            )
+            var loads = 0
+            coEvery { ExtensionLoader.loadExtensionFromPkgName(context, installed.pkgName) } coAnswers {
+                if (loads++ == 0) {
+                    verificationStarted.complete(Unit)
+                    releaseVerification.await()
+                } else {
+                    LoadResult.Success(updated)
+                }
+            }
+
+            val original = async { manager.updateExtension(installed).first { it.isCompleted() } }
+            verificationStarted.await()
+            val replacementFlow = manager.updateExtension(installed)
+            val replacement = async { replacementFlow.first { it.isCompleted() } }
+            releaseVerification.complete(lateResult)
+
+            assertEquals(InstallStep.Idle, original.await())
+            verify(exactly = 0) { installer.recordInstallError(any(), any()) }
+
+            // Cleanup of the stale collector must leave the new attempt active.
+            replacementSteps.value = InstallStep.Installed
+            assertEquals(InstallStep.Installed, replacement.await())
+            val current = manager.installedExtensionsFlow.first {
+                it.singleOrNull()?.versionCode == available.versionCode
+            }.single()
+            assertFalse(current.hasUpdate)
+            verify(exactly = 0) { installer.recordInstallError(any(), any()) }
+        }
+    }
+
+    @Test
+    fun `canceling an attempt invalidates its pending load verification`() = runBlocking {
+        withTimeout(5_000) {
+            manager.findAvailableExtensions()
+            val verificationStarted = CompletableDeferred<Unit>()
+            val releaseVerification = CompletableDeferred<Unit>()
+            every { installer.cancelInstall(installed.pkgName) } returns Unit
+            coEvery { ExtensionLoader.loadExtensionFromPkgName(context, installed.pkgName) } coAnswers {
+                verificationStarted.complete(Unit)
+                releaseVerification.await()
+                LoadResult.Success(updated)
+            }
+
+            val original = async { manager.updateExtension(installed).first { it.isCompleted() } }
+            verificationStarted.await()
+            manager.cancelInstallUpdateExtension(installed)
+            releaseVerification.complete(Unit)
+
+            assertEquals(InstallStep.Idle, original.await())
+            val current = manager.installedExtensionsFlow.first { it.isNotEmpty() }.single()
+            assertEquals(installed.versionCode, current.versionCode)
+            verify(exactly = 0) { installer.recordInstallError(any(), any()) }
+        }
     }
 
     @Test

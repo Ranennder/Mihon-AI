@@ -1,6 +1,9 @@
 package eu.kanade.tachiyomi.ui.browse.extension
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -10,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -20,6 +24,7 @@ import eu.kanade.presentation.more.settings.screen.browse.ExtensionStoresScreen
 import eu.kanade.tachiyomi.extension.model.Extension
 import eu.kanade.tachiyomi.ui.browse.extension.details.ExtensionDetailsScreen
 import eu.kanade.tachiyomi.ui.webview.WebViewScreen
+import eu.kanade.tachiyomi.util.system.copyToClipboard
 import eu.kanade.tachiyomi.util.system.isPackageInstalled
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.stringResource
@@ -98,6 +103,36 @@ fun extensionsTab(
                     },
                     onDismissRequest = {
                         privateExtensionToUninstall = null
+                    },
+                )
+            }
+
+            if (state.installErrors.isNotEmpty()) {
+                val title = stringResource(MR.strings.ext_install_error_title)
+                val unknownError = stringResource(MR.strings.ext_install_error_unknown)
+                val details = state.installErrors.values.joinToString("\n\n") {
+                    "${it.name}\n${it.pkgName}\n${it.details ?: unknownError}"
+                }
+                AlertDialog(
+                    onDismissRequest = extensionsViewModel::dismissInstallErrors,
+                    title = { Text(title) },
+                    text = {
+                        SelectionContainer {
+                            Text(
+                                text = stringResource(MR.strings.ext_install_error_message) + "\n\n" + details,
+                                modifier = Modifier.verticalScroll(rememberScrollState()),
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = extensionsViewModel::dismissInstallErrors) {
+                            Text(stringResource(MR.strings.action_close))
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { context.copyToClipboard(title, details) }) {
+                            Text(stringResource(MR.strings.action_copy_to_clipboard))
+                        }
                     },
                 )
             }

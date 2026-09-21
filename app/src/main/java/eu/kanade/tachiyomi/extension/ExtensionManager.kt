@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import logcat.LogPriority
@@ -71,6 +72,8 @@ class ExtensionManager internal constructor(
      * The installer which installs, updates and uninstalls the extensions.
      */
     private val installer by lazy(installerFactory)
+    private val installAttemptLock = Any()
+    private val installAttempts = mutableMapOf<String, Any>()
 
     private val iconMap = mutableMapOf<String, Drawable>()
 
@@ -239,7 +242,14 @@ class ExtensionManager internal constructor(
      * @param extension The extension to be installed.
      */
     fun installExtension(extension: Extension.Available): Flow<InstallStep> {
-        return installer.downloadAndInstall(extension.apkUrl, extension)
+        return startInstallAttempt(extension.pkgName) { attempt ->
+            installer.downloadAndInstall(extension.apkUrl, extension)
+                .map { step ->
+                    synchronized(installAttemptLock) {
+                        if (installAttempts[extension.pkgName] === attempt) step else InstallStep.Idle
+                    }
+                }
+        }
     }
 
     /**
@@ -252,51 +262,81 @@ class ExtensionManager internal constructor(
     fun updateExtension(extension: Extension.Installed): Flow<InstallStep> {
         val availableExt = availableExtensionMapFlow.value[extension.pkgName] ?: return emptyFlow()
         val isUpdateForPrivatelyInstalled = !extension.isShared
-        return installer.downloadAndInstall(
-            availableExt.apkUrl,
-            availableExt,
-            isUpdateForPrivatelyInstalled,
-            verifyDownloadedUpdate = true,
-        )
-            .map { step ->
-                if (step != InstallStep.Installed) return@map step
+        return startInstallAttempt(extension.pkgName) { attempt ->
+            installer.downloadAndInstall(
+                availableExt.apkUrl,
+                availableExt,
+                isUpdateForPrivatelyInstalled,
+                verifyDownloadedUpdate = true,
+            )
+                .map { step ->
+                    val isCurrent = synchronized(installAttemptLock) { installAttempts[extension.pkgName] === attempt }
+                    if (!isCurrent) return@map InstallStep.Idle
+                    if (step != InstallStep.Installed) return@map step
 
-                // The installer result alone does not prove that the requested version
-                // is available to this app. Verify and register it before reporting success.
-                val loadedExtension = try {
-                    when (val result = ExtensionLoader.loadExtensionFromPkgName(context, extension.pkgName)) {
-                        is LoadResult.Success -> result.extension.also {
-                            registerUpdatedExtension(it.withUpdateCheck())
-                        }
-                        is LoadResult.Untrusted -> result.extension.also { updated ->
-                            installedExtensionMapFlow.update { it - updated.pkgName }
-                            untrustedExtensionMapFlow.update { it + updated }
-                        }
-                        LoadResult.Error -> null
+                    // Loading can suspend while another update attempt starts. Defer all
+                    // registrations and diagnostics until the attempt has been checked again.
+                    val loadResult = try {
+                        ExtensionLoader.loadExtensionFromPkgName(context, extension.pkgName)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        logcat(LogPriority.ERROR, e) { "Failed to load updated extension ${extension.pkgName}" }
+                        LoadResult.Error
                     }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    logcat(LogPriority.ERROR, e) { "Failed to load updated extension ${extension.pkgName}" }
-                    null
-                }
-                updatePendingUpdatesCount()
-                if (loadedExtension != null && loadedExtension.versionCode >= availableExt.versionCode &&
-                    loadedExtension.libVersion >= availableExt.libVersion
-                ) {
-                    InstallStep.Installed
-                } else {
-                    logcat(LogPriority.ERROR) {
-                        "Extension ${extension.pkgName} did not load the requested update: " +
-                            "expected ${availableExt.versionCode}, loaded ${loadedExtension?.versionCode}"
+
+                    synchronized(installAttemptLock) {
+                        if (installAttempts[extension.pkgName] !== attempt) return@synchronized InstallStep.Idle
+                        val loadedExtension = when (loadResult) {
+                            is LoadResult.Success -> loadResult.extension.also {
+                                registerUpdatedExtension(it.withUpdateCheck())
+                            }
+                            is LoadResult.Untrusted -> loadResult.extension.also { updated ->
+                                installedExtensionMapFlow.update { it - updated.pkgName }
+                                untrustedExtensionMapFlow.update { it + updated }
+                            }
+                            LoadResult.Error -> null
+                        }
+                        updatePendingUpdatesCount()
+                        if (loadedExtension != null && loadedExtension.versionCode >= availableExt.versionCode &&
+                            loadedExtension.libVersion >= availableExt.libVersion
+                        ) {
+                            InstallStep.Installed
+                        } else {
+                            installer.recordInstallError(
+                                extension.pkgName,
+                                "Extension ${extension.pkgName} did not load the requested update: " +
+                                    "expected ${availableExt.versionName} (${availableExt.versionCode}), " +
+                                    "loaded ${loadedExtension?.versionName} (${loadedExtension?.versionCode})",
+                            )
+                            InstallStep.Error
+                        }
                     }
-                    InstallStep.Error
                 }
-            }
+        }
     }
 
+    private fun startInstallAttempt(pkgName: String, createFlow: (Any) -> Flow<InstallStep>): Flow<InstallStep> =
+        synchronized(installAttemptLock) {
+            val attempt = Any()
+            installAttempts[pkgName] = attempt
+            try {
+                createFlow(attempt).onCompletion {
+                    synchronized(installAttemptLock) {
+                        if (installAttempts[pkgName] === attempt) installAttempts.remove(pkgName)
+                    }
+                }
+            } catch (error: Throwable) {
+                if (installAttempts[pkgName] === attempt) installAttempts.remove(pkgName)
+                throw error
+            }
+        }
+
     fun cancelInstallUpdateExtension(extension: Extension) {
-        installer.cancelInstall(extension.pkgName)
+        synchronized(installAttemptLock) {
+            installAttempts.remove(extension.pkgName)
+            installer.cancelInstall(extension.pkgName)
+        }
     }
 
     /**
@@ -308,9 +348,11 @@ class ExtensionManager internal constructor(
         installer.updateInstallStep(downloadId, InstallStep.Installing)
     }
 
-    fun updateInstallStep(downloadId: Long, step: InstallStep) {
-        installer.updateInstallStep(downloadId, step)
+    fun updateInstallStep(downloadId: Long, step: InstallStep, errorMessage: String? = null) {
+        installer.updateInstallStep(downloadId, step, errorMessage)
     }
+
+    fun getInstallError(pkgName: String): String? = installer.getInstallError(pkgName)
 
     /**
      * Uninstalls the extension that matches the given package name.

@@ -32,6 +32,7 @@ import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.i18n.MR
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 
 class ExtensionsViewModel(
@@ -42,6 +43,7 @@ class ExtensionsViewModel(
 ) : StateViewModel<ExtensionsViewModel.State>(State()) {
 
     private val currentDownloads = MutableStateFlow<Map<String, InstallStep>>(hashMapOf())
+    private val currentInstallAttempts = ConcurrentHashMap<String, Any>()
 
     init {
         val context = Injekt.get<Application>()
@@ -153,38 +155,76 @@ class ExtensionsViewModel(
     }
 
     fun installExtension(extension: Extension.Available) {
-        viewModelScope.launchIO {
-            extensionManager.installExtension(extension).collectToInstallUpdate(extension)
-        }
+        observeInstall(extension) { extensionManager.installExtension(extension) }
     }
 
     fun updateExtension(extension: Extension.Installed) {
-        viewModelScope.launchIO {
-            extensionManager.updateExtension(extension).collectToInstallUpdate(extension)
+        observeInstall(extension) { extensionManager.updateExtension(extension) }
+    }
+
+    private fun observeInstall(extension: Extension, createFlow: () -> Flow<InstallStep>) {
+        synchronized(currentInstallAttempts) {
+            val flow = createFlow()
+            val attempt = Any()
+            currentInstallAttempts[extension.pkgName] = attempt
+            viewModelScope.launchIO {
+                flow.collectToInstallUpdate(extension, attempt)
+            }
         }
     }
 
     fun cancelInstallUpdateExtension(extension: Extension) {
-        extensionManager.cancelInstallUpdateExtension(extension)
-        removeDownloadState(extension)
+        synchronized(currentInstallAttempts) {
+            currentInstallAttempts.remove(extension.pkgName)
+            extensionManager.cancelInstallUpdateExtension(extension)
+            removeDownloadState(extension)
+        }
     }
 
     private fun addDownloadState(extension: Extension, installStep: InstallStep) {
         currentDownloads.update { it + Pair(extension.pkgName, installStep) }
+        mutableState.update { state ->
+            val errors = if (installStep == InstallStep.Error) {
+                state.installErrors + mapOf(
+                    extension.pkgName to InstallError(
+                        name = extension.name,
+                        pkgName = extension.pkgName,
+                        details = extensionManager.getInstallError(extension.pkgName),
+                    ),
+                )
+            } else {
+                state.installErrors - extension.pkgName
+            }
+            state.copy(installErrors = errors)
+        }
+    }
+
+    fun dismissInstallErrors() {
+        mutableState.update { it.copy(installErrors = emptyMap()) }
     }
 
     private fun removeDownloadState(extension: Extension) {
         currentDownloads.update { it - extension.pkgName }
     }
 
-    private suspend fun Flow<InstallStep>.collectToInstallUpdate(extension: Extension) =
+    private suspend fun Flow<InstallStep>.collectToInstallUpdate(extension: Extension, attempt: Any) =
         this
-            .onEach { installStep -> addDownloadState(extension, installStep) }
+            .onEach { installStep ->
+                synchronized(currentInstallAttempts) {
+                    if (currentInstallAttempts[extension.pkgName] == attempt) {
+                        addDownloadState(extension, installStep)
+                    }
+                }
+            }
             .takeWhile { installStep -> !installStep.isCompleted() }
             .onCompletion {
                 // Keep the retry action visible after a failure, but release the completed job.
-                if (currentDownloads.value[extension.pkgName] != InstallStep.Error) {
-                    removeDownloadState(extension)
+                synchronized(currentInstallAttempts) {
+                    if (currentInstallAttempts.remove(extension.pkgName, attempt) &&
+                        currentDownloads.value[extension.pkgName] != InstallStep.Error
+                    ) {
+                        removeDownloadState(extension)
+                    }
                 }
             }
             .collect()
@@ -220,9 +260,13 @@ class ExtensionsViewModel(
         val updates: Int = 0,
         val installer: BasePreferences.ExtensionInstaller? = null,
         val searchQuery: String? = null,
+        val installErrors: Map<String, InstallError> = emptyMap(),
     ) {
         val isEmpty = items.isEmpty()
     }
+
+    @Immutable
+    data class InstallError(val name: String, val pkgName: String, val details: String?)
 }
 
 typealias ItemGroups = Map<ExtensionUiModel.Header, List<ExtensionUiModel.Item>>

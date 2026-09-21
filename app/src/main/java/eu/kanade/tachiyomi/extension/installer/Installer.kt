@@ -81,10 +81,10 @@ abstract class Installer(private val service: Service) {
      * @param resultStep new install step for the processed entry.
      * @see waitingInstall
      */
-    fun continueQueue(resultStep: InstallStep) {
+    fun continueQueue(resultStep: InstallStep, errorMessage: String? = null) {
         val completedEntry = waitingInstall.exchange(null)
         if (completedEntry != null) {
-            extensionManager.updateInstallStep(completedEntry.downloadId, resultStep)
+            extensionManager.updateInstallStep(completedEntry.downloadId, resultStep, errorMessage)
             checkQueue()
         }
     }

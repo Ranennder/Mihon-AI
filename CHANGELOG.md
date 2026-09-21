@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.25
+
+- Show extension installation failures in a dialog with copyable details, including Android's native rejection code or message from Legacy, PackageInstaller, and Shizuku.
+- Detect incompatible signing certificates before system updates and explain when the extension needs to be reinstalled from the selected repository. Certificate rotation and unavailable metadata are left to Android; extensions are never automatically removed.
+- Preserve explicit installer errors and successful results in the MIUI early-callback workaround.
+- Ignore outdated installer callbacks and load-verification results after a retry or cancellation.
+- Add 26 regression tests for error retention, certificate comparisons, native results, and overlapping update attempts.
+
+This release fixes hidden installation errors. It does not yet establish why updates fail on the affected phone. After updating the app, retry AllHentai once and copy any displayed error details. The companion has no functional changes from v0.1.24.
+
 ## v0.1.24
 
 - Queue legacy Android extension installations so Update all opens one confirmation at a time, including on MIUI.

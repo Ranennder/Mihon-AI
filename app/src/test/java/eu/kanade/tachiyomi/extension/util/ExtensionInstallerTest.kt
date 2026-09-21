@@ -208,6 +208,57 @@ class ExtensionInstallerTest {
     }
 
     @Test
+    fun `installer failure details survive completion and reset for the next attempt`() = runBlocking {
+        every { preference.get() } returns BasePreferences.ExtensionInstaller.LEGACY
+        val launches = Channel<Long>(Channel.UNLIMITED)
+        val installer = ExtensionInstaller(context, scope, successfulDownloadClient(), preference) { id, _ ->
+            check(launches.trySend(id).isSuccess)
+        }
+
+        withTimeout(5_000) {
+            val first = async {
+                installer.downloadAndInstall("https://example.test/extension.apk", extension)
+                    .first { it.isCompleted() }
+            }
+            val firstId = launches.receive()
+            installer.updateInstallStep(firstId, InstallStep.Error, "INSTALL_FAILED_UPDATE_INCOMPATIBLE (-7)")
+            assertEquals(InstallStep.Error, first.await())
+            assertEquals("INSTALL_FAILED_UPDATE_INCOMPATIBLE (-7)", installer.getInstallError(extension.pkgName))
+
+            val retry = async {
+                installer.downloadAndInstall("https://example.test/extension.apk", extension)
+                    .first { it.isCompleted() }
+            }
+            val retryId = launches.receive()
+            assertNull(installer.getInstallError(extension.pkgName))
+
+            // A delayed result from the previous system activity must not overwrite the retry.
+            installer.updateInstallStep(firstId, InstallStep.Error, "Stale failure")
+            assertNull(installer.getInstallError(extension.pkgName))
+            installer.updateInstallStep(retryId, InstallStep.Installed)
+            assertEquals(InstallStep.Installed, retry.await())
+        }
+    }
+
+    @Test
+    fun `download failure exposes its reason without opening the system installer`() = runBlocking {
+        val installer = ExtensionInstaller(
+            context,
+            scope,
+            OkHttpClient.Builder().addInterceptor { throw java.io.IOException("Connection reset") }.build(),
+            preference,
+        )
+        val result = withTimeout(5_000) {
+            installer.downloadAndInstall("https://example.test/extension.apk", extension)
+                .first { it.isCompleted() }
+        }
+
+        assertEquals(InstallStep.Error, result)
+        assertEquals("Connection reset", installer.getInstallError(extension.pkgName))
+        verify(exactly = 0) { ExtensionLoader.installPrivateExtensionFile(any(), any()) }
+    }
+
+    @Test
     fun `an APK older than the requested update is never installed`() = runBlocking {
         val packageManager = mockk<PackageManager>()
         val downloaded = mockk<PackageInfo>().apply {
@@ -228,6 +279,7 @@ class ExtensionInstallerTest {
         }
 
         assertEquals(InstallStep.Error, result)
+        assertTrue(installer.getInstallError(extension.pkgName)!!.contains("but the update requires 106068"))
         verify(exactly = 0) { ExtensionLoader.installPrivateExtensionFile(any(), any()) }
     }
 

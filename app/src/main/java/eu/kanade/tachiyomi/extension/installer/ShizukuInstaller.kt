@@ -71,8 +71,12 @@ class ShizukuInstaller(private val service: Service) : Installer(service) {
             if (status == PackageInstaller.STATUS_SUCCESS) {
                 continueQueue(InstallStep.Installed)
             } else {
-                logcat(LogPriority.ERROR) { "Failed to install extension $packageName: $message" }
-                continueQueue(InstallStep.Error)
+                val detail = buildString {
+                    append("Shizuku installer: status $status")
+                    if (!message.isNullOrBlank()) append(", $message")
+                }
+                logcat(LogPriority.ERROR) { "Failed to install extension $packageName: $detail" }
+                continueQueue(InstallStep.Error, detail)
             }
         }
     }
@@ -123,8 +127,9 @@ class ShizukuInstaller(private val service: Service) : Installer(service) {
             }
             service.contentResolver.delete(entry.uri, null, null)
         } catch (e: Exception) {
-            logcat(LogPriority.ERROR, e) { "Failed to install extension ${entry.downloadId} ${entry.uri}" }
-            continueQueue(InstallStep.Error)
+            val detail = "Shizuku installer failed: ${e.message ?: e.javaClass.simpleName}"
+            logcat(LogPriority.ERROR, e) { "${entry.downloadId}: $detail" }
+            continueQueue(InstallStep.Error, detail)
         }
     }
 

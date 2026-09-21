@@ -7,6 +7,8 @@ import eu.kanade.tachiyomi.extension.ExtensionManager
 import eu.kanade.tachiyomi.extension.model.InstallStep
 import eu.kanade.tachiyomi.util.system.hasMiuiPackageInstaller
 import eu.kanade.tachiyomi.util.system.toast
+import logcat.LogPriority
+import tachiyomi.core.common.util.system.logcat
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import kotlin.time.Duration.Companion.seconds
@@ -46,7 +48,9 @@ class ExtensionInstallActivity : Activity() {
         try {
             startActivityForResult(installIntent, INSTALL_REQUEST_CODE)
         } catch (error: Exception) {
-            setInstallStep(InstallStep.Error)
+            val message = "Legacy installer could not open: ${error.message ?: error.javaClass.simpleName}"
+            logcat(LogPriority.ERROR, error) { message }
+            setInstallStep(InstallStep.Error, message)
             toast(error.message)
             finish()
         }
@@ -60,13 +64,20 @@ class ExtensionInstallActivity : Activity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (ignoreResult && System.nanoTime() < ignoreUntil) {
+        if (requestCode != INSTALL_REQUEST_CODE) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+        val installResult = data?.takeIf { it.hasExtra(EXTRA_INSTALL_RESULT) }
+            ?.getIntExtra(EXTRA_INSTALL_RESULT, 0)
+        if (ignoreResult && System.nanoTime() < ignoreUntil &&
+            isEmptyLegacyInstallCancellation(resultCode, installResult)
+        ) {
             hasIgnoredResult = true
             return
         }
-        if (requestCode == INSTALL_REQUEST_CODE) {
-            checkInstallationResult(resultCode)
-        }
+        hasIgnoredResult = false
+        checkInstallationResult(resultCode, installResult)
         finish()
     }
 
@@ -85,19 +96,19 @@ class ExtensionInstallActivity : Activity() {
         }
     }
 
-    private fun checkInstallationResult(resultCode: Int) {
-        val newStep = when (resultCode) {
-            RESULT_OK -> InstallStep.Installed
-            RESULT_CANCELED -> InstallStep.Idle
-            else -> InstallStep.Error
-        }
-        setInstallStep(newStep)
+    private fun checkInstallationResult(resultCode: Int, installResult: Int? = null) {
+        val result = parseLegacyInstallResult(resultCode, installResult)
+        result.errorMessage?.let { message -> logcat(LogPriority.ERROR) { message } }
+        setInstallStep(result.step, result.errorMessage)
     }
 
-    private fun setInstallStep(step: InstallStep) {
+    private fun setInstallStep(step: InstallStep, errorMessage: String? = null) {
         val downloadId = intent.getLongExtra(ExtensionInstaller.EXTRA_DOWNLOAD_ID, -1L)
-        Injekt.get<ExtensionManager>().updateInstallStep(downloadId, step)
+        Injekt.get<ExtensionManager>().updateInstallStep(downloadId, step, errorMessage)
     }
 }
 
 private const val INSTALL_REQUEST_CODE = 500
+
+// The legacy installer returns this AOSP extra, but its constant is hidden from the public SDK.
+private const val EXTRA_INSTALL_RESULT = "android.intent.extra.INSTALL_RESULT"

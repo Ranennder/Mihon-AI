@@ -24,36 +24,73 @@ class PackageInstallerInstaller(private val service: Service) : Installer(servic
 
     private val packageActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+            val session = activeSession ?: return
+            if (intent.hasExtra(PackageInstaller.EXTRA_SESSION_ID) &&
+                intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1) != session.second
+            ) {
+                logcat(LogPriority.WARN) { "Ignoring installer result for an inactive session" }
+                return
+            }
+            val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+            val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+            when (status) {
                 PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                    val userAction = intent.getParcelableExtraCompat<Intent>(Intent.EXTRA_INTENT)
-                        ?.run {
-                            // Doesn't actually needed as the receiver is actually not exported
-                            // But the warnings can't be suppressed without this
-                            IntentSanitizer.Builder()
-                                .allowAction(this.action!!)
-                                .allowExtra(PackageInstaller.EXTRA_SESSION_ID) { id -> id == activeSession?.second }
-                                .allowAnyComponent()
-                                .allowPackage {
-                                    // There is no way to check the actual installer name so allow all.
-                                    true
-                                }
-                                .build()
-                                .sanitizeByFiltering(this)
-                        }
-                    if (userAction == null) {
-                        logcat(LogPriority.ERROR) { "Fatal error for $intent" }
-                        continueQueue(InstallStep.Error)
-                        return
+                    try {
+                        val userAction = intent.getParcelableExtraCompat<Intent>(Intent.EXTRA_INTENT)
+                            ?.run {
+                                // The receiver is not exported, but sanitize the confirmation intent too.
+                                IntentSanitizer.Builder()
+                                    .allowAction(this.action!!)
+                                    .allowExtra(PackageInstaller.EXTRA_SESSION_ID) { id -> id == session.second }
+                                    .allowAnyComponent()
+                                    .allowPackage {
+                                        // There is no way to check the actual installer name so allow all.
+                                        true
+                                    }
+                                    .build()
+                                    .sanitizeByFiltering(this)
+                            }
+                            ?: error("Android did not provide an installation confirmation intent")
+                        userAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        service.startActivity(userAction)
+                    } catch (error: Exception) {
+                        val detail = "PackageInstaller could not open confirmation: " +
+                            (error.message ?: error.javaClass.simpleName)
+                        logcat(LogPriority.ERROR, error) { detail }
+                        abandonActiveSession()
+                        completeSession(InstallStep.Error, detail)
                     }
-                    userAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    service.startActivity(userAction)
                 }
                 PackageInstaller.STATUS_FAILURE_ABORTED -> {
-                    continueQueue(InstallStep.Idle)
+                    logcat(LogPriority.INFO) {
+                        "PackageInstaller aborted session ${session.second}: $message"
+                    }
+                    completeSession(InstallStep.Idle)
                 }
-                PackageInstaller.STATUS_SUCCESS -> continueQueue(InstallStep.Installed)
-                else -> continueQueue(InstallStep.Error)
+                PackageInstaller.STATUS_SUCCESS -> completeSession(InstallStep.Installed)
+                else -> {
+                    val detail = buildString {
+                        append("PackageInstaller: status $status")
+                        if (!message.isNullOrBlank()) append(", $message")
+                    }
+                    logcat(LogPriority.ERROR) { detail }
+                    completeSession(InstallStep.Error, detail)
+                }
+            }
+        }
+    }
+
+    private fun completeSession(step: InstallStep, errorMessage: String? = null) {
+        activeSession = null
+        continueQueue(step, errorMessage)
+    }
+
+    private fun abandonActiveSession() {
+        activeSession?.let { (_, sessionId) ->
+            try {
+                packageInstaller.abandonSession(sessionId)
+            } catch (error: Exception) {
+                logcat(LogPriority.WARN, error) { "Could not abandon installer session $sessionId" }
             }
         }
     }
@@ -95,11 +132,10 @@ class PackageInstallerInstaller(private val service: Service) : Installer(servic
                 session.commit(intentSender)
             }
         } catch (e: Exception) {
-            logcat(LogPriority.ERROR, e) { "Failed to install extension ${entry.downloadId} ${entry.uri}" }
-            activeSession?.let { (_, sessionId) ->
-                packageInstaller.abandonSession(sessionId)
-            }
-            continueQueue(InstallStep.Error)
+            val detail = "PackageInstaller failed: ${e.message ?: e.javaClass.simpleName}"
+            logcat(LogPriority.ERROR, e) { "${entry.downloadId}: $detail" }
+            abandonActiveSession()
+            completeSession(InstallStep.Error, detail)
         }
     }
 
