@@ -24,6 +24,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import mihon.domain.extension.model.ExtensionStore
@@ -109,6 +110,31 @@ class ExtensionManagerTest {
         if (::manager.isInitialized) manager.scope.cancel()
         Injekt = originalInjekt
         unmockkAll()
+    }
+
+    @Test
+    fun `confirmed signature conflict uses the explicit reinstall path and verifies its result`() = runBlocking {
+        manager.findAvailableExtensions()
+        every { installer.canReinstallExtension(installed.pkgName) } returns true
+        every { installer.downloadAndInstall(available.apkUrl, available, false, true, true) } returns
+            flowOf(InstallStep.Installing, InstallStep.Installed)
+        coEvery { ExtensionLoader.loadExtensionFromPkgName(context, installed.pkgName) } returns
+            LoadResult.Success(updated)
+
+        assertEquals(InstallStep.Installed, manager.reinstallExtension(installed).first { it.isCompleted() })
+        verify(exactly = 1) { installer.downloadAndInstall(available.apkUrl, available, false, true, true) }
+        verify { preferences.extensionUpdatesCount.set(0) }
+    }
+
+    @Test
+    fun `ordinary failures and private extensions cannot trigger removal`() = runBlocking {
+        manager.findAvailableExtensions()
+        every { installer.canReinstallExtension(installed.pkgName) } returns false
+
+        assertTrue(manager.reinstallExtension(installed).toList().isEmpty())
+        every { installer.canReinstallExtension(installed.pkgName) } returns true
+        assertTrue(manager.reinstallExtension(installed.copy(isShared = false)).toList().isEmpty())
+        verify(exactly = 0) { installer.downloadAndInstall(any(), any(), any(), any(), true) }
     }
 
     @Test

@@ -162,6 +162,11 @@ class ExtensionsViewModel(
         observeInstall(extension) { extensionManager.updateExtension(extension) }
     }
 
+    fun reinstallExtension(extension: Extension.Installed) {
+        dismissInstallError(extension.pkgName)
+        observeInstall(extension) { extensionManager.reinstallExtension(extension) }
+    }
+
     private fun observeInstall(extension: Extension, createFlow: () -> Flow<InstallStep>) {
         synchronized(currentInstallAttempts) {
             val flow = createFlow()
@@ -190,6 +195,9 @@ class ExtensionsViewModel(
                         name = extension.name,
                         pkgName = extension.pkgName,
                         details = extensionManager.getInstallError(extension.pkgName),
+                        extensionToReinstall = (extension as? Extension.Installed)?.takeIf {
+                            it.isShared && extensionManager.canReinstallExtension(it.pkgName)
+                        },
                     ),
                 )
             } else {
@@ -199,8 +207,8 @@ class ExtensionsViewModel(
         }
     }
 
-    fun dismissInstallErrors() {
-        mutableState.update { it.copy(installErrors = emptyMap()) }
+    fun dismissInstallError(pkgName: String) {
+        mutableState.update { it.copy(installErrors = it.installErrors - pkgName) }
     }
 
     private fun removeDownloadState(extension: Extension) {
@@ -266,7 +274,12 @@ class ExtensionsViewModel(
     }
 
     @Immutable
-    data class InstallError(val name: String, val pkgName: String, val details: String?)
+    data class InstallError(
+        val name: String,
+        val pkgName: String,
+        val details: String?,
+        val extensionToReinstall: Extension.Installed? = null,
+    )
 }
 
 typealias ItemGroups = Map<ExtensionUiModel.Header, List<ExtensionUiModel.Item>>

@@ -51,10 +51,7 @@ internal object ExtensionLoader {
     private const val METADATA_NSFW = "tachiyomi.extension.nsfw"
 
     private const val METADATA_NAME = "tachiyomix.name"
-    private const val METADATA_EXTENSION_LIB = "tachiyomix.extensionLib"
     private const val METADATA_CONTENT_WARNING = "tachiyomix.contentWarning"
-
-    private val SUPPORTED_LIB_VERSIONS = listOf(1.4, 1.6)
 
     @Suppress("DEPRECATION")
     private val PACKAGE_FLAGS = PackageManager.GET_CONFIGURATIONS or
@@ -243,14 +240,11 @@ internal object ExtensionLoader {
         }
 
         // Validate lib version
-        val libVersion = appInfo.metaData.getFloat(METADATA_EXTENSION_LIB)
-            .takeUnless { it == 0.0f }
-            ?.toString()
-            ?.toDouble()
-            ?: versionName.substringBeforeLast('.').toDoubleOrNull()
-        if (libVersion == null || libVersion !in SUPPORTED_LIB_VERSIONS) {
+        val libVersion = ExtensionLibVersion.parse(pkgInfo)
+        if (libVersion == null || !ExtensionLibVersion.isSupported(libVersion)) {
             logcat(LogPriority.WARN) {
-                "Lib version is $libVersion, while only version(s) ${SUPPORTED_LIB_VERSIONS.joinToString()} are supported"
+                "Lib version is $libVersion, while only version(s) " +
+                    "${ExtensionLibVersion.supportedVersions.joinToString()} are supported"
             }
             return LoadResult.Error
         }

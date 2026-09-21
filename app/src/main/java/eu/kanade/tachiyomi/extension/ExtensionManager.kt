@@ -259,7 +259,16 @@ class ExtensionManager internal constructor(
      *
      * @param extension The extension to be updated.
      */
-    fun updateExtension(extension: Extension.Installed): Flow<InstallStep> {
+    fun updateExtension(
+        extension: Extension.Installed,
+    ): Flow<InstallStep> = updateExtension(extension, reinstall = false)
+
+    fun reinstallExtension(extension: Extension.Installed): Flow<InstallStep> = synchronized(installAttemptLock) {
+        if (!extension.isShared || !installer.canReinstallExtension(extension.pkgName)) return@synchronized emptyFlow()
+        updateExtension(extension, reinstall = true)
+    }
+
+    private fun updateExtension(extension: Extension.Installed, reinstall: Boolean): Flow<InstallStep> {
         val availableExt = availableExtensionMapFlow.value[extension.pkgName] ?: return emptyFlow()
         val isUpdateForPrivatelyInstalled = !extension.isShared
         return startInstallAttempt(extension.pkgName) { attempt ->
@@ -268,6 +277,7 @@ class ExtensionManager internal constructor(
                 availableExt,
                 isUpdateForPrivatelyInstalled,
                 verifyDownloadedUpdate = true,
+                reinstallForSignatureMismatch = reinstall,
             )
                 .map { step ->
                     val isCurrent = synchronized(installAttemptLock) { installAttempts[extension.pkgName] === attempt }
@@ -353,6 +363,16 @@ class ExtensionManager internal constructor(
     }
 
     fun getInstallError(pkgName: String): String? = installer.getInstallError(pkgName)
+
+    fun canReinstallExtension(pkgName: String): Boolean = installer.canReinstallExtension(pkgName)
+
+    val reinstallProcessToken: String get() = installer.processToken
+
+    fun shouldContinueReinstall(downloadId: Long, pkgName: String, processToken: String): Boolean =
+        installer.shouldContinueReinstall(downloadId, pkgName, processToken)
+
+    fun prepareReinstallHandoff(downloadId: Long, pkgName: String, processToken: String): Boolean =
+        installer.prepareReinstallHandoff(downloadId, pkgName, processToken)
 
     /**
      * Uninstalls the extension that matches the given package name.

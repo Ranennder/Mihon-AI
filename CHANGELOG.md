@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.26
+
+- Add a Reinstall action for extensions with a confirmed signing-key conflict. Android asks to remove the old extension, then the app starts installation of the replacement using the selected installer.
+- Download and validate the complete replacement before requesting removal, including its package, version, repository signing certificate, Android requirements, and extension API compatibility.
+- Preserve the reader's library, progress, and source preferences; canceling removal keeps the existing extension.
+- Keep pending removal across activity recreation and reject late results from canceled or superseded attempts.
+- Show one extension failure at a time with a concise reinstall explanation and copyable diagnostics.
+
+Update an affected extension, tap Reinstall when the signing conflict appears, then confirm the Android dialogs. Ordinary PackageInstaller requires user confirmation; the app does not silently remove extensions. The companion has no functional changes from v0.1.25.
+
 ## v0.1.25
 
 - Show extension installation failures in a dialog with copyable details, including Android's native rejection code or message from Legacy, PackageInstaller, and Shizuku.

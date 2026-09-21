@@ -180,6 +180,11 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <activity
+            android:name=".extension.util.ExtensionReinstallActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
             android:name=".ui.setting.track.TrackLoginActivity"
             android:exported="true"
             android:label="@string/track_activity_name">

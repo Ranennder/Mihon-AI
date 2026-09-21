@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.ui.browse.extension
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -107,31 +108,45 @@ fun extensionsTab(
                 )
             }
 
-            if (state.installErrors.isNotEmpty()) {
+            state.installErrors.values.firstOrNull()?.let { error ->
                 val title = stringResource(MR.strings.ext_install_error_title)
                 val unknownError = stringResource(MR.strings.ext_install_error_unknown)
-                val details = state.installErrors.values.joinToString("\n\n") {
-                    "${it.name}\n${it.pkgName}\n${it.details ?: unknownError}"
-                }
+                val details = "${error.name}\n${error.pkgName}\n${error.details ?: unknownError}"
+                val extensionToReinstall = error.extensionToReinstall
+                val dismissError = { extensionsViewModel.dismissInstallError(error.pkgName) }
                 AlertDialog(
-                    onDismissRequest = extensionsViewModel::dismissInstallErrors,
+                    onDismissRequest = dismissError,
                     title = { Text(title) },
                     text = {
-                        SelectionContainer {
-                            Text(
-                                text = stringResource(MR.strings.ext_install_error_message) + "\n\n" + details,
-                                modifier = Modifier.verticalScroll(rememberScrollState()),
-                            )
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            if (extensionToReinstall != null) {
+                                Text(stringResource(MR.strings.ext_reinstall_message, error.name))
+                            } else {
+                                SelectionContainer {
+                                    Text(error.name + "\n\n" + (error.details ?: unknownError))
+                                }
+                            }
+                            TextButton(onClick = { context.copyToClipboard(title, details) }) {
+                                Text(stringResource(MR.strings.ext_install_copy_error))
+                            }
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = extensionsViewModel::dismissInstallErrors) {
-                            Text(stringResource(MR.strings.action_close))
+                        if (extensionToReinstall != null) {
+                            TextButton(onClick = { extensionsViewModel.reinstallExtension(extensionToReinstall) }) {
+                                Text(stringResource(MR.strings.ext_reinstall))
+                            }
+                        } else {
+                            TextButton(onClick = dismissError) {
+                                Text(stringResource(MR.strings.action_close))
+                            }
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { context.copyToClipboard(title, details) }) {
-                            Text(stringResource(MR.strings.action_copy_to_clipboard))
+                        if (extensionToReinstall != null) {
+                            TextButton(onClick = dismissError) {
+                                Text(stringResource(MR.strings.action_close))
+                            }
                         }
                     },
                 )

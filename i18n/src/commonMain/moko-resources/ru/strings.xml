@@ -233,9 +233,12 @@
     <string name="ext_update">Обновить</string>
     <string name="ext_install">Установить</string>
     <string name="ext_install_error_title">Не удалось установить расширение</string>
-    <string name="ext_install_error_message">Не удалось завершить установку. Подробности ошибки можно скопировать ниже.</string>
+    <string name="ext_install_error_message">Установка не завершена. Скопируйте подробности ошибки, чтобы выяснить причину.</string>
     <string name="ext_install_error_unknown">Установщик не сообщил причину ошибки.</string>
-    <string name="ext_install_signature_mismatch">Установленное расширение и обновление подписаны разными ключами. Android не может установить это обновление поверх старого расширения. Проверьте хранилище расширений. Чтобы перейти на его версию, удалите только это расширение и установите его заново из этого хранилища.</string>
+    <string name="ext_install_signature_mismatch">Подписи обновления и установленного расширения отличаются. Android не может установить обновление поверх старой версии.</string>
+    <string name="ext_install_copy_error">Скопировать ошибку</string>
+    <string name="ext_reinstall">Переустановить</string>
+    <string name="ext_reinstall_message">У обновления «%1$s» другая подпись. Приложение удалит старое расширение и установит новую версию. Библиотека и история чтения сохранятся. Android попросит подтвердить удаление.</string>
     <string name="ext_pending">Ожидается</string>
     <string name="ext_downloading">Загружается</string>
     <string name="ext_installing">Устанавливается</string>
