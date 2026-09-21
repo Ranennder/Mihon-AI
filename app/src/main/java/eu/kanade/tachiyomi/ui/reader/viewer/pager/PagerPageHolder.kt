@@ -71,6 +71,7 @@ class PagerPageHolder(
      */
     private var loadJob: Job? = null
     private var cacheWatchJob: Job? = null
+    private var aiProgressJob: Job? = null
     private var forceBlockingReload = false
     private var keepCurrentImageUntilReady = false
 
@@ -88,6 +89,8 @@ class PagerPageHolder(
         loadJob = null
         cacheWatchJob?.cancel()
         cacheWatchJob = null
+        aiProgressJob?.cancel()
+        aiProgressJob = null
     }
 
     fun reloadImage(
@@ -202,6 +205,7 @@ class PagerPageHolder(
         val seamlessReload = keepCurrentImageUntilReady
         keepCurrentImageUntilReady = false
         val requireUpscaledImage = pageUpscaler.isEnabled()
+        if (requireUpscaledImage) startAiProgress()
         val cacheAvailableBeforeLoad = pageUpscaler.hasCachedPage(page)
 
         val streamFn = page.stream ?: return
@@ -241,6 +245,7 @@ class PagerPageHolder(
                     pageBackground = background
                 }
                 removeErrorLayout()
+                stopAiProgress()
             }
             val cacheAvailableAfterLoad = pageUpscaler.hasCachedPage(page)
             if ((blockingReload || requireUpscaledImage) && pageUpscaler.isEnabled() && !cacheAvailableAfterLoad) {
@@ -270,6 +275,7 @@ class PagerPageHolder(
                     progressIndicator?.hide()
                     showAiFailureToast()
                 } else {
+                    stopAiProgress()
                     setError(e)
                 }
             }
@@ -296,6 +302,38 @@ class PagerPageHolder(
         val message = pageUpscaler.consumeLastFailureMessage()
             ?: context.stringResource(MR.strings.reader_ai_failed)
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startAiProgress() {
+        initProgressIndicator()
+        aiProgressJob?.cancel()
+        aiProgressJob = scope.launch {
+            pageUpscaler.progress(page).collectLatest { progress ->
+                val label = context.stringResource(
+                    when (progress.stage) {
+                        ReaderPageUpscaler.UpscaleStage.WAITING -> MR.strings.reader_ai_progress_waiting
+                        ReaderPageUpscaler.UpscaleStage.PREPARING -> MR.strings.reader_ai_progress_preparing
+                        ReaderPageUpscaler.UpscaleStage.UPLOADING_TO_PC -> MR.strings.reader_ai_progress_uploading_pc
+                        ReaderPageUpscaler.UpscaleStage.DOWNLOADING_TO_PC ->
+                            MR.strings.reader_ai_progress_downloading_pc
+                        ReaderPageUpscaler.UpscaleStage.UPSCALING -> MR.strings.reader_ai_progress_upscaling
+                        ReaderPageUpscaler.UpscaleStage.DOWNLOADING_TO_PHONE ->
+                            MR.strings.reader_ai_progress_downloading_phone
+                        ReaderPageUpscaler.UpscaleStage.READY -> MR.strings.reader_ai_progress_ready
+                        ReaderPageUpscaler.UpscaleStage.FAILED -> MR.strings.reader_ai_progress_failed
+                    },
+                )
+                progressContainer?.isVisible = progress.stage != ReaderPageUpscaler.UpscaleStage.READY
+                progressIndicator?.setAiProgress(label, progress.percent)
+            }
+        }
+    }
+
+    private fun stopAiProgress() {
+        aiProgressJob?.cancel()
+        aiProgressJob = null
+        progressIndicator?.clearAiProgress()
+        progressContainer?.isVisible = false
     }
 
     private fun process(page: ReaderPage, imageSource: BufferedSource): BufferedSource {

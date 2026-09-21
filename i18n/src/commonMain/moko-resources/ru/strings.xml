@@ -924,4 +924,12 @@
     <string name="pref_library_update_retry_rate_limit_summary">При ошибке HTTP 429 подождать 5–15 секунд и повторить один раз, а после обновления библиотеки ещё раз пройти оставшиеся записи с той же логикой</string>
     <string name="pref_filter_update_categories_details">Обновления в исключённых категориях не будут показываться, даже если они находятся во включённых категориях.</string>
     <string name="pref_filter_upcoming_categories_details">Серии в исключённых категориях не будут показываться, даже если находятся в любых включённых категориях.</string>
+    <string name="reader_ai_progress_waiting">Ожидание обработки</string>
+    <string name="reader_ai_progress_preparing">Подготовка изображения</string>
+    <string name="reader_ai_progress_uploading_pc">Отправка изображения на компьютер</string>
+    <string name="reader_ai_progress_downloading_pc">Компьютер загружает изображение</string>
+    <string name="reader_ai_progress_upscaling">Апскейл на компьютере</string>
+    <string name="reader_ai_progress_downloading_phone">Отправка улучшенного изображения на телефон</string>
+    <string name="reader_ai_progress_ready">Улучшенное изображение готово</string>
+    <string name="reader_ai_progress_failed">Ошибка AI-обработки</string>
 </resources>

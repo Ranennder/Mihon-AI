@@ -3,6 +3,9 @@
 ## v0.1.20
 
 - Update the Mihon base from 0.20.2 to 0.20.4.
+- Replace the reader's generic loading spinner during AI processing with a labeled progress bar.
+- Show whether an image is being sent to the PC, downloaded by the PC, upscaled, or returned to the phone.
+- Track AI progress separately for every page, including whole-chapter and direct-download modes.
 - Fix relative dates that could incorrectly appear as today.
 - Fix partial MyAnimeList dates and reader pages that could load indefinitely.
 - Add category filters to Updates and Upcoming, plus the latest WebView compatibility fixes.

@@ -13,8 +13,10 @@ import logcat.LogPriority
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import okio.BufferedSource
 import org.json.JSONArray
 import org.json.JSONObject
@@ -455,6 +457,7 @@ class RemotePageUpscaler(
     fun upscaleSource(
         source: BufferedSource,
         pageMetadata: PageRequestMetadata? = null,
+        onProgress: (ProgressStage, Int) -> Unit = { _, _ -> },
     ): ByteArray? {
         lastErrorMessage = null
 
@@ -466,12 +469,14 @@ class RemotePageUpscaler(
         }
 
         val preparedImage = prepareRequestImage(source.peek().readByteArray()) ?: return null
+        onProgress(ProgressStage.UPLOADING_TO_PC, 10)
         val scopeId = workScope.get()
         val initialAttempt = runUpscaleRequest(
             baseUrl = baseUrlResolution.baseUrl,
             preparedImage = preparedImage,
             pageMetadata = pageMetadata,
             scopeId = scopeId,
+            onProgress = onProgress,
         )
         if (initialAttempt.bytes != null) {
             return initialAttempt.bytes
@@ -491,6 +496,7 @@ class RemotePageUpscaler(
             preparedImage = preparedImage,
             pageMetadata = pageMetadata,
             scopeId = scopeId,
+            onProgress = onProgress,
         ).bytes
     }
 
@@ -575,6 +581,7 @@ class RemotePageUpscaler(
         preparedImage: PreparedImage,
         pageMetadata: PageRequestMetadata?,
         scopeId: Long,
+        onProgress: (ProgressStage, Int) -> Unit,
     ): UpscaleAttempt {
         val requestUrl = "$baseUrl/api/upscale".toHttpUrlOrNull()
         if (requestUrl == null) {
@@ -608,8 +615,24 @@ class RemotePageUpscaler(
             requestBuilder.header("X-Reader-AI-Page-Count", it.totalPages.toString())
         }
 
+        val requestBody = object : RequestBody() {
+            override fun contentType() = preparedImage.mediaType.toMediaType()
+            override fun contentLength() = preparedImage.bytes.size.toLong()
+            override fun writeTo(sink: BufferedSink) {
+                val chunkSize = 64 * 1024
+                var offset = 0
+                while (offset < preparedImage.bytes.size) {
+                    val count = minOf(chunkSize, preparedImage.bytes.size - offset)
+                    sink.write(preparedImage.bytes, offset, count)
+                    offset += count
+                    val fraction = offset.toFloat() / preparedImage.bytes.size.coerceAtLeast(1)
+                    onProgress(ProgressStage.UPLOADING_TO_PC, 10 + (fraction * 25).toInt())
+                }
+                onProgress(ProgressStage.UPSCALING, 40)
+            }
+        }
         val request = requestBuilder
-            .post(preparedImage.bytes.toRequestBody(preparedImage.mediaType.toMediaType()))
+            .post(requestBody)
             .build()
 
         return runCatching {
@@ -621,6 +644,7 @@ class RemotePageUpscaler(
                     return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
                 }
 
+                onProgress(ProgressStage.DOWNLOADING_TO_PHONE, 85)
                 val responseBytes = response.body.bytes()
                 if (responseBytes.isEmpty()) {
                     lastErrorMessage = "Remote AI server returned an empty image"
@@ -632,6 +656,7 @@ class RemotePageUpscaler(
                 ) ?: return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
 
                 lastErrorMessage = null
+                onProgress(ProgressStage.DOWNLOADING_TO_PHONE, 95)
                 UpscaleAttempt.success(normalizedResponseBytes)
             }
         }
@@ -860,6 +885,12 @@ class RemotePageUpscaler(
             val message: String,
             val retryable: Boolean,
         ) : ChapterStreamFetchResult
+    }
+
+    enum class ProgressStage {
+        UPLOADING_TO_PC,
+        UPSCALING,
+        DOWNLOADING_TO_PHONE,
     }
 
     private data class PreparedImage(

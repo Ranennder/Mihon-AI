@@ -1087,4 +1087,12 @@
     <string name="migrationListScreen.migrateDialog.cancelLabel">Cancel</string>
     <string name="migrationListScreen.progressDialog.cancelLabel">Cancel</string>
     <string name="migrationListScreen.matchWithoutChapterToast">No chapters found, this entry cannot be used for migration</string>
+    <string name="reader_ai_progress_waiting">Waiting for AI processing</string>
+    <string name="reader_ai_progress_preparing">Preparing image</string>
+    <string name="reader_ai_progress_uploading_pc">Sending image to PC</string>
+    <string name="reader_ai_progress_downloading_pc">PC is downloading the image</string>
+    <string name="reader_ai_progress_upscaling">Upscaling on PC</string>
+    <string name="reader_ai_progress_downloading_phone">Sending enhanced image to phone</string>
+    <string name="reader_ai_progress_ready">Enhanced image is ready</string>
+    <string name="reader_ai_progress_failed">AI processing failed</string>
 </resources>
