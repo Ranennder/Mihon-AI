@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import logcat.LogPriority
@@ -33,6 +32,7 @@ import tachiyomi.i18n.MR
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.util.Locale
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * The manager of extensions installed as another apk which extend the available sources. It handles
@@ -41,11 +41,26 @@ import java.util.Locale
  * signature is trusted, otherwise the user will be prompted with a warning to trust it before being
  * loaded.
  */
-class ExtensionManager(
+class ExtensionManager internal constructor(
     private val context: Context,
-    private val preferences: SourcePreferences = Injekt.get(),
-    private val trustExtension: TrustExtension = Injekt.get(),
+    private val preferences: SourcePreferences,
+    private val trustExtension: TrustExtension,
+    private val api: ExtensionApi,
+    installerFactory: () -> ExtensionInstaller,
+    registerInstallReceiver: (ExtensionInstallReceiver.Listener) -> Unit,
 ) {
+    constructor(
+        context: Context,
+        preferences: SourcePreferences = Injekt.get(),
+        trustExtension: TrustExtension = Injekt.get(),
+    ) : this(
+        context,
+        preferences,
+        trustExtension,
+        ExtensionApi(),
+        { ExtensionInstaller(context) },
+        { ExtensionInstallReceiver(it).register(context) },
+    )
 
     val scope = CoroutineScope(SupervisorJob())
 
@@ -53,14 +68,9 @@ class ExtensionManager(
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
 
     /**
-     * API where all the available extensions can be found.
-     */
-    private val api = ExtensionApi()
-
-    /**
      * The installer which installs, updates and uninstalls the extensions.
      */
-    private val installer by lazy { ExtensionInstaller(context) }
+    private val installer by lazy(installerFactory)
 
     private val iconMap = mutableMapOf<String, Drawable>()
 
@@ -75,7 +85,7 @@ class ExtensionManager(
 
     init {
         initExtensions()
-        ExtensionInstallReceiver(InstallationListener()).register(context)
+        registerInstallReceiver(InstallationListener())
     }
 
     private var subLanguagesEnabledOnFirstRun = preferences.enabledLanguages.isSet()
@@ -146,6 +156,20 @@ class ExtensionManager(
         }
 
         enableAdditionalSubLanguages(extensions)
+
+        // An installer can return before the package broadcast, and some devices lose
+        // that broadcast entirely. Re-read the packages before comparing versions.
+        installedExtensionMapFlow.value.values.filter { it.hasUpdate }.forEach { extension ->
+            val pkgName = extension.pkgName
+            when (val result = ExtensionLoader.loadExtensionFromPkgName(context, pkgName)) {
+                is LoadResult.Success -> registerUpdatedExtension(result.extension)
+                is LoadResult.Untrusted -> {
+                    installedExtensionMapFlow.update { it - pkgName }
+                    untrustedExtensionMapFlow.update { it + result.extension }
+                }
+                LoadResult.Error -> Unit
+            }
+        }
 
         availableExtensionMapFlow.value = extensions.associateBy { it.pkgName }
         updatedInstalledExtensionsStatuses(extensions)
@@ -228,20 +252,45 @@ class ExtensionManager(
     fun updateExtension(extension: Extension.Installed): Flow<InstallStep> {
         val availableExt = availableExtensionMapFlow.value[extension.pkgName] ?: return emptyFlow()
         val isUpdateForPrivatelyInstalled = !extension.isShared
-        return installer.downloadAndInstall(availableExt.apkUrl, availableExt, isUpdateForPrivatelyInstalled)
-            .onEach { step ->
-                if (step == InstallStep.Installed) {
-                    // Reconcile the version before clearing the update indicator, even if the
-                    // package broadcast is delayed or not delivered by the device's installer.
+        return installer.downloadAndInstall(
+            availableExt.apkUrl,
+            availableExt,
+            isUpdateForPrivatelyInstalled,
+            verifyDownloadedUpdate = true,
+        )
+            .map { step ->
+                if (step != InstallStep.Installed) return@map step
+
+                // The installer result alone does not prove that the requested version
+                // is available to this app. Verify and register it before reporting success.
+                val loadedExtension = try {
                     when (val result = ExtensionLoader.loadExtensionFromPkgName(context, extension.pkgName)) {
-                        is LoadResult.Success -> registerUpdatedExtension(result.extension.withUpdateCheck())
-                        is LoadResult.Untrusted -> {
-                            installedExtensionMapFlow.update { it - result.extension.pkgName }
-                            untrustedExtensionMapFlow.update { it + result.extension }
+                        is LoadResult.Success -> result.extension.also {
+                            registerUpdatedExtension(it.withUpdateCheck())
                         }
-                        else -> Unit
+                        is LoadResult.Untrusted -> result.extension.also { updated ->
+                            installedExtensionMapFlow.update { it - updated.pkgName }
+                            untrustedExtensionMapFlow.update { it + updated }
+                        }
+                        LoadResult.Error -> null
                     }
-                    updatePendingUpdatesCount()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logcat(LogPriority.ERROR, e) { "Failed to load updated extension ${extension.pkgName}" }
+                    null
+                }
+                updatePendingUpdatesCount()
+                if (loadedExtension != null && loadedExtension.versionCode >= availableExt.versionCode &&
+                    loadedExtension.libVersion >= availableExt.libVersion
+                ) {
+                    InstallStep.Installed
+                } else {
+                    logcat(LogPriority.ERROR) {
+                        "Extension ${extension.pkgName} did not load the requested update: " +
+                            "expected ${availableExt.versionCode}, loaded ${loadedExtension?.versionCode}"
+                    }
+                    InstallStep.Error
                 }
             }
     }

@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.extension.util
 
 import android.content.Context
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.base.ExtensionInstallerPreference
 import eu.kanade.tachiyomi.extension.installer.Installer
@@ -17,15 +19,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -141,4 +146,144 @@ class ExtensionInstallerTest {
             assertTrue(finished.await(5, TimeUnit.SECONDS))
         }
     }
+
+    @Test
+    fun `legacy update all waits for each Android installer result`() = runBlocking {
+        every { preference.get() } returns BasePreferences.ExtensionInstaller.LEGACY
+        val launches = Channel<Long>(Channel.UNLIMITED)
+        val installer = ExtensionInstaller(context, scope, successfulDownloadClient(), preference) { id, _ ->
+            check(launches.trySend(id).isSuccess)
+        }
+        val otherExtension = mockk<Extension.Available>()
+        every { otherExtension.pkgName } returns "extension.other"
+
+        withTimeout(5_000) {
+            val first = async {
+                installer.downloadAndInstall("https://example.test/first.apk", extension)
+                    .first { it.isCompleted() }
+            }
+            val firstId = launches.receive()
+            val second = async {
+                installer.downloadAndInstall("https://example.test/second.apk", otherExtension)
+                    .first { it.isCompleted() }
+            }
+
+            assertNull(withTimeoutOrNull(200) { launches.receive() })
+            installer.updateInstallStep(firstId, InstallStep.Installed)
+            assertEquals(InstallStep.Installed, first.await())
+
+            val secondId = launches.receive()
+            installer.updateInstallStep(secondId, InstallStep.Installed)
+            assertEquals(InstallStep.Installed, second.await())
+        }
+    }
+
+    @Test
+    fun `cancelling a legacy install releases the next confirmation`() = runBlocking {
+        every { preference.get() } returns BasePreferences.ExtensionInstaller.LEGACY
+        val launches = Channel<Long>(Channel.UNLIMITED)
+        val installer = ExtensionInstaller(context, scope, successfulDownloadClient(), preference) { id, _ ->
+            check(launches.trySend(id).isSuccess)
+        }
+        val otherExtension = mockk<Extension.Available>()
+        every { otherExtension.pkgName } returns "extension.other"
+
+        withTimeout(5_000) {
+            val first = async {
+                installer.downloadAndInstall("https://example.test/first.apk", extension)
+                    .first { it.isCompleted() }
+            }
+            launches.receive()
+            val second = async {
+                installer.downloadAndInstall("https://example.test/second.apk", otherExtension)
+                    .first { it.isCompleted() }
+            }
+
+            installer.cancelInstall(extension.pkgName)
+            assertEquals(InstallStep.Idle, first.await())
+            val secondId = launches.receive()
+            installer.updateInstallStep(secondId, InstallStep.Installed)
+            assertEquals(InstallStep.Installed, second.await())
+        }
+    }
+
+    @Test
+    fun `an APK older than the requested update is never installed`() = runBlocking {
+        val packageManager = mockk<PackageManager>()
+        val downloaded = mockk<PackageInfo>().apply {
+            packageName = "extension.test"
+            versionCode = 65
+        }
+        every { context.packageManager } returns packageManager
+        every { packageManager.getPackageArchiveInfo(any(), 0) } returns downloaded
+        every { extension.versionCode } returns 106_068
+        val installer = ExtensionInstaller(context, scope, successfulDownloadClient(), preference)
+
+        val result = withTimeout(5_000) {
+            installer.downloadAndInstall(
+                "https://example.test/extension.apk",
+                extension,
+                verifyDownloadedUpdate = true,
+            ).first { it.isCompleted() }
+        }
+
+        assertEquals(InstallStep.Error, result)
+        verify(exactly = 0) { ExtensionLoader.installPrivateExtensionFile(any(), any()) }
+    }
+
+    @Test
+    fun `an APK for a different package is never installed`() = runBlocking {
+        val packageManager = mockk<PackageManager>()
+        val downloaded = mockk<PackageInfo>().apply { packageName = "extension.other" }
+        every { context.packageManager } returns packageManager
+        every { packageManager.getPackageArchiveInfo(any(), 0) } returns downloaded
+        val installer = ExtensionInstaller(context, scope, successfulDownloadClient(), preference)
+
+        val result = withTimeout(5_000) {
+            installer.downloadAndInstall(
+                "https://example.test/extension.apk",
+                extension,
+                verifyDownloadedUpdate = true,
+            ).first { it.isCompleted() }
+        }
+
+        assertEquals(InstallStep.Error, result)
+        verify(exactly = 0) { ExtensionLoader.installPrivateExtensionFile(any(), any()) }
+    }
+
+    @Test
+    fun `an APK matching the requested update is installed`() = runBlocking {
+        val packageManager = mockk<PackageManager>()
+        val downloaded = mockk<PackageInfo>().apply {
+            packageName = "extension.test"
+            versionCode = 106_068
+        }
+        every { context.packageManager } returns packageManager
+        every { packageManager.getPackageArchiveInfo(any(), 0) } returns downloaded
+        every { extension.versionCode } returns 106_068
+        val installer = ExtensionInstaller(context, scope, successfulDownloadClient(), preference)
+
+        val result = withTimeout(5_000) {
+            installer.downloadAndInstall(
+                "https://example.test/extension.apk",
+                extension,
+                verifyDownloadedUpdate = true,
+            ).first { it.isCompleted() }
+        }
+
+        assertEquals(InstallStep.Installed, result)
+        verify(exactly = 1) { ExtensionLoader.installPrivateExtensionFile(context, any()) }
+    }
+
+    private fun successfulDownloadClient(): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body("apk".toResponseBody())
+                .build()
+        }
+        .build()
 }

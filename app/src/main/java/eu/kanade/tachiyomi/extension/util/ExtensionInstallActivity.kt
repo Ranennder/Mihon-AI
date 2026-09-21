@@ -25,6 +25,13 @@ class ExtensionInstallActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        if (savedInstanceState != null) {
+            ignoreUntil = savedInstanceState.getLong("ignoreUntil")
+            ignoreResult = savedInstanceState.getBoolean("ignoreResult")
+            hasIgnoredResult = savedInstanceState.getBoolean("hasIgnoredResult")
+            return
+        }
+
         @Suppress("DEPRECATION")
         val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE)
             .setDataAndType(intent.data, intent.type)
@@ -39,10 +46,17 @@ class ExtensionInstallActivity : Activity() {
         try {
             startActivityForResult(installIntent, INSTALL_REQUEST_CODE)
         } catch (error: Exception) {
-            // Either install package can't be found (probably bots) or there's a security exception
-            // with the download manager. Nothing we can workaround.
+            setInstallStep(InstallStep.Error)
             toast(error.message)
+            finish()
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putLong("ignoreUntil", ignoreUntil)
+        outState.putBoolean("ignoreResult", ignoreResult)
+        outState.putBoolean("hasIgnoredResult", hasIgnoredResult)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -66,18 +80,23 @@ class ExtensionInstallActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        intent.data?.let { contentResolver.delete(it, null, null) }
+        if (isFinishing) {
+            intent.data?.let { contentResolver.delete(it, null, null) }
+        }
     }
 
     private fun checkInstallationResult(resultCode: Int) {
-        val downloadId = intent.extras!!.getLong(ExtensionInstaller.EXTRA_DOWNLOAD_ID)
-        val extensionManager = Injekt.get<ExtensionManager>()
         val newStep = when (resultCode) {
             RESULT_OK -> InstallStep.Installed
             RESULT_CANCELED -> InstallStep.Idle
             else -> InstallStep.Error
         }
-        extensionManager.updateInstallStep(downloadId, newStep)
+        setInstallStep(newStep)
+    }
+
+    private fun setInstallStep(step: InstallStep) {
+        val downloadId = intent.getLongExtra(ExtensionInstaller.EXTRA_DOWNLOAD_ID, -1L)
+        Injekt.get<ExtensionManager>().updateInstallStep(downloadId, step)
     }
 }
 

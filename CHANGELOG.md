@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.24
+
+- Queue legacy Android extension installations so Update all opens one confirmation at a time, including on MIUI.
+- Verify downloaded update APKs and the installed version before reporting success; refresh pending extensions when installation broadcasts are missed.
+- Refresh saved extension store endpoints before browsing, including Keiyoushi's migration to the current catalog format.
+- Preserve pending extension installations across activity recreation and release the queue if the system installer cannot open.
+- Fix Windows companion instance replacement when the port is occupied, and identify listeners through native Windows APIs.
+- Close the previous companion before self-update and restart packaged builds with an independent PyInstaller runtime.
+- Test instance replacement with both Python processes and the built Windows executable in CI.
+
 ## v0.1.23
 
 - Fix switching from a saved LAN companion to internet access, and show pairing progress or errors in AI settings.

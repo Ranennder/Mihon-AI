@@ -84,12 +84,28 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Test companion startup and networking
+        working-directory: companion/reader-ai-server
+        shell: pwsh
+        run: |
+          python -m pip install pillow
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build companion
         working-directory: companion/reader-ai-server
         shell: cmd
         env:
           MIHON_AI_RELEASE_TAG: ${{ needs.get_tag.outputs.tag }}
         run: build_windows_exe.bat
+
+      - name: Test frozen companion instance handoff
+        working-directory: companion/reader-ai-server
+        shell: pwsh
+        env:
+          MIHON_AI_TEST_COMPANION_EXE: ${{ github.workspace }}/companion/reader-ai-server/dist/MihonAiCompanion.exe
+        run: python -m unittest test_companion_startup.CompanionStartupTests.test_windows_second_launch_replaces_running_frozen_instance -v
 
       - name: Rename companion
         shell: pwsh

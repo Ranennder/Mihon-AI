@@ -39,6 +39,8 @@ If the runtime is bundled during the PyInstaller build, the `.exe` also works st
    - `Remote AI server URL` -> `http://YOUR_PC_IP:8765`
    - `Remote AI server token` -> the same token as in `reader_ai_server.json` if you use one
 
+Launching another Windows companion closes the previous companion on the configured port, including its active upscale and tunnel processes, before starting or installing an update. If another application occupies that port, it is left running and the companion reports the conflict.
+
 For the beta direct route, enable `Companion downloads pages directly`. It works for individual pages and whole-chapter batches. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading images from the phone.
 
 To use the companion away from home, enable `Internet access (beta)` in Mihon while the phone and PC are on the same Wi-Fi. Mihon starts the bundled Cloudflare Quick Tunnel through the local companion and saves its temporary HTTPS address and pairing token automatically. No router configuration, QR code, account, or separate software installation is required. The address changes whenever the companion restarts, so pair again on the same Wi-Fi after each restart.

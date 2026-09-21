@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.util
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.net.toUri
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.base.ExtensionInstallerPreference
@@ -21,9 +22,13 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import logcat.LogPriority
+import okhttp3.CacheControl
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -45,6 +50,13 @@ internal class ExtensionInstaller(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     private val httpClient: OkHttpClient = Injekt.get<NetworkHelper>().client,
     private val extensionInstaller: ExtensionInstallerPreference = Injekt.get<BasePreferences>().extensionInstaller,
+    private val startLegacyInstall: (Long, File) -> Unit = { downloadId, tempFile ->
+        val intent = Intent(context, ExtensionInstallActivity::class.java)
+            .setDataAndType(tempFile.getUriCompat(context), APK_MIME)
+            .putExtra(EXTRA_DOWNLOAD_ID, downloadId)
+            .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(intent)
+    },
 ) {
 
     private val activeJobs = ConcurrentHashMap<String, Job>()
@@ -52,6 +64,7 @@ internal class ExtensionInstaller(
     private val activeDownloadIds = ConcurrentHashMap<String, Long>()
     private val activeCalls = ConcurrentHashMap<Long, Call>()
     private val downloadIds = AtomicLong()
+    private val legacyInstallMutex = Mutex()
 
     /**
      * Adds the given extension to the downloads queue and returns an observable containing its
@@ -66,6 +79,7 @@ internal class ExtensionInstaller(
         url: String,
         extension: Extension,
         isUpdateForPrivatelyInstalled: Boolean = false,
+        verifyDownloadedUpdate: Boolean = false,
     ): Flow<InstallStep> {
         cancelInstall(extension.pkgName)
         val downloadId = downloadIds.incrementAndGet()
@@ -79,7 +93,12 @@ internal class ExtensionInstaller(
             var handedToInstaller = false
             try {
                 step.value = InstallStep.Downloading
-                val request = Request.Builder().url(url).build()
+                val request = Request.Builder()
+                    .url(url)
+                    .apply {
+                        if (verifyDownloadedUpdate) cacheControl(CacheControl.FORCE_NETWORK)
+                    }
+                    .build()
                 val call = httpClient.newCall(request)
                 activeCalls[downloadId] = call
                 ensureActive()
@@ -91,11 +110,41 @@ internal class ExtensionInstaller(
                     }
                 }
 
-                synchronized(this@ExtensionInstaller) {
-                    ensureActive()
-                    step.value = InstallStep.Installing
-                    installApk(downloadId, tmpFile, isUpdateForPrivatelyInstalled)
-                    handedToInstaller = true
+                ensureActive()
+                if (verifyDownloadedUpdate) {
+                    val downloadedPackage = context.packageManager
+                        .getPackageArchiveInfo(tmpFile.absolutePath, 0)
+                        ?: error("Downloaded extension APK could not be read")
+                    check(downloadedPackage.packageName == extension.pkgName) {
+                        "Downloaded extension package ${downloadedPackage.packageName} " +
+                            "does not match ${extension.pkgName}"
+                    }
+                    val downloadedVersion = PackageInfoCompat.getLongVersionCode(downloadedPackage)
+                    check(downloadedVersion >= extension.versionCode) {
+                        "Downloaded extension ${extension.pkgName} has version $downloadedVersion, " +
+                            "but the update requires ${extension.versionCode}"
+                    }
+                }
+
+                val startInstallation = {
+                    synchronized(this@ExtensionInstaller) {
+                        ensureActive()
+                        step.value = InstallStep.Installing
+                        installApk(downloadId, tmpFile, isUpdateForPrivatelyInstalled)
+                        handedToInstaller = true
+                    }
+                }
+                if (!isUpdateForPrivatelyInstalled &&
+                    extensionInstaller.get() == BasePreferences.ExtensionInstaller.LEGACY
+                ) {
+                    // Legacy installs launch a separate Android confirmation activity. Keep
+                    // one active until its result arrives so Update all cannot replace dialogs.
+                    legacyInstallMutex.withLock {
+                        startInstallation()
+                        step.first { it.isCompleted() }
+                    }
+                } else {
+                    startInstallation()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -141,12 +190,7 @@ internal class ExtensionInstaller(
 
         when (val installer = extensionInstaller.get()) {
             BasePreferences.ExtensionInstaller.LEGACY -> {
-                val intent = Intent(context, ExtensionInstallActivity::class.java)
-                    .setDataAndType(tempFile.getUriCompat(context), APK_MIME)
-                    .putExtra(EXTRA_DOWNLOAD_ID, downloadId)
-                    .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
-                context.startActivity(intent)
+                startLegacyInstall(downloadId, tempFile)
             }
 
             BasePreferences.ExtensionInstaller.PRIVATE -> {

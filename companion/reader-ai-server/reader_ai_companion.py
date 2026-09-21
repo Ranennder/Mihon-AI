@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import filecmp
 import json
 import itertools
@@ -14,6 +15,7 @@ import queue
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -23,9 +25,10 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field, replace
 from http import HTTPStatus
+from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import unquote_plus, urlparse
 from urllib.request import HTTPRedirectHandler
@@ -310,6 +313,15 @@ class ImageSize:
 
 class ReaderAiServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        if os.name == "nt":
+            # HTTPServer enables SO_REUSEADDR, which lets two Windows servers
+            # listen on the same port and receive requests unpredictably.
+            self.allow_reuse_address = False
+            self.allow_reuse_port = False
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def __init__(self, server_address: tuple[str, int], config: Config):
         super().__init__(server_address, ReaderAiRequestHandler)
@@ -1159,11 +1171,16 @@ class ReaderAiServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
-            for _ in self._worker_threads:
+            # TCPServer also calls this when binding fails, before __init__ has
+            # created any workers. Preserve the original bind error for retry.
+            worker_threads = getattr(self, "_worker_threads", ())
+            for _ in worker_threads:
                 self._processing_queue.put(_STOP_PROCESSING)
-            for worker_thread in self._worker_threads:
+            for worker_thread in worker_threads:
                 worker_thread.join(timeout=1)
-            self._workspace_root_owner.cleanup()
+            workspace_owner = getattr(self, "_workspace_root_owner", None)
+            if workspace_owner is not None:
+                workspace_owner.cleanup()
 
     def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
         _, exc, _ = sys.exc_info()
@@ -3317,7 +3334,9 @@ def _launch_windows_self_replace(
     relaunch_arguments: list[str],
 ) -> None:
     updater_script = Path(tempfile.gettempdir()) / f"mihon-ai-companion-update-{uuid.uuid4().hex}.ps1"
-    powershell_args = ", ".join(_powershell_single_quoted(argument) for argument in relaunch_arguments)
+    # Start-Process joins an ArgumentList array without preserving its argument
+    # boundaries. Supply one correctly quoted Windows command line instead.
+    relaunch_command_line = subprocess.list2cmdline(relaunch_arguments)
     updater_script.write_text(
         "\n".join(
             [
@@ -3325,7 +3344,7 @@ def _launch_windows_self_replace(
                 f"$source = {_powershell_single_quoted(str(downloaded_executable))}",
                 f"$updateLog = {_powershell_single_quoted(str(current_executable) + '.update.log')}",
                 f"$pidToWait = {os.getpid()}",
-                f"$arguments = @({powershell_args})" if relaunch_arguments else "$arguments = @()",
+                f"$arguments = {_powershell_single_quoted(relaunch_command_line)}",
                 "$ErrorActionPreference = 'Stop'",
                 "Set-Content -LiteralPath $updateLog -Value \"Waiting for companion process $pidToWait\"",
                 "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {",
@@ -3352,14 +3371,25 @@ def _launch_windows_self_replace(
                 "  exit 1",
                 "}",
                 "Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue",
-                "Start-Process -FilePath $target -ArgumentList $arguments",
+                "if ($arguments.Length -gt 0) {",
+                "  Start-Process -FilePath $target -ArgumentList $arguments",
+                "} else {",
+                "  Start-Process -FilePath $target",
+                "}",
                 "Add-Content -LiteralPath $updateLog -Value 'Companion restarted successfully'",
                 "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue",
             ],
         ),
-        encoding="utf-8",
+        # Windows PowerShell 5.1 treats UTF-8 without a BOM as the ANSI codepage.
+        encoding="utf-8-sig",
     )
-    kwargs: dict[str, Any] = {}
+    # Start-Process inherits this environment from the updater. A restarted
+    # PyInstaller onefile application must unpack its own runtime, since the
+    # previous bootloader removes its extraction directory on exit.
+    kwargs: dict[str, Any] = {
+        "env": {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+        "close_fds": True,
+    }
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.Popen(
@@ -3425,26 +3455,118 @@ def _maybe_perform_self_update(*, skip_self_update: bool) -> bool:
         return False
 
 
-def _find_listening_process_id(port: int) -> int | None:
+class _WindowsTcpListener(ctypes.Structure):
+    _fields_ = [
+        ("state", ctypes.c_uint32),
+        ("local_address", ctypes.c_uint32),
+        ("local_port", ctypes.c_uint32),
+        ("remote_address", ctypes.c_uint32),
+        ("remote_port", ctypes.c_uint32),
+        ("pid", ctypes.c_uint32),
+    ]
+
+
+def _find_windows_listener(port: int, host: str = "0.0.0.0") -> tuple[int, str] | None:
     if os.name != "nt":
         return None
-    command = [
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        (
-            f"$listenerPid = Get-NetTCPConnection -LocalPort {port} -State Listen "
-            "-ErrorAction SilentlyContinue | Select-Object -First 1 "
-            "-ExpandProperty OwningProcess; "
-            'if ($listenerPid) { Write-Output $listenerPid }'
-        ),
+    # Read the IPv4 listener table directly: this server uses AF_INET. Depending
+    # on PowerShell's NetTCPIP/CIM module silently missed running instances when
+    # the command was unavailable or failed.
+    get_table = ctypes.WinDLL("iphlpapi").GetExtendedTcpTable
+    get_table.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+        ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32,
     ]
-    try:
-        result = _run_hidden_windows_command(command)
-    except OSError:
+    get_table.restype = ctypes.c_uint32
+    size = ctypes.c_uint32(0)
+    buffer = None
+    for _ in range(5):
+        result = get_table(buffer, ctypes.byref(size), False, socket.AF_INET, 3, 0)
+        if result == 0:
+            break
+        if result != 122:  # ERROR_INSUFFICIENT_BUFFER
+            raise OSError(result, "Cannot inspect the Windows TCP listener table")
+        buffer = ctypes.create_string_buffer(size.value)
+    else:
+        raise OSError("Windows TCP listener table kept changing during startup")
+    if buffer is None:
         return None
-    pid_text = result.stdout.strip()
-    return int(pid_text) if pid_text.isdigit() else None
+    count = ctypes.c_uint32.from_buffer(buffer).value
+    rows = (_WindowsTcpListener * count).from_buffer(buffer, ctypes.sizeof(ctypes.c_uint32))
+    requested_address = int.from_bytes(socket.inet_aton(socket.gethostbyname(host)), "little")
+    for row in rows:
+        if socket.ntohs(row.local_port & 0xFFFF) != port:
+            continue
+        if requested_address and row.local_address not in (0, requested_address):
+            continue
+        return row.pid, socket.inet_ntoa(row.local_address.to_bytes(4, "little"))
+    return None
+
+
+def _find_listening_process_id(port: int, host: str = "0.0.0.0") -> int | None:
+    listener = _find_windows_listener(port, host)
+    return listener[0] if listener is not None else None
+
+
+def _windows_process_executable(pid: int) -> str | None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        path = ctypes.create_unicode_buffer(32768)
+        size = ctypes.c_uint32(len(path))
+        return path.value if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)) else None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _is_companion_process(port: int, pid: int, host: str) -> bool:
+    executable = _windows_process_executable(pid)
+    if executable:
+        name = PureWindowsPath(executable).name
+        if re.fullmatch(r"MihonAiCompanion(?:-v\d+\.\d+\.\d+-windows)?(?: \(\d+\))?\.exe", name, re.IGNORECASE):
+            return True
+        if getattr(sys, "frozen", False) and PureWindowsPath(executable) == PureWindowsPath(sys.executable):
+            return True
+    # Also recognize renamed executables and source installations through their
+    # existing health schema. Probe the selected listener's bound address: a
+    # wildcard search may have selected an unrelated service on 127.0.0.2 while
+    # a real companion owns the same port on 127.0.0.1.
+    listener = _find_windows_listener(port, host)
+    if listener is None or listener[0] != pid:
+        return False
+    probe_host = "127.0.0.1" if listener[1] == "0.0.0.0" else listener[1]
+    if _find_listening_process_id(port, probe_host) != pid:
+        return False
+    connection = HTTPConnection(probe_host, port, timeout=2)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        if response.status != HTTPStatus.OK:
+            return False
+        payload = json.loads(response.read(65536))
+        return (
+            isinstance(payload, dict)
+            and payload.get("ok") is True
+            and payload.get("mode") in ("subprocess", "mock_copy")
+            and "companion_release_tag" in payload
+            and isinstance(payload.get("supported_models"), list)
+            and "realesr-animevideov3" in payload["supported_models"]
+            and _find_listening_process_id(port, probe_host) == pid
+        )
+    except (OSError, HTTPException, ValueError):
+        return False
+    finally:
+        connection.close()
 
 
 def _show_duplicate_close_failed_dialog(port: int, pid: int, details: str) -> None:
@@ -3459,16 +3581,33 @@ def _show_duplicate_close_failed_dialog(port: int, pid: int, details: str) -> No
     ctypes.windll.user32.MessageBoxW(None, text, "Mihon AI Companion", flags)
 
 
-def _wait_for_port_release(port: int, timeout_seconds: float = 5.0) -> bool:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        if _find_listening_process_id(port) is None:
+def _wait_for_port_release(
+    port: int, timeout_seconds: float = 5.0, host: str = "0.0.0.0", previous_pid: int | None = None,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        listener_pid = _find_listening_process_id(port, host)
+        if listener_pid is None or (previous_pid is not None and listener_pid != previous_pid):
             return True
         time.sleep(0.2)
     return False
 
 
-def _close_existing_instance(port: int, pid: int) -> bool:
+def _close_existing_instance(port: int, pid: int, host: str = "0.0.0.0") -> bool:
+    if not _is_companion_process(port, pid, host):
+        details = "The listening process could not be identified as Mihon AI Companion; it was left running."
+        _emit_log_line(f"Port {port} is busy: {details}")
+        _show_duplicate_close_failed_dialog(port, pid, details)
+        return False
+    # Do not terminate a different listener if the original exited during the
+    # identity check. In onefile builds, target the Python child and its workers;
+    # the PyInstaller parent then performs its normal cleanup and exits.
+    current_pid = _find_listening_process_id(port, host)
+    if current_pid is None:
+        return True
+    if current_pid != pid:
+        _emit_log_line(f"Listener on port {port} changed during restart; leaving it running")
+        return False
     _emit_log_line(
         f"Restarting previous companion on port {port}"
     )
@@ -3479,7 +3618,7 @@ def _close_existing_instance(port: int, pid: int) -> bool:
         _show_duplicate_close_failed_dialog(port, pid, str(exc))
         return False
     if result.returncode != 0:
-        if _wait_for_port_release(port, timeout_seconds=1.0):
+        if _wait_for_port_release(port, timeout_seconds=1.0, host=host, previous_pid=pid):
             _emit_log_line(
                 f"Previous companion instance on port {port} vanished while closing"
             )
@@ -3488,7 +3627,7 @@ def _close_existing_instance(port: int, pid: int) -> bool:
         _emit_log_line(f"Failed to close previous companion instance: {details}")
         _show_duplicate_close_failed_dialog(port, pid, details)
         return False
-    if not _wait_for_port_release(port):
+    if not _wait_for_port_release(port, host=host, previous_pid=pid):
         details = "port stayed busy after taskkill"
         _emit_log_line(f"Failed to close previous companion instance: {details}")
         _show_duplicate_close_failed_dialog(port, pid, details)
@@ -3498,24 +3637,33 @@ def _close_existing_instance(port: int, pid: int) -> bool:
 
 
 def _is_address_in_use_error(exc: OSError) -> bool:
-    return getattr(exc, "winerror", None) == 10048 or exc.errno == 10048
+    return getattr(exc, "winerror", None) in (10048, 10013) or exc.errno in (errno.EADDRINUSE, 10048, 10013)
+
+
+def _close_previous_instances(config: Config) -> bool:
+    # Older builds allowed multiple listeners on Windows. Drain all of them,
+    # with a limit so competing launches cannot loop indefinitely.
+    for _ in range(8):
+        duplicate_pid = _find_listening_process_id(config.port, config.host)
+        if duplicate_pid is None:
+            return True
+        if duplicate_pid in {os.getpid(), os.getppid()}:
+            return False
+        if not _close_existing_instance(config.port, duplicate_pid, config.host):
+            return False
+    _emit_log_line(f"Too many competing companion instances on port {config.port}")
+    return False
 
 
 def _create_server_with_duplicate_resolution(config: Config) -> ReaderAiServer | None:
-    current_pids = {os.getpid(), os.getppid()}
-    duplicate_pid = _find_listening_process_id(config.port)
-    if duplicate_pid is not None and duplicate_pid not in current_pids:
-        if not _close_existing_instance(config.port, duplicate_pid):
-            return None
+    if not _close_previous_instances(config):
+        return None
     try:
         return ReaderAiServer((config.host, config.port), config)
     except OSError as exc:
         if not _is_address_in_use_error(exc):
             raise
-        duplicate_pid = _find_listening_process_id(config.port)
-        if duplicate_pid is None or duplicate_pid in current_pids:
-            raise
-        if not _close_existing_instance(config.port, duplicate_pid):
+        if not _close_previous_instances(config):
             return None
         return ReaderAiServer((config.host, config.port), config)
 
@@ -3635,8 +3783,6 @@ def main() -> int:
         log_path = _configure_output_tee()
 
         args = _parse_args()
-        if _maybe_perform_self_update(skip_self_update=args.skip_self_update):
-            return 0
         config_path = _resolve_config_path(args.config)
         config = Config.load(
             config_path,
@@ -3662,6 +3808,12 @@ def main() -> int:
                 "max_request_megabytes": args.max_request_megabytes,
             },
         )
+        # The previous copy can lock the very executable that the updater needs
+        # to replace. Complete the handoff before downloading/replacing it.
+        if not _close_previous_instances(config):
+            return 1
+        if _maybe_perform_self_update(skip_self_update=args.skip_self_update):
+            return 0
         _configure_windows_high_performance_gpu(config)
 
         server = _create_server_with_duplicate_resolution(config)
