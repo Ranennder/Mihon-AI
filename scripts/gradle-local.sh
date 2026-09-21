@@ -4,7 +4,11 @@ set -euo pipefail
 task_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$task_repo_root"
 
-exec systemd-run --user --scope --unit="mihon-build-$$" \
+task_validation_dir="${XDG_CACHE_HOME:-$HOME/.cache}/mihon-ai-validation"
+mkdir -p -- "$task_validation_dir"
+
+exec flock --nonblock --conflict-exit-code 75 "$task_validation_dir/gradle.lock" \
+    systemd-run --user --scope --unit="mihon-build-$$" \
     -p MemoryHigh=3G \
     -p MemoryMax=4G \
     -p MemorySwapMax=512M \

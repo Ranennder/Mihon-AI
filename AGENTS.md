@@ -4,7 +4,8 @@ This workspace shares a server with the chat and other running services. Keep lo
 validation within a dedicated resource limit so builds cannot exhaust the host.
 
 - Run local Gradle commands through `scripts/gradle-local.sh`. It caps the whole
-  process tree at 4 GiB of memory and 1.5 CPU cores, with two Gradle workers.
+  process tree at 4 GiB of memory and 1.5 CPU cores, with two Gradle workers. The
+  wrapper permits only one build at a time; exit code 75 means one is running.
 - Do not run an Android emulator and Gradle at the same time on this server.
 - Run release builds and Windows executable tests in GitHub Actions.
 - Keep long-running validation logs in `~/.cache/mihon-ai-validation`, not `/tmp`,
