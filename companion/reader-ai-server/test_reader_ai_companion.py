@@ -212,21 +212,28 @@ class CompanionNetworkingTests(unittest.TestCase):
         requested = Request(
             f"{base_url}/api/upscale-chapter-direct",
             data=json.dumps(manifest).encode(),
-            headers={"Content-Type": "application/json", "X-Reader-AI-Token": self.server.pairing_token},
+            headers={
+                "Content-Type": "application/json", "X-Reader-AI-Token": self.server.pairing_token,
+                "X-Reader-AI-Page-Count": "22",
+            },
         )
 
-        def complete_job(job):
-            (job.output_dir / "0000.png").write_bytes(job.pages[0].input_path.read_bytes())
-            job.completed.set()
+        def complete_batch(job, pages, input_dir, output_dir):
+            (output_dir / "0000.png").write_bytes(pages[0].input_path.read_bytes())
+            return 0
 
-        with patch.object(self.server, "_run_chapter_job", side_effect=complete_job) as upscale:
+        with patch.object(self.server, "_run_chapter_batch", side_effect=complete_batch) as upscale:
             with urlopen(requested, timeout=2) as response:
                 self.assertEqual(response.status, 202)
                 job_id = json.load(response)["job_id"]
             job = self.server._chapter_jobs[job_id]
             self.assertTrue(job.completed.wait(2))
         self.assertIsNone(job.error)
-        upscale.assert_called_once_with(job)
+        self.assertEqual(job.total_pages, 1)
+        self.assertEqual(job.display_page_count, 22)
+        upscale.assert_called_once()
+        self.assertIs(upscale.call_args.args[0], job)
+        self.assertEqual([page.page_index for page in upscale.call_args.args[1]], [0])
         self.assertEqual(received_headers[0]["Accept-Encoding"], "identity")
         self.assertEqual(received_headers[0]["Cookie"], "session=example")
         self.assertEqual(received_headers[0]["Referer"], "https://source.example/chapter")
@@ -264,6 +271,7 @@ class CompanionNetworkingTests(unittest.TestCase):
             "CF-Connecting-IP": "203.0.113.10",
             "X-Reader-AI-Token": self.server.pairing_token,
             "X-Reader-AI-Output-Format": "png",
+            "X-Reader-AI-Page-Count": "32",
         }
 
         def complete_job(job):
@@ -282,6 +290,8 @@ class CompanionNetworkingTests(unittest.TestCase):
                 job_id = json.load(response)["job_id"]
             job = self.server._chapter_jobs[job_id]
             self.assertFalse(job.completed.is_set())
+            self.assertEqual(job.total_pages, 1)
+            self.assertEqual(job.display_page_count, 32)
             page_request = Request(
                 f"{base_url}/api/upscale-chapter/{job_id}/page/0", headers=public_headers,
             )

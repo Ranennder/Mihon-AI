@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.27
+
+- Start direct companion upscaling as soon as the first source page is downloaded, while later pages download in the background.
+- Bound the direct download queue and process ready pages in small batches while keeping the existing GPU process limit.
+- Send phone-uploaded chapters incrementally: the first page starts immediately, followed by batches of up to four pages instead of waiting for a complete chapter archive.
+- Report download and upscale progress for each page separately, and preserve already completed pages if a later direct download fails.
+- Stop canceled work before it starts a queued GPU process or submits another upload batch.
+
+Update both the Android app and Windows companion to get the complete pipeline improvement. Individual-page modes already started without waiting for the entire chapter; this release removes that wait from whole-chapter modes.
+
 ## v0.1.26
 
 - Add a Reinstall action for extensions with a confirmed signing-key conflict. Android asks to remove the old extension, then the app starts installation of the replacement using the selected installer.

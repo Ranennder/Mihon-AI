@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -311,36 +312,33 @@ class ReaderPageUpscaler(
             mangaId = mangaId,
             chapterId = chapterId,
         )
-        val existingJob = remoteChapterJobs[jobKey]
-        if (existingJob?.job?.isActive == true) {
-            return
-        }
-
-        val job = remotePrefetchScope.launch {
-            try {
-                runWholeChapterRemotePrefetch(cacheTargets)
-            } catch (e: Throwable) {
-                if (e is CancellationException) throw e
-                lastFailureMessage = e.message
-                logcat(LogPriority.WARN, e) { "Failed to prefetch whole chapter via remote AI ($chapterId)" }
-            } finally {
-                if (coroutineContext.isActive) {
-                    cacheTargets.filterNot { it.cacheFile.isReadyCacheFile() }.forEach {
-                        updateProgress(it, UpscaleStage.FAILED, 0)
+        remoteChapterJobs.compute(jobKey) { _, existing ->
+            if (existing != null && !existing.job.isCompleted && !existing.job.isCancelled) {
+                existing
+            } else {
+                val job = remotePrefetchScope.launch(start = CoroutineStart.LAZY) {
+                    try {
+                        runWholeChapterRemotePrefetch(cacheTargets)
+                    } catch (e: Throwable) {
+                        if (e is CancellationException) throw e
+                        lastFailureMessage = e.message
+                        logcat(LogPriority.WARN, e) { "Failed to prefetch whole chapter via remote AI ($chapterId)" }
+                    } finally {
+                        if (coroutineContext.isActive) {
+                            cacheTargets.filterNot { it.cacheFile.isReadyCacheFile() }.forEach {
+                                updateProgress(it, UpscaleStage.FAILED, 0)
+                            }
+                        }
+                        val currentJob = coroutineContext[Job]
+                        val registeredJob = remoteChapterJobs[jobKey]
+                        if (registeredJob?.job == currentJob && remoteChapterJobs.remove(jobKey, registeredJob)) {
+                            remoteChapterMetadata.remove(jobKey)
+                        }
                     }
                 }
-                val currentJob = coroutineContext[Job]
-                val registeredJob = remoteChapterJobs[jobKey]
-                if (registeredJob?.job == currentJob && remoteChapterJobs.remove(jobKey, registeredJob)) {
-                    remoteChapterMetadata.remove(jobKey)
-                }
+                RemoteChapterPrefetchJob(mangaId = mangaId, chapterId = chapterId, job = job)
             }
-        }
-        remoteChapterJobs[jobKey] = RemoteChapterPrefetchJob(
-            mangaId = mangaId,
-            chapterId = chapterId,
-            job = job,
-        )
+        }?.job?.start()
     }
 
     private fun processingScopeForCurrentBackend(): CoroutineScope {
@@ -678,6 +676,24 @@ class ReaderPageUpscaler(
         val pendingTargets = cacheTargets.filter {
             it.generation == cacheGeneration(it.cacheFile).get() && !it.cacheFile.isReadyCacheFile()
         }
+        if (allowDirectDownload && readerPreferences.remoteAiDirectDownload.get()) {
+            runWholeChapterRemoteBatch(pendingTargets, allowDirectDownload = true)
+        } else {
+            processChapterUploadBatches(pendingTargets) { batch ->
+                runWholeChapterRemoteBatch(batch, allowDirectDownload = false)
+            }
+        }
+    }
+
+    private suspend fun runWholeChapterRemoteBatch(
+        cacheTargets: List<ChapterCacheTarget>,
+        allowDirectDownload: Boolean,
+    ) {
+        coroutineContext.ensureActive()
+        val processingContext = coroutineContext
+        val pendingTargets = cacheTargets.filter {
+            it.generation == cacheGeneration(it.cacheFile).get() && !it.cacheFile.isReadyCacheFile()
+        }
         if (pendingTargets.isEmpty()) {
             return
         }
@@ -699,6 +715,7 @@ class ReaderPageUpscaler(
         val directChapterJob = if (allowDirectDownload && readerPreferences.remoteAiDirectDownload.get()) {
             pendingTargets.forEach { updateProgress(it, UpscaleStage.DOWNLOADING_TO_PC, 0) }
             val directPages = pendingTargets.mapNotNull { target ->
+                coroutineContext.ensureActive()
                 val request = runCatching { target.page.remoteImageRequest?.invoke() }
                     .onFailure { if (it is CancellationException) throw it }
                     .getOrNull()
@@ -707,12 +724,19 @@ class ReaderPageUpscaler(
                 RemotePageUpscaler.DirectChapterPage(target.page.index, request)
             }
             if (directPages.size == pendingTargets.size) {
+                coroutineContext.ensureActive()
                 remotePageUpscaler.startDirectChapterJob(directPages, chapterMetadata)
             } else {
                 null
             }
         } else {
             null
+        }
+        coroutineContext.ensureActive()
+        if (allowDirectDownload && directChapterJob == null) {
+            // Missing direct URLs or a rejected manifest must not restore the full-chapter upload barrier.
+            runWholeChapterRemotePrefetch(pendingTargets, allowDirectDownload = false)
+            return
         }
 
         val archiveFile = File(cacheRoot, "chapter-upload-${UUID.randomUUID()}.zip")
@@ -724,6 +748,7 @@ class ReaderPageUpscaler(
                 ZipOutputStream(archiveFile.outputStream().buffered()).use { zipOutput ->
                     var preparedPageCount = 0
                     pendingTargets.forEach { target ->
+                        coroutineContext.ensureActive()
                         if (!readerPreferences.remoteAiDirectDownload.get()) {
                             awaitPageReady(target.page)
                         }
@@ -741,6 +766,7 @@ class ReaderPageUpscaler(
                             pageIndex = target.page.index,
                             sourceBytes = sourceBytes,
                         ) ?: return
+                        coroutineContext.ensureActive()
                         val entryName = buildString {
                             append(preparedPage.pageIndex.toString().padStart(4, '0'))
                             append('.')
@@ -777,6 +803,7 @@ class ReaderPageUpscaler(
         }
 
         val chapterJob = directChapterJob ?: try {
+            coroutineContext.ensureActive()
             remotePageUpscaler.startChapterJobFromArchive(
                 archiveFile = archiveFile,
                 pageCount = preparedPageCount,
@@ -790,6 +817,7 @@ class ReaderPageUpscaler(
         } finally {
             archiveFile.delete()
         } ?: return
+        coroutineContext.ensureActive()
         pendingTargets.forEach {
             updateProgress(it, UpscaleStage.UPSCALING, 0, indeterminate = true)
         }
@@ -811,6 +839,7 @@ class ReaderPageUpscaler(
                     job = chapterJob,
                     pageIndexes = remainingTargets.keys,
                     onProgress = { pageIndex, stageName, percent ->
+                        processingContext.ensureActive()
                         val target = remainingTargets[pageIndex] ?: return@streamChapterPages
                         val stage = when (stageName) {
                             "downloading_to_pc" -> UpscaleStage.DOWNLOADING_TO_PC
@@ -825,6 +854,7 @@ class ReaderPageUpscaler(
                         )
                     },
                     onPageReady = { pageIndex, bytes ->
+                        processingContext.ensureActive()
                         val target = remainingTargets.remove(pageIndex) ?: return@streamChapterPages
                         storeChapterPage(target, bytes)
                     },
@@ -857,6 +887,7 @@ class ReaderPageUpscaler(
         val retryableFailureCounts = mutableMapOf<Int, Int>()
         var consecutiveRetryableFailures = 0
         repeat(2_400) {
+            coroutineContext.ensureActive()
             val now = System.currentTimeMillis()
             val duePageIndexes = remainingTargets.keys.filter { pageIndex ->
                 (nextPollAt[pageIndex] ?: 0L) <= now
@@ -878,6 +909,7 @@ class ReaderPageUpscaler(
             var sawProgress = false
             var sawRetryableFailure = false
             while (iterator.hasNext()) {
+                coroutineContext.ensureActive()
                 val (pageIndex, target) = iterator.next()
                 if (pageIndex !in duePageIndexes) {
                     continue
@@ -914,6 +946,7 @@ class ReaderPageUpscaler(
                         return
                     }
                     is RemotePageUpscaler.ChapterPageFetchResult.Ready -> {
+                        coroutineContext.ensureActive()
                         storeChapterPage(target, fetchResult.bytes)
                         nextPollAt.remove(pageIndex)
                         pendingPollCounts.remove(pageIndex)

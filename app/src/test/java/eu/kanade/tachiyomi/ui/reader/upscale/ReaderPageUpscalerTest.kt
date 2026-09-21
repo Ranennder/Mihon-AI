@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.ui.reader.upscale
 
 import android.app.Application
 import eu.kanade.tachiyomi.data.database.models.ChapterImpl
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
@@ -10,6 +11,7 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -25,6 +27,7 @@ import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
 
 class ReaderPageUpscalerTest {
 
@@ -194,6 +197,95 @@ class ReaderPageUpscalerTest {
         assertEquals(1, sourceReads)
         verify(exactly = 1) { remote.startDirectChapterJob(any(), any()) }
         verify(exactly = 1) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `phone chapter upload caches the first AI page before a later source finishes loading`() = runBlocking {
+        preferences.remoteAiDirectDownload.set(false)
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
+        page.status = Page.State.Ready
+        val laterSourceStarted = CompletableDeferred<Unit>()
+        val releaseLaterSource = CountDownLatch(1)
+        val laterPage = ReaderPage(9).apply {
+            chapter = page.chapter
+            status = Page.State.Ready
+            stream = {
+                laterSourceStarted.complete(Unit)
+                check(releaseLaterSource.await(5, TimeUnit.SECONDS))
+                "later source".byteInputStream()
+            }
+        }
+        val pages = listOf(page, laterPage)
+        page.chapter.state = ReaderChapter.State.Loaded(pages)
+        every { remote.prepareChapterUploadPage(any(), any()) } answers {
+            RemotePageUpscaler.PreparedChapterUploadPage(firstArg(), secondArg(), "jpg")
+        }
+        every { remote.startChapterJobFromArchive(any(), any(), any(), any()) } answers {
+            assertEquals(2, arg<RemotePageUpscaler.ChapterJobMetadata>(2).totalPages)
+            assertEquals(1, arg<Int>(1))
+            ZipFile(firstArg<File>()).use { archive ->
+                assertEquals(1, archive.size())
+                assertTrue(archive.entries().nextElement().name in setOf("0000.jpg", "0009.jpg"))
+            }
+            mockk<RemotePageUpscaler.StartedChapterJob>()
+        }
+        every { remote.streamChapterPages(any(), any(), any(), any()) } answers {
+            for (index in arg<Set<Int>>(1)) {
+                arg<(Int, ByteArray) -> Unit>(3)(index, "AI page $index".toByteArray())
+            }
+            RemotePageUpscaler.ChapterStreamFetchResult.Completed
+        }
+
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(pages)
+            withTimeout(5_000) { laterSourceStarted.await() }
+
+            assertTrue(upscaler.hasCachedPage(page))
+            assertFalse(upscaler.hasCachedPage(laterPage))
+            verify(exactly = 1) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
+
+            releaseLaterSource.countDown()
+            withTimeout(5_000) {
+                upscaler.progress(laterPage).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY }
+            }
+            verify(exactly = 2) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
+        } finally {
+            releaseLaterSource.countDown()
+            upscaler.invalidateRemoteWorkScope()
+        }
+    }
+
+    @Test
+    fun `canceling during source preparation never submits the prepared chapter batch`() = runBlocking {
+        preferences.remoteAiDirectDownload.set(false)
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
+        page.status = Page.State.Ready
+        page.chapter.state = ReaderChapter.State.Loaded(listOf(page))
+        val preparing = CompletableDeferred<Unit>()
+        val releasePreparation = CountDownLatch(1)
+        every { remote.prepareChapterUploadPage(any(), any()) } answers {
+            preparing.complete(Unit)
+            check(releasePreparation.await(5, TimeUnit.SECONDS))
+            RemotePageUpscaler.PreparedChapterUploadPage(firstArg(), secondArg(), "jpg")
+        }
+
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(listOf(page))
+            withTimeout(5_000) { preparing.await() }
+            upscaler.invalidateRemoteWorkScope()
+            releasePreparation.countDown()
+            withTimeout(5_000) {
+                while (cacheDir.walkTopDown().any { it.isFile && it.name.startsWith("chapter-upload-") }) {
+                    delay(10)
+                }
+            }
+
+            verify(exactly = 0) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
+            assertFalse(upscaler.hasCachedPage(page))
+        } finally {
+            releasePreparation.countDown()
+            upscaler.invalidateRemoteWorkScope()
+        }
     }
 
     @Test

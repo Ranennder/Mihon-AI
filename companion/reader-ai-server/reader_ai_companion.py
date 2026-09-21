@@ -79,6 +79,8 @@ LOG_FILE_NAME = "companion.log"
 CHAPTER_ARCHIVE_FORMAT = "zip"
 CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
+DIRECT_CHAPTER_PREFETCH_PAGES = 4
+DIRECT_CHAPTER_BATCH_PAGES = 4
 CHAPTER_STREAM_POLL_SECONDS = 0.2
 CHAPTER_STREAM_HEARTBEAT_SECONDS = 15.0
 INTERNET_TUNNEL_START_TIMEOUT_SECONDS = 45.0
@@ -274,6 +276,7 @@ class ChapterUpscaleJob:
     chapter_title: str | None = None
     client_id: str | None = None
     scope_id: int | None = None
+    chapter_page_count: int | None = None
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     error: Exception | None = None
@@ -282,6 +285,7 @@ class ChapterUpscaleJob:
     observed_output_sizes: dict[int, tuple[int, float]] = field(default_factory=dict, repr=False)
     page_download_progress: dict[int, int | None] = field(default_factory=dict, repr=False)
     state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    worker_thread: threading.Thread | None = field(default=None, repr=False)
 
     def resolve_output_path(self, page_index: int) -> Path | None:
         prepared_page = self.pages.get(page_index)
@@ -295,6 +299,10 @@ class ChapterUpscaleJob:
     @property
     def total_pages(self) -> int:
         return len(self.pages)
+
+    @property
+    def display_page_count(self) -> int:
+        return max(self.total_pages, self.chapter_page_count or 0)
 
     @property
     def display_label(self) -> str:
@@ -435,6 +443,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         chapter_title: str | None,
         client_id: str | None = None,
         scope_id: int | None = None,
+        chapter_page_count: int | None = None,
     ) -> tuple[ChapterUpscaleJob, bool]:
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
@@ -486,17 +495,18 @@ class ReaderAiServer(ThreadingHTTPServer):
             chapter_title=chapter_title,
             client_id=client_id,
             scope_id=scope_id,
+            chapter_page_count=chapter_page_count,
         )
-        with self._chapter_jobs_lock:
-            self._chapter_jobs[job_id] = job
-
         thread = threading.Thread(
             target=self._run_chapter_job,
             args=(job,),
             name=f"reader-ai-chapter-{job_id}",
             daemon=True,
         )
-        thread.start()
+        job.worker_thread = thread
+        with self._chapter_jobs_lock:
+            self._chapter_jobs[job_id] = job
+            thread.start()
         return job, False
 
     def create_direct_chapter_job(
@@ -509,8 +519,12 @@ class ReaderAiServer(ThreadingHTTPServer):
         chapter_title: str | None,
         client_id: str | None = None,
         scope_id: int | None = None,
+        chapter_page_count: int | None = None,
     ) -> ChapterUpscaleJob:
         """Register immediately, then download source images in the background."""
+        indexes = [int(item["page_index"]) for item in pages]
+        if not indexes or any(index < 0 for index in indexes) or len(set(indexes)) != len(indexes):
+            raise ValueError("Direct chapter pages must have unique nonnegative indexes")
         self._cleanup_expired_chapter_jobs()
         job_id = uuid.uuid4().hex[:12]
         workspace = self._chapter_jobs_root / job_id
@@ -542,77 +556,182 @@ class ReaderAiServer(ThreadingHTTPServer):
             chapter_title=chapter_title,
             client_id=client_id,
             scope_id=scope_id,
+            chapter_page_count=chapter_page_count,
             page_download_progress={page_index: None for page_index in placeholders},
         )
-        with self._chapter_jobs_lock:
-            self._chapter_jobs[job_id] = job
-        threading.Thread(
+        job.worker_thread = threading.Thread(
             target=self._download_and_run_direct_chapter_job,
             args=(job, pages),
             name=f"reader-ai-direct-chapter-{job_id}",
             daemon=True,
-        ).start()
+        )
+        with self._chapter_jobs_lock:
+            self._chapter_jobs[job_id] = job
+            job.worker_thread.start()
         return job
 
     def _download_and_run_direct_chapter_job(self, job: ChapterUpscaleJob, pages: list[dict[str, Any]]) -> None:
-        try:
-            for item in pages:
-                page_index = int(item["page_index"])
-                if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                    raise RuntimeError("Chapter upscale was canceled")
-                page_url = str(item["url"])
-                if urlparse(page_url).scheme not in {"http", "https"}:
-                    raise ValueError("Only HTTP(S) page URLs are supported")
-                raw_headers = item.get("headers") or {}
-                headers = {
-                    str(key): str(value)
-                    for key, value in raw_headers.items()
-                    if str(key).lower() not in {"host", "content-length", "accept-encoding"}
-                }
-                # urllib does not decode gzip/Brotli like the phone's HTTP client.
-                # Keep source/session headers, but request the original image bytes.
-                headers["Accept-Encoding"] = "identity"
-                request = UrlRequest(page_url, headers=headers, method="GET")
-                _emit_log_line(
-                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
-                    f"{job.display_label} - PC downloading source page {page_index + 1}/{job.total_pages}",
-                )
-                chunks: list[bytes] = []
-                received = 0
-                with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response:
-                    total = max(0, int(response.headers.get("Content-Length") or "0"))
+        ready: queue.Queue[PreparedChapterPage] = queue.Queue(maxsize=DIRECT_CHAPTER_PREFETCH_PAGES)
+        producer_stop = threading.Event()
+        downloads_finished = threading.Event()
+        download_errors: list[Exception] = []
+
+        def download_pages() -> None:
+            try:
+                for item in pages:
+                    self._check_direct_download_active(job, producer_stop)
+                    prepared = self._download_direct_chapter_page(job, item, producer_stop)
+                    self._check_direct_download_active(job, producer_stop)
+                    with job.state_lock:
+                        job.pages[prepared.page_index] = prepared
+                        job.page_download_progress[prepared.page_index] = 100
+                    # Only paths are queued. A slow GPU cannot accumulate image
+                    # bodies in memory or an unbounded number of pending inputs.
                     while True:
-                        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                            raise RuntimeError("Chapter upscale was canceled")
-                        chunk = response.read(64 * 1024)
-                        if not chunk:
+                        self._check_direct_download_active(job, producer_stop)
+                        try:
+                            ready.put(prepared, timeout=0.1)
                             break
-                        received += len(chunk)
-                        if received > 100 * 1024 * 1024:
-                            raise ValueError(f"Page {page_index} exceeds 100 MiB")
-                        chunks.append(chunk)
-                        if total > 0:
-                            with job.state_lock:
-                                job.page_download_progress[page_index] = min(99, received * 100 // total)
-                image = b"".join(chunks)
-                with Image.open(BytesIO(image)) as source_image:
-                    detected_format = (source_image.format or "jpg").lower()
-                extension = "jpg" if detected_format == "jpeg" else _sanitize_extension(detected_format)
-                input_path = job.input_dir / f"{page_index:04d}.{extension}"
-                input_path.write_bytes(image)
-                with job.state_lock:
-                    job.pages[page_index] = PreparedChapterPage(page_index, input_path, extension)
-                    job.page_download_progress[page_index] = 100
-                _emit_log_line(
-                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
-                    f"{job.display_label} - Source page {page_index + 1}/{job.total_pages} downloaded "
-                    f"({received} bytes)",
-                )
-            self._run_chapter_job(job)
+                        except queue.Full:
+                            continue
+            except Exception as exc:  # noqa: BLE001
+                if not producer_stop.is_set():
+                    download_errors.append(exc)
+            finally:
+                downloads_finished.set()
+
+        producer = threading.Thread(
+            target=download_pages,
+            name=f"reader-ai-download-{job.job_id}",
+            daemon=True,
+        )
+        producer.start()
+        batch_index = 0
+        try:
+            while True:
+                self._check_direct_download_active(job, producer_stop)
+                if download_errors:
+                    raise download_errors[0]
+                try:
+                    first = ready.get(timeout=0.1)
+                except queue.Empty:
+                    if downloads_finished.is_set():
+                        if download_errors:
+                            raise download_errors[0]
+                        break
+                    continue
+                batch = [first]
+                # The first page starts immediately. Later batches use only
+                # inputs already available, never waiting to fill a batch.
+                if batch_index > 0:
+                    while len(batch) < DIRECT_CHAPTER_BATCH_PAGES:
+                        try:
+                            batch.append(ready.get_nowait())
+                        except queue.Empty:
+                            break
+                batch_workspace = job.workspace / f"direct-batch-{batch_index:04d}"
+                input_dir = batch_workspace / "in"
+                output_dir = batch_workspace / "out"
+                input_dir.mkdir(parents=True, exist_ok=True)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for page in batch:
+                    target = input_dir / page.input_path.name
+                    try:
+                        os.link(page.input_path, target)
+                    except OSError:
+                        shutil.copyfile(page.input_path, target)
+                self._run_chapter_batch(job, batch, input_dir, output_dir)
+                self._check_direct_download_active(job, producer_stop)
+                for page in batch:
+                    output = _resolve_produced_output_path(
+                        output_dir / f"{page.input_path.stem}.{job.batch_output_format}",
+                        job.batch_output_format,
+                    )
+                    if output is None or output.stat().st_size == 0:
+                        raise RuntimeError(f"Chapter page {page.page_index} has no upscale output")
+                    # HTTP readers see a complete image, never a GPU output
+                    # that is still being written or awaiting a safe retry.
+                    output.replace(job.output_dir / output.name)
+                    with job.state_lock:
+                        job.stable_output_pages.add(page.page_index)
+                shutil.rmtree(batch_workspace)
+                batch_index += 1
         except Exception as exc:  # noqa: BLE001
-            job.error = exc
-            job.completed.set()
+            if job.error is None:
+                job.error = exc
             _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] Direct chapter job error: {exc}")
+        finally:
+            producer_stop.set()
+            # A blocked HTTP read retains its existing 60-second timeout. Do
+            # not mark completed/allow workspace cleanup while it still owns
+            # files, even when the GPU stage has already failed or canceled.
+            producer.join()
+            job.completed.set()
+
+    def _check_direct_download_active(self, job: ChapterUpscaleJob, stop_event: threading.Event) -> None:
+        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+            raise RuntimeError(str(job.error) if job.error is not None else "Chapter upscale was canceled")
+        if stop_event.is_set():
+            raise RuntimeError("Direct chapter download was stopped")
+
+    def _download_direct_chapter_page(
+        self,
+        job: ChapterUpscaleJob,
+        item: dict[str, Any],
+        stop_event: threading.Event,
+    ) -> PreparedChapterPage:
+        self._check_direct_download_active(job, stop_event)
+        page_index = int(item["page_index"])
+        page_url = str(item["url"])
+        if urlparse(page_url).scheme not in {"http", "https"}:
+            raise ValueError("Only HTTP(S) page URLs are supported")
+        raw_headers = item.get("headers") or {}
+        headers = {
+            str(key): str(value)
+            for key, value in raw_headers.items()
+            if str(key).lower() not in {"host", "content-length", "accept-encoding"}
+        }
+        headers["Accept-Encoding"] = "identity"
+        request = UrlRequest(page_url, headers=headers, method="GET")
+        _emit_log_line(
+            f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
+            f"{job.display_label} - PC downloading source page {page_index + 1}/{job.display_page_count}",
+        )
+        temporary_input = job.input_dir / f"{page_index:04d}.downloading"
+        received = 0
+        try:
+            with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response, temporary_input.open("wb") as target:
+                total = max(0, int(response.headers.get("Content-Length") or "0"))
+                while True:
+                    self._check_direct_download_active(job, stop_event)
+                    # read1 returns available bytes without waiting to fill
+                    # 64 KiB, so cancellation is checked during slow downloads.
+                    chunk = response.read1(64 * 1024)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if received > 100 * 1024 * 1024:
+                        raise ValueError(f"Page {page_index} exceeds 100 MiB")
+                    target.write(chunk)
+                    if total > 0:
+                        with job.state_lock:
+                            job.page_download_progress[page_index] = min(99, received * 100 // total)
+                if total > 0 and received != total:
+                    raise ValueError(f"Page {page_index} download was incomplete ({received}/{total} bytes)")
+            self._check_direct_download_active(job, stop_event)
+            with Image.open(temporary_input) as source_image:
+                detected_format = (source_image.format or "jpg").lower()
+                source_image.verify()
+            extension = "jpg" if detected_format == "jpeg" else _sanitize_extension(detected_format)
+            input_path = job.input_dir / f"{page_index:04d}.{extension}"
+            temporary_input.replace(input_path)
+            _emit_log_line(
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
+                f"{job.display_label} - Source page {page_index + 1}/{job.display_page_count} downloaded ({received} bytes)",
+            )
+            return PreparedChapterPage(page_index, input_path, extension)
+        finally:
+            temporary_input.unlink(missing_ok=True)
 
     def get_chapter_page_progress(self, job_id: str, page_index: int) -> tuple[str, int | None]:
         with self._chapter_jobs_lock:
@@ -622,13 +741,10 @@ class ReaderAiServer(ThreadingHTTPServer):
         with job.state_lock:
             download_percent = job.page_download_progress.get(page_index)
             ready_count = len(job.ready_pages | job.stable_output_pages)
-            downloads_complete = bool(job.page_download_progress) and all(
-                value is not None and value >= 100 for value in job.page_download_progress.values()
-            )
-        if page_index in job.page_download_progress and not downloads_complete:
-            return "downloading_to_pc", download_percent
-        if page_index in job.ready_pages or page_index in job.stable_output_pages:
-            return "ready", 100
+            if page_index in job.ready_pages or page_index in job.stable_output_pages:
+                return "ready", 100
+            if page_index in job.page_download_progress and (download_percent is None or download_percent < 100):
+                return "downloading_to_pc", download_percent
         if job.total_pages > 0:
             return "upscaling", ready_count * 100 // job.total_pages
         return "upscaling", None
@@ -870,7 +986,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                 (
                     f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
                     f"[{job.request_id}] {job.display_label} - Ready {ready_count}/{job.total_pages} "
-                    f"(page {page_index + 1}/{job.total_pages})"
+                    f"(page {page_index + 1}/{job.display_page_count})"
                 ),
             )
 
@@ -996,154 +1112,19 @@ class ReaderAiServer(ThreadingHTTPServer):
         return f"{min(waits)}-{max(waits)}ms"
 
     def _run_chapter_job(self, job: ChapterUpscaleJob) -> None:
-        binary = Path(self.config.binary)
-        model_dir = Path(self.config.model_dir)
         started_at = time.perf_counter()
         queue_wait_seconds = max(0.0, time.time() - job.created_at)
         try:
-            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-            if not binary.is_file():
-                raise RuntimeError(f"Upscale binary not found: {binary}")
-            if not model_dir.is_dir():
-                raise RuntimeError(f"Model directory not found: {model_dir}")
-
-            command = [
-                str(binary),
-                "-i",
-                str(job.input_dir),
-                "-o",
-                str(job.output_dir),
-                "-s",
-                str(job.native_scale),
-                "-t",
-                str(self.config.tile_size),
-                "-m",
-                str(model_dir),
-                "-f",
-                job.batch_output_format,
-                "-j",
-                self.config.jobs,
-            ]
-            command.extend(_upscale_gpu_command_args(self.config))
-            if job.model_name and _supports_model_name_flag(binary):
-                command.extend(["-n", job.model_name])
-
+            fallback_count = self._run_chapter_batch(job, list(job.pages.values()), job.input_dir, job.output_dir)
             _emit_log_line(
-                (
-                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
-                    f"[{job.request_id}] {job.display_label} - Starting chapter upscale "
-                    f"(0/{job.total_pages}, {job.model_name} -> {job.batch_output_format})"
-                ),
-            )
-            completed = _run_logged_subprocess(
-                request_id=f"{job.request_id}/chapter-{job.job_id}",
-                command=command,
-                cwd=binary.parent,
-                timeout=max(self.config.timeout_seconds, 1800),
-                display_label=job.display_label,
-                client_id=job.client_id,
-                cancel_event=job.cancel_event,
-                process_registry=self,
-            )
-            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-            if completed.returncode != 0:
-                if _should_retry_with_safe_vulkan_settings(completed.details):
-                    safe_config = _build_safe_vulkan_retry_config(self.config)
-                    for prepared_page in job.pages.values():
-                        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                            raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-                        fallback_workspace = job.workspace / f"safe-page-{prepared_page.page_index:04d}"
-                        fallback_workspace.mkdir(parents=True, exist_ok=True)
-                        fallback_body = prepared_page.input_path.read_bytes()
-                        processed_image = _process_single_request_in_workspace(
-                            config=safe_config,
-                            workspace=fallback_workspace,
-                            request=PendingUpscaleRequest(
-                                request_id=f"{job.request_id}/page-{prepared_page.page_index}/safe-chapter",
-                                body=fallback_body,
-                                input_format=prepared_page.input_format,
-                                requested_output_format=job.requested_output_format,
-                                model_name=job.model_name,
-                                native_scale=job.native_scale,
-                                preferred_output_format=None,
-                                batch_size=1,
-                                is_chunked=_requires_chunked_upscale(
-                                    body=fallback_body,
-                                    native_scale=job.native_scale,
-                                    target_scale=job.native_scale,
-                                ),
-                                client_id=job.client_id,
-                                scope_id=job.scope_id,
-                            ),
-                            process_registry=self,
-                        )
-                        safe_output_path = job.output_dir / (
-                            f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
-                        )
-                        safe_output_path.write_bytes(processed_image.bytes)
-                else:
-                    raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
-
-            fallback_pages: list[PreparedChapterPage] = []
-            for prepared_page in job.pages.values():
-                produced_output_path = job.resolve_output_path(prepared_page.page_index)
-                if produced_output_path is None:
-                    fallback_pages.append(prepared_page)
-                    continue
-                if _chapter_output_requires_fallback(
-                    input_path=prepared_page.input_path,
-                    output_path=produced_output_path,
-                ):
-                    produced_output_path.unlink(missing_ok=True)
-                    fallback_pages.append(prepared_page)
-
-            for prepared_page in fallback_pages:
-                if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                    raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-                fallback_workspace = job.workspace / f"fallback-{prepared_page.page_index:04d}"
-                fallback_workspace.mkdir(parents=True, exist_ok=True)
-                fallback_body = prepared_page.input_path.read_bytes()
-                processed_image = _process_single_request_in_workspace(
-                    config=self.config,
-                    workspace=fallback_workspace,
-                    request=PendingUpscaleRequest(
-                        request_id=f"{job.request_id}/page-{prepared_page.page_index}/fallback",
-                        body=fallback_body,
-                        input_format=prepared_page.input_format,
-                        requested_output_format=job.requested_output_format,
-                        model_name=job.model_name,
-                        native_scale=job.native_scale,
-                        preferred_output_format=None,
-                        batch_size=1,
-                        is_chunked=_requires_chunked_upscale(
-                            body=fallback_body,
-                            native_scale=job.native_scale,
-                            target_scale=job.native_scale,
-                        ),
-                        client_id=job.client_id,
-                        scope_id=job.scope_id,
-                    ),
-                    process_registry=self,
-                )
-                fallback_output_path = job.output_dir / (
-                    f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
-                )
-                fallback_output_path.write_bytes(processed_image.bytes)
-            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
-                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-            _emit_log_line(
-                (
-                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - "
-                    f"Chapter upscale finished in {time.perf_counter() - started_at:.2f}s "
-                    f"(queue={queue_wait_seconds:.2f}s, fallback={len(fallback_pages)}, "
-                    f"output={_format_compact_bytes(sum(path.stat().st_size for path in job.output_dir.iterdir() if path.is_file()))})"
-                ),
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - "
+                f"Chapter upscale finished in {time.perf_counter() - started_at:.2f}s "
+                f"(queue={queue_wait_seconds:.2f}s, fallback={fallback_count}, "
+                f"output={_format_compact_bytes(sum(path.stat().st_size for path in job.output_dir.iterdir() if path.is_file()))})",
             )
         except Exception as exc:  # noqa: BLE001
             job.error = exc
-            if job.cancel_event.is_set() or "canceled" in str(exc).lower() or "superseded" in str(exc).lower():
+            if job.cancel_event.is_set() or _is_cancellation_message(exc):
                 _emit_log_line(
                     f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - Chapter upscale canceled",
                 )
@@ -1153,6 +1134,155 @@ class ReaderAiServer(ThreadingHTTPServer):
                 )
         finally:
             job.completed.set()
+
+    def _run_chapter_batch(
+        self,
+        job: ChapterUpscaleJob,
+        pages: list[PreparedChapterPage],
+        input_dir: Path,
+        output_dir: Path,
+    ) -> int:
+        """Process a fixed set of inputs without completing the parent chapter."""
+        binary = Path(self.config.binary)
+        model_dir = Path(self.config.model_dir)
+        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+            raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
+        if not binary.is_file():
+            raise RuntimeError(f"Upscale binary not found: {binary}")
+        if not model_dir.is_dir():
+            raise RuntimeError(f"Model directory not found: {model_dir}")
+
+        command = [
+            str(binary),
+            "-i",
+            str(input_dir),
+            "-o",
+            str(output_dir),
+            "-s",
+            str(job.native_scale),
+            "-t",
+            str(self.config.tile_size),
+            "-m",
+            str(model_dir),
+            "-f",
+            job.batch_output_format,
+            "-j",
+            self.config.jobs,
+        ]
+        command.extend(_upscale_gpu_command_args(self.config))
+        if job.model_name and _supports_model_name_flag(binary):
+            command.extend(["-n", job.model_name])
+
+        _emit_log_line(
+            (
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
+                f"[{job.request_id}] {job.display_label} - Starting chapter batch "
+                f"({len(pages)} pages, {job.model_name} -> {job.batch_output_format})"
+            ),
+        )
+        completed = _run_logged_subprocess(
+            request_id=f"{job.request_id}/chapter-{job.job_id}",
+            command=command,
+            cwd=binary.parent,
+            timeout=max(self.config.timeout_seconds, 1800),
+            display_label=job.display_label,
+            client_id=job.client_id,
+            cancel_event=job.cancel_event,
+            process_registry=self,
+        )
+        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+            raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
+        if completed.returncode != 0:
+            if _should_retry_with_safe_vulkan_settings(completed.details):
+                safe_config = _build_safe_vulkan_retry_config(self.config)
+                for prepared_page in pages:
+                    if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                        raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
+                    fallback_workspace = job.workspace / f"safe-page-{prepared_page.page_index:04d}"
+                    fallback_workspace.mkdir(parents=True, exist_ok=True)
+                    fallback_body = prepared_page.input_path.read_bytes()
+                    processed_image = _process_single_request_in_workspace(
+                        config=safe_config,
+                        workspace=fallback_workspace,
+                        request=PendingUpscaleRequest(
+                            request_id=f"{job.request_id}/page-{prepared_page.page_index}/safe-chapter",
+                            body=fallback_body,
+                            input_format=prepared_page.input_format,
+                            requested_output_format=job.requested_output_format,
+                            model_name=job.model_name,
+                            native_scale=job.native_scale,
+                            preferred_output_format=None,
+                            batch_size=1,
+                            is_chunked=_requires_chunked_upscale(
+                                body=fallback_body,
+                                native_scale=job.native_scale,
+                                target_scale=job.native_scale,
+                            ),
+                            client_id=job.client_id,
+                            scope_id=job.scope_id,
+                            cancel_event=job.cancel_event,
+                        ),
+                        process_registry=self,
+                    )
+                    safe_output_path = output_dir / (
+                        f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
+                    )
+                    safe_output_path.write_bytes(processed_image.bytes)
+            else:
+                raise RuntimeError(f"Chapter upscale process failed: {completed.details}")
+
+        fallback_pages: list[PreparedChapterPage] = []
+        for prepared_page in pages:
+            produced_output_path = _resolve_produced_output_path(
+                output_dir / f"{prepared_page.input_path.stem}.{job.batch_output_format}",
+                job.batch_output_format,
+            )
+            if produced_output_path is None:
+                fallback_pages.append(prepared_page)
+                continue
+            if _chapter_output_requires_fallback(
+                input_path=prepared_page.input_path,
+                output_path=produced_output_path,
+            ):
+                produced_output_path.unlink(missing_ok=True)
+                fallback_pages.append(prepared_page)
+
+        for prepared_page in fallback_pages:
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
+            fallback_workspace = job.workspace / f"fallback-{prepared_page.page_index:04d}"
+            fallback_workspace.mkdir(parents=True, exist_ok=True)
+            fallback_body = prepared_page.input_path.read_bytes()
+            processed_image = _process_single_request_in_workspace(
+                config=self.config,
+                workspace=fallback_workspace,
+                request=PendingUpscaleRequest(
+                    request_id=f"{job.request_id}/page-{prepared_page.page_index}/fallback",
+                    body=fallback_body,
+                    input_format=prepared_page.input_format,
+                    requested_output_format=job.requested_output_format,
+                    model_name=job.model_name,
+                    native_scale=job.native_scale,
+                    preferred_output_format=None,
+                    batch_size=1,
+                    is_chunked=_requires_chunked_upscale(
+                        body=fallback_body,
+                        native_scale=job.native_scale,
+                        target_scale=job.native_scale,
+                    ),
+                    client_id=job.client_id,
+                    scope_id=job.scope_id,
+                    cancel_event=job.cancel_event,
+                ),
+                process_registry=self,
+            )
+            fallback_output_path = output_dir / (
+                f"{prepared_page.input_path.stem}.{_sanitize_extension(processed_image.output_format)}"
+            )
+            fallback_output_path.write_bytes(processed_image.bytes)
+        if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+            raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
+        return len(fallback_pages)
 
     def _cleanup_expired_chapter_jobs(self) -> None:
         cutoff = time.time() - CHAPTER_JOB_RETENTION_SECONDS
@@ -1174,13 +1304,30 @@ class ReaderAiServer(ThreadingHTTPServer):
             # TCPServer also calls this when binding fails, before __init__ has
             # created any workers. Preserve the original bind error for retry.
             worker_threads = getattr(self, "_worker_threads", ())
+            with getattr(self, "_chapter_jobs_lock", threading.Lock()):
+                jobs = list(getattr(self, "_chapter_jobs", {}).values())
+            for job in jobs:
+                self._cancel_chapter_job(job, "Companion was closed")
             for _ in worker_threads:
                 self._processing_queue.put(_STOP_PROCESSING)
-            for worker_thread in worker_threads:
-                worker_thread.join(timeout=1)
+            all_workers = [*worker_threads, *(job.worker_thread for job in jobs if job.worker_thread is not None)]
+            deadline = time.monotonic() + 1
+            for worker_thread in all_workers:
+                worker_thread.join(timeout=max(0, deadline - time.monotonic()))
             workspace_owner = getattr(self, "_workspace_root_owner", None)
             if workspace_owner is not None:
-                workspace_owner.cleanup()
+                remaining_workers = [thread for thread in all_workers if thread.is_alive()]
+                if remaining_workers:
+                    # Direct jobs join their download producer before exiting.
+                    # Keep its files alive while a canceled HTTP read unwinds.
+                    def cleanup_after_workers() -> None:
+                        for thread in remaining_workers:
+                            thread.join()
+                        workspace_owner.cleanup()
+
+                    threading.Thread(target=cleanup_after_workers, name="reader-ai-cleanup", daemon=True).start()
+                else:
+                    workspace_owner.cleanup()
 
     def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
         _, exc, _ = sys.exc_info()
@@ -1628,6 +1775,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 chapter_title=chapter_title,
                 client_id=client_id,
                 scope_id=scope_id,
+                chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
             )
         except zipfile.BadZipFile:
             self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is not a valid zip file")
@@ -1707,6 +1855,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 chapter_title=chapter_title,
                 client_id=client_id,
                 scope_id=scope_id,
+                chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
             )
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] "
@@ -2284,11 +2433,19 @@ def _run_logged_subprocess(
     _set_request_display_label(request_id, display_label)
     output_lines: list[str] = []
     subprocess_slot = process_registry._subprocess_slot if process_registry is not None else None
-    if subprocess_slot is not None:
-        subprocess_slot.acquire()
+    slot_acquired = False
     process: subprocess.Popen[str] | None = None
     reader_thread: threading.Thread | None = None
     try:
+        if subprocess_slot is not None:
+            while not subprocess_slot.acquire(timeout=0.1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Upscale process was canceled while queued")
+            slot_acquired = True
+        # Cancellation may arrive just as the preceding process releases its
+        # slot. Never launch a delayed GPU process for an already canceled job.
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Upscale process was canceled while queued")
         process = subprocess.Popen(
             command,
             cwd=str(cwd),
@@ -2344,7 +2501,7 @@ def _run_logged_subprocess(
         _set_request_display_label(request_id, None)
         if process_registry is not None and process is not None:
             process_registry._unregister_active_process(client_id, process)
-        if subprocess_slot is not None:
+        if subprocess_slot is not None and slot_acquired:
             subprocess_slot.release()
 
     details = "\n".join(output_lines).strip() or f"exit code {returncode}"
