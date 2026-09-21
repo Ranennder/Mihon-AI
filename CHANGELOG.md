@@ -8,7 +8,7 @@
 - Ignore outdated installer callbacks and load-verification results after a retry or cancellation.
 - Add 26 regression tests for error retention, certificate comparisons, native results, and overlapping update attempts.
 
-This release fixes hidden installation errors. It does not yet establish why updates fail on the affected phone. After updating the app, retry AllHentai once and copy any displayed error details. The companion has no functional changes from v0.1.24.
+This release fixes hidden installation errors. A subsequent phone diagnostic confirmed that the installed AllHentai and the Keiyoushi update have different signing keys. Remove only the AllHentai extension and reinstall it from Keiyoushi; the reader's library remains intact. Other extension failures need their own error details. The companion has no functional changes from v0.1.24.
 
 ## v0.1.24
 
