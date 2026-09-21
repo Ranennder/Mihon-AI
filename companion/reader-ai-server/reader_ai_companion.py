@@ -554,6 +554,10 @@ class ReaderAiServer(ThreadingHTTPServer):
                     if str(key).lower() not in {"host", "content-length"}
                 }
                 request = UrlRequest(page_url, headers=headers, method="GET")
+                _emit_log_line(
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
+                    f"{job.display_label} - PC downloading source page {page_index + 1}/{job.total_pages}",
+                )
                 chunks: list[bytes] = []
                 received = 0
                 with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response:
@@ -578,6 +582,11 @@ class ReaderAiServer(ThreadingHTTPServer):
                 with job.state_lock:
                     job.pages[page_index] = PreparedChapterPage(page_index, input_path, extension)
                     job.page_download_progress[page_index] = 100
+                _emit_log_line(
+                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
+                    f"{job.display_label} - Source page {page_index + 1}/{job.total_pages} downloaded "
+                    f"({received} bytes)",
+                )
             self._run_chapter_job(job)
         except Exception as exc:  # noqa: BLE001
             job.error = exc
@@ -1658,6 +1667,10 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 chapter_title=chapter_title,
                 client_id=client_id,
                 scope_id=scope_id,
+            )
+            _emit_log_line(
+                f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] "
+                f"Accepted direct download job: {chapter_job.display_label} ({chapter_job.total_pages} pages)",
             )
             self._send_json(HTTPStatus.ACCEPTED, {"job_id": chapter_job.job_id, "page_count": len(chapter_job.pages), "reused_existing_job": False})
         except Exception as exc:  # noqa: BLE001

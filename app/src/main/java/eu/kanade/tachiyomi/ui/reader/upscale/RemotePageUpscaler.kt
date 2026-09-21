@@ -225,6 +225,46 @@ class RemotePageUpscaler(
         return runStartDirectChapterJobRequest(resolution, payload, metadata, scopeId)
     }
 
+    fun upscaleDirectPage(
+        request: Request,
+        metadata: PageRequestMetadata?,
+        onProgress: (ProgressStage, Int) -> Unit,
+    ): ByteArray? {
+        onProgress(ProgressStage.DOWNLOADING_TO_PC, 0)
+        val job = startDirectChapterJob(
+            pages = listOf(DirectChapterPage(0, request)),
+            metadata = ChapterJobMetadata(
+                mangaTitle = metadata?.mangaTitle,
+                chapterTitle = metadata?.chapterTitle,
+                totalPages = 1,
+            ),
+        ) ?: return null
+        repeat(DIRECT_PAGE_MAX_POLLS) {
+            when (
+                val result = fetchChapterPage(job, 0) { percent ->
+                    onProgress(ProgressStage.DOWNLOADING_TO_PHONE, percent)
+                }
+            ) {
+                is ChapterPageFetchResult.Pending -> {
+                    val stage = when (result.stage) {
+                        "downloading_to_pc" -> ProgressStage.DOWNLOADING_TO_PC
+                        else -> ProgressStage.UPSCALING
+                    }
+                    onProgress(stage, result.percent ?: 0)
+                    Thread.sleep(DIRECT_PAGE_POLL_DELAY_MS)
+                }
+                is ChapterPageFetchResult.Ready -> return normalizeResponseImage(result.bytes)
+                is ChapterPageFetchResult.Cancelled -> return null
+                is ChapterPageFetchResult.Failed -> {
+                    lastErrorMessage = result.message
+                    return null
+                }
+            }
+        }
+        lastErrorMessage = "Timed out waiting for direct remote AI page"
+        return null
+    }
+
     private fun runStartDirectChapterJobRequest(
         resolution: RemoteAiServerDiscovery.Resolution,
         payload: String,
@@ -982,6 +1022,7 @@ class RemotePageUpscaler(
 
     enum class ProgressStage {
         UPLOADING_TO_PC,
+        DOWNLOADING_TO_PC,
         UPSCALING,
         DOWNLOADING_TO_PHONE,
     }
@@ -1045,6 +1086,8 @@ class RemotePageUpscaler(
     }
 
     companion object {
+        private const val DIRECT_PAGE_MAX_POLLS = 2_400
+        private const val DIRECT_PAGE_POLL_DELAY_MS = 250L
         private const val REMOTE_OUTPUT_FORMAT = "jpg"
         private const val REMOTE_ARCHIVE_FORMAT = "zip"
         private const val REMOTE_ARCHIVE_MEDIA_TYPE = "application/zip"

@@ -140,12 +140,12 @@ class ReaderPageUpscaler(
                             updateProgress(cacheFile, UpscaleStage.UPSCALING, 0, indeterminate = true)
                             anime4xPageUpscaler.upscaleSource(source)
                         }
-                    ReaderPreferences.AiBackendMode.REMOTE -> remotePageUpscaler.upscaleSource(
-                        source = source,
-                        pageMetadata = pageRequestMetadata(page),
-                        onProgress = { stage, percent ->
+                    ReaderPreferences.AiBackendMode.REMOTE -> {
+                        val metadata = pageRequestMetadata(page)
+                        val progressCallback: (RemotePageUpscaler.ProgressStage, Int) -> Unit = { stage, percent ->
                             val mappedStage = when (stage) {
                                 RemotePageUpscaler.ProgressStage.UPLOADING_TO_PC -> UpscaleStage.UPLOADING_TO_PC
+                                RemotePageUpscaler.ProgressStage.DOWNLOADING_TO_PC -> UpscaleStage.DOWNLOADING_TO_PC
                                 RemotePageUpscaler.ProgressStage.UPSCALING -> UpscaleStage.UPSCALING
                                 RemotePageUpscaler.ProgressStage.DOWNLOADING_TO_PHONE ->
                                     UpscaleStage.DOWNLOADING_TO_PHONE
@@ -156,8 +156,17 @@ class ReaderPageUpscaler(
                                 percent,
                                 indeterminate = mappedStage == UpscaleStage.UPSCALING,
                             )
-                        },
-                    )
+                        }
+                        val directRequest = if (readerPreferences.remoteAiDirectDownload.get()) {
+                            runCatching { page.remoteImageRequest?.invoke() }.getOrNull()
+                                ?.takeIf { it.method == "GET" && it.body == null }
+                        } else {
+                            null
+                        }
+                        directRequest?.let {
+                            remotePageUpscaler.upscaleDirectPage(it, metadata, progressCallback)
+                        } ?: remotePageUpscaler.upscaleSource(source, metadata, progressCallback)
+                    }
                 }
             }
                 .onFailure { logcat(LogPriority.WARN, it) { "Failed to AI-upscale reader page ${cacheFile.name}" } }

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.22
+
+- Use direct website-to-PC downloads for single-page remote upscaling instead of preparing and uploading the image on the phone.
+- Fall back automatically to the phone upload path when a website refuses the companion's direct request.
+- Log accepted direct jobs and source downloads visibly in the Windows companion console.
+
 ## v0.1.21
 
 - Report real byte progress while images travel from a website to the PC, from the phone to the PC, and back to the phone.
