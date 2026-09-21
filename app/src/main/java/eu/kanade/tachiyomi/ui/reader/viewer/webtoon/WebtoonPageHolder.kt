@@ -306,6 +306,12 @@ class WebtoonPageHolder(
 
     private fun startAiProgress(page: ReaderPage) {
         aiProgressJob?.cancel()
+        progressContainer.animate().cancel()
+        progressContainer.apply {
+            alpha = 0f
+            isVisible = true
+            animate().alpha(1f).setDuration(AI_PROGRESS_FADE_IN_MS).start()
+        }
         aiProgressJob = scope.launch {
             pageUpscaler.progress(page).collectLatest { progress ->
                 val label = frame.context.stringResource(
@@ -322,8 +328,12 @@ class WebtoonPageHolder(
                         ReaderPageUpscaler.UpscaleStage.FAILED -> MR.strings.reader_ai_progress_failed
                     },
                 )
-                progressContainer.isVisible = progress.stage != ReaderPageUpscaler.UpscaleStage.READY
-                progressIndicator.setAiProgress(label, progress.percent)
+                progressContainer.isVisible = true
+                progressIndicator.setAiProgress(
+                    status = label,
+                    progress = progress.percent,
+                    indeterminate = progress.indeterminate || progress.stage in INDETERMINATE_AI_STAGES,
+                )
             }
         }
     }
@@ -331,8 +341,16 @@ class WebtoonPageHolder(
     private fun stopAiProgress() {
         aiProgressJob?.cancel()
         aiProgressJob = null
-        progressIndicator.clearAiProgress()
-        progressContainer.isVisible = false
+        progressContainer.animate().cancel()
+        progressContainer.animate()
+            .alpha(0f)
+            .setDuration(AI_PROGRESS_FADE_OUT_MS)
+            .withEndAction {
+                progressIndicator.clearAiProgress()
+                progressContainer.isVisible = false
+                progressContainer.alpha = 1f
+            }
+            .start()
     }
 
     private fun awaitUpscaledImageAndReload(expectedPage: ReaderPage) {
@@ -454,5 +472,13 @@ class WebtoonPageHolder(
             frame.removeView(it.root)
             errorLayout = null
         }
+    }
+
+    private companion object {
+        const val AI_PROGRESS_FADE_IN_MS = 180L
+        const val AI_PROGRESS_FADE_OUT_MS = 280L
+        val INDETERMINATE_AI_STAGES = setOf(
+            ReaderPageUpscaler.UpscaleStage.WAITING,
+        )
     }
 }

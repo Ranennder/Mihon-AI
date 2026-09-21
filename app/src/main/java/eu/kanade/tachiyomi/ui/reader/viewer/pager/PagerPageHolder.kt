@@ -307,6 +307,12 @@ class PagerPageHolder(
     private fun startAiProgress() {
         initProgressIndicator()
         aiProgressJob?.cancel()
+        progressContainer?.animate()?.cancel()
+        progressContainer?.apply {
+            alpha = 0f
+            isVisible = true
+            animate().alpha(1f).setDuration(AI_PROGRESS_FADE_IN_MS).start()
+        }
         aiProgressJob = scope.launch {
             pageUpscaler.progress(page).collectLatest { progress ->
                 val label = context.stringResource(
@@ -323,8 +329,12 @@ class PagerPageHolder(
                         ReaderPageUpscaler.UpscaleStage.FAILED -> MR.strings.reader_ai_progress_failed
                     },
                 )
-                progressContainer?.isVisible = progress.stage != ReaderPageUpscaler.UpscaleStage.READY
-                progressIndicator?.setAiProgress(label, progress.percent)
+                progressContainer?.isVisible = true
+                progressIndicator?.setAiProgress(
+                    status = label,
+                    progress = progress.percent,
+                    indeterminate = progress.indeterminate || progress.stage in INDETERMINATE_AI_STAGES,
+                )
             }
         }
     }
@@ -332,8 +342,16 @@ class PagerPageHolder(
     private fun stopAiProgress() {
         aiProgressJob?.cancel()
         aiProgressJob = null
-        progressIndicator?.clearAiProgress()
-        progressContainer?.isVisible = false
+        progressContainer?.animate()?.cancel()
+        progressContainer?.animate()
+            ?.alpha(0f)
+            ?.setDuration(AI_PROGRESS_FADE_OUT_MS)
+            ?.withEndAction {
+                progressIndicator?.clearAiProgress()
+                progressContainer?.isVisible = false
+                progressContainer?.alpha = 1f
+            }
+            ?.start()
     }
 
     private fun process(page: ReaderPage, imageSource: BufferedSource): BufferedSource {
@@ -460,5 +478,13 @@ class PagerPageHolder(
     private fun removeErrorLayout() {
         errorLayout?.root?.isVisible = false
         errorLayout = null
+    }
+
+    private companion object {
+        const val AI_PROGRESS_FADE_IN_MS = 180L
+        const val AI_PROGRESS_FADE_OUT_MS = 280L
+        val INDETERMINATE_AI_STAGES = setOf(
+            ReaderPageUpscaler.UpscaleStage.WAITING,
+        )
     }
 }

@@ -6,6 +6,15 @@ import android.view.Gravity
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.FrameLayout
 import androidx.annotation.IntRange
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,6 +60,7 @@ class ReaderProgressIndicator @JvmOverloads constructor(
 
     private var progress by mutableFloatStateOf(0f)
     private var aiStatus by mutableStateOf<String?>(null)
+    private var aiIndeterminate by mutableStateOf(false)
 
     @Composable
     override fun Content() {
@@ -59,7 +69,13 @@ class ReaderProgressIndicator @JvmOverloads constructor(
             if (status == null) {
                 CombinedCircularProgressIndicator(progress = { progress })
             } else {
+                val animatedProgress by animateFloatAsState(
+                    targetValue = progress,
+                    animationSpec = tween(durationMillis = 650),
+                    label = "readerAiProgress",
+                )
                 Surface(
+                    modifier = Modifier.animateContentSize(animationSpec = tween(250)),
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.94f),
                     tonalElevation = 6.dp,
@@ -68,23 +84,38 @@ class ReaderProgressIndicator @JvmOverloads constructor(
                         modifier = Modifier.width(260.dp).padding(horizontal = 20.dp, vertical = 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text(
-                            text = status,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center,
-                        )
+                        AnimatedContent(
+                            targetState = status,
+                            transitionSpec = {
+                                (fadeIn(tween(250)) + slideInVertically(tween(250)) { it / 3 }) togetherWith
+                                    (fadeOut(tween(180)) + slideOutVertically(tween(180)) { -it / 3 })
+                            },
+                            label = "readerAiStage",
+                        ) { stage ->
+                            Text(
+                                text = stage,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                         Spacer(Modifier.height(12.dp))
-                        LinearProgressIndicator(
-                            progress = { progress },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "${(progress * 100).toInt()}%",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
+                        if (aiIndeterminate) {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        } else {
+                            LinearProgressIndicator(
+                                progress = { animatedProgress },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        if (!aiIndeterminate) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "${(animatedProgress * 100).toInt()}%",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
                     }
                 }
             }
@@ -103,13 +134,19 @@ class ReaderProgressIndicator @JvmOverloads constructor(
         this.progress = progress / 100f
     }
 
-    fun setAiProgress(status: String, @IntRange(from = 0, to = 100) progress: Int) {
+    fun setAiProgress(
+        status: String,
+        @IntRange(from = 0, to = 100) progress: Int,
+        indeterminate: Boolean = false,
+    ) {
         aiStatus = status
+        aiIndeterminate = indeterminate
         setProgress(progress)
         show()
     }
 
     fun clearAiProgress() {
         aiStatus = null
+        aiIndeterminate = false
     }
 }

@@ -275,6 +275,7 @@ class ChapterUpscaleJob:
     ready_pages: set[int] = field(default_factory=set, repr=False)
     stable_output_pages: set[int] = field(default_factory=set, repr=False)
     observed_output_sizes: dict[int, tuple[int, float]] = field(default_factory=dict, repr=False)
+    page_download_progress: dict[int, int | None] = field(default_factory=dict, repr=False)
     state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def resolve_output_path(self, page_index: int) -> Path | None:
@@ -481,6 +482,126 @@ class ReaderAiServer(ThreadingHTTPServer):
         )
         thread.start()
         return job, False
+
+    def create_direct_chapter_job(
+        self,
+        request_id: str,
+        pages: list[dict[str, Any]],
+        requested_output_format: str,
+        model_name: str,
+        manga_title: str | None,
+        chapter_title: str | None,
+        client_id: str | None = None,
+        scope_id: int | None = None,
+    ) -> ChapterUpscaleJob:
+        """Register immediately, then download source images in the background."""
+        self._cleanup_expired_chapter_jobs()
+        job_id = uuid.uuid4().hex[:12]
+        workspace = self._chapter_jobs_root / job_id
+        input_dir = workspace / "chapter-in"
+        output_dir = workspace / "chapter-out"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        placeholders = {
+            int(item["page_index"]): PreparedChapterPage(
+                page_index=int(item["page_index"]),
+                input_path=input_dir / f"{int(item['page_index']):04d}.pending",
+                input_format="pending",
+            )
+            for item in pages
+        }
+        job = ChapterUpscaleJob(
+            job_id=job_id,
+            request_id=request_id,
+            created_at=time.time(),
+            model_name=model_name,
+            native_scale=_resolve_model_scale(model_name=model_name, default_scale=self.config.scale),
+            requested_output_format=requested_output_format,
+            batch_output_format=_sanitize_extension(requested_output_format),
+            workspace=workspace,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            pages=placeholders,
+            manga_title=manga_title,
+            chapter_title=chapter_title,
+            client_id=client_id,
+            scope_id=scope_id,
+            page_download_progress={page_index: None for page_index in placeholders},
+        )
+        with self._chapter_jobs_lock:
+            self._chapter_jobs[job_id] = job
+        threading.Thread(
+            target=self._download_and_run_direct_chapter_job,
+            args=(job, pages),
+            name=f"reader-ai-direct-chapter-{job_id}",
+            daemon=True,
+        ).start()
+        return job
+
+    def _download_and_run_direct_chapter_job(self, job: ChapterUpscaleJob, pages: list[dict[str, Any]]) -> None:
+        try:
+            for item in pages:
+                page_index = int(item["page_index"])
+                if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                    raise RuntimeError("Chapter upscale was canceled")
+                page_url = str(item["url"])
+                if urlparse(page_url).scheme not in {"http", "https"}:
+                    raise ValueError("Only HTTP(S) page URLs are supported")
+                raw_headers = item.get("headers") or {}
+                headers = {
+                    str(key): str(value)
+                    for key, value in raw_headers.items()
+                    if str(key).lower() not in {"host", "content-length"}
+                }
+                request = UrlRequest(page_url, headers=headers, method="GET")
+                chunks: list[bytes] = []
+                received = 0
+                with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response:
+                    total = max(0, int(response.headers.get("Content-Length") or "0"))
+                    while True:
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > 100 * 1024 * 1024:
+                            raise ValueError(f"Page {page_index} exceeds 100 MiB")
+                        chunks.append(chunk)
+                        if total > 0:
+                            with job.state_lock:
+                                job.page_download_progress[page_index] = min(99, received * 100 // total)
+                image = b"".join(chunks)
+                with Image.open(BytesIO(image)) as source_image:
+                    detected_format = (source_image.format or "jpg").lower()
+                extension = "jpg" if detected_format == "jpeg" else _sanitize_extension(detected_format)
+                input_path = job.input_dir / f"{page_index:04d}.{extension}"
+                input_path.write_bytes(image)
+                with job.state_lock:
+                    job.pages[page_index] = PreparedChapterPage(page_index, input_path, extension)
+                    job.page_download_progress[page_index] = 100
+            self._run_chapter_job(job)
+        except Exception as exc:  # noqa: BLE001
+            job.error = exc
+            job.completed.set()
+            self.log_message("[%s] Direct chapter job error: %s", job.request_id, exc)
+
+    def get_chapter_page_progress(self, job_id: str, page_index: int) -> tuple[str, int | None]:
+        with self._chapter_jobs_lock:
+            job = self._chapter_jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        with job.state_lock:
+            download_percent = job.page_download_progress.get(page_index)
+            ready_count = len(job.ready_pages | job.stable_output_pages)
+            downloads_complete = bool(job.page_download_progress) and all(
+                value is not None and value >= 100 for value in job.page_download_progress.values()
+            )
+        if page_index in job.page_download_progress and not downloads_complete:
+            return "downloading_to_pc", download_percent
+        if page_index in job.ready_pages or page_index in job.stable_output_pages:
+            return "ready", 100
+        if job.total_pages > 0:
+            return "upscaling", ready_count * 100 // job.total_pages
+        return "upscaling", None
 
     def _find_reusable_chapter_job(
         self,
@@ -1087,10 +1208,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         if processed_image is None:
-            self.send_response(HTTPStatus.ACCEPTED)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            stage, percent = self.server.get_chapter_page_progress(job_id, int(page_index_text))
+            self._send_json(HTTPStatus.ACCEPTED, {"stage": stage, "percent": percent})
             return
 
         self.server.note_chapter_page_ready(job_id, int(page_index_text))
@@ -1180,7 +1299,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
                 now = time.perf_counter()
                 if now - last_heartbeat_at >= CHAPTER_STREAM_HEARTBEAT_SECONDS:
-                    self._write_chapter_stream_event({"type": "heartbeat"})
+                    progress = {}
+                    for page_index in remaining_page_indexes:
+                        stage, percent = self.server.get_chapter_page_progress(job_id, page_index)
+                        progress[str(page_index)] = {"stage": stage, "percent": percent}
+                    self._write_chapter_stream_event({"type": "heartbeat", "progress": progress})
                     last_heartbeat_at = now
 
                 if not sent_page:
@@ -1516,30 +1639,6 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Direct chapter manifest has no pages")
 
             request_id = self.server.next_request_id()
-            incoming = self.server._workspace_root / "incoming-chapters"
-            incoming.mkdir(parents=True, exist_ok=True)
-            archive_path = incoming / f"{request_id}.zip"
-            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
-                for item in pages:
-                    page_index = int(item["page_index"])
-                    page_url = str(item["url"])
-                    if urlparse(page_url).scheme not in {"http", "https"}:
-                        raise ValueError("Only HTTP(S) page URLs are supported")
-                    raw_headers = item.get("headers") or {}
-                    headers = {str(k): str(v) for k, v in raw_headers.items() if str(k).lower() not in {"host", "content-length"}}
-                    request = UrlRequest(page_url, headers=headers, method="GET")
-                    with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response:
-                        image = response.read(100 * 1024 * 1024 + 1)
-                        if len(image) > 100 * 1024 * 1024:
-                            raise ValueError(f"Page {page_index} exceeds 100 MiB")
-                    try:
-                        with Image.open(BytesIO(image)) as source_image:
-                            detected_format = (source_image.format or "jpg").lower()
-                        extension = ".jpg" if detected_format == "jpeg" else f".{detected_format}"
-                    except Exception as exc:  # noqa: BLE001
-                        raise ValueError(f"Page {page_index} is not a valid image") from exc
-                    archive.writestr(f"{page_index:04d}.{_sanitize_extension(extension)}", image)
-
             output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
             model_name = _resolve_requested_model_name(
                 requested_model_name=(self.headers.get("X-Reader-AI-Model-Name") or "").strip(),
@@ -1550,9 +1649,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             client_id = _decode_optional_text_header(self.headers.get("X-Reader-AI-Client-Id"))
             scope_id = _parse_optional_int_header((self.headers.get("X-Reader-AI-Work-Scope") or "").strip())
             self.server.sync_client_scope(client_id, scope_id)
-            chapter_job, reused = self.server.create_chapter_job(
+            chapter_job = self.server.create_direct_chapter_job(
                 request_id=request_id,
-                archive_path=archive_path,
+                pages=pages,
                 requested_output_format=output_format,
                 model_name=model_name,
                 manga_title=manga_title,
@@ -1560,13 +1659,10 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 client_id=client_id,
                 scope_id=scope_id,
             )
-            self._send_json(HTTPStatus.ACCEPTED, {"job_id": chapter_job.job_id, "page_count": len(chapter_job.pages), "reused_existing_job": reused})
+            self._send_json(HTTPStatus.ACCEPTED, {"job_id": chapter_job.job_id, "page_count": len(chapter_job.pages), "reused_existing_job": False})
         except Exception as exc:  # noqa: BLE001
             self.log_message("Direct chapter error: %s", exc)
             self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
-        finally:
-            if "archive_path" in locals():
-                archive_path.unlink(missing_ok=True)
 
     def _handle_abort_client_request(self) -> None:
         if not self._authorize():

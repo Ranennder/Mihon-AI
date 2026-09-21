@@ -14,7 +14,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.BufferedSource
@@ -136,6 +135,7 @@ class RemotePageUpscaler(
         archiveFile: File,
         pageCount: Int,
         metadata: ChapterJobMetadata? = null,
+        onUploadProgress: (Int) -> Unit = {},
     ): StartedChapterJob? {
         lastErrorMessage = null
         if (pageCount <= 0 || !archiveFile.exists() || archiveFile.length() <= 0L) {
@@ -157,6 +157,7 @@ class RemotePageUpscaler(
             pageCount = pageCount,
             metadata = metadata,
             scopeId = scopeId,
+            onUploadProgress = onUploadProgress,
         )
         if (initialAttempt.job != null) {
             return initialAttempt.job
@@ -177,6 +178,7 @@ class RemotePageUpscaler(
             pageCount = pageCount,
             metadata = metadata,
             scopeId = scopeId,
+            onUploadProgress = onUploadProgress,
         ).job
     }
 
@@ -263,6 +265,7 @@ class RemotePageUpscaler(
     fun fetchChapterPage(
         job: StartedChapterJob,
         pageIndex: Int,
+        onDownloadProgress: (Int) -> Unit = {},
     ): ChapterPageFetchResult {
         lastErrorMessage = null
 
@@ -288,13 +291,43 @@ class RemotePageUpscaler(
         return runCatching {
             client.newCall(requestBuilder.get().build()).execute().use { response ->
                 when {
-                    response.code == 202 -> ChapterPageFetchResult.Pending
+                    response.code == 202 -> {
+                        val payload = JSONObject(response.body.string().ifBlank { "{}" })
+                        ChapterPageFetchResult.Pending(
+                            stage = payload.optString("stage", "upscaling"),
+                            percent = if (payload.isNull(
+                                    "percent",
+                                )
+                            ) {
+                                null
+                            } else {
+                                payload.optInt("percent").coerceIn(0, 100)
+                            },
+                        )
+                    }
                     response.code == 410 -> {
                         lastErrorMessage = null
                         ChapterPageFetchResult.Cancelled
                     }
                     response.isSuccessful -> {
-                        val responseBytes = response.body.bytes()
+                        val responseBody = response.body
+                        val totalBytes = responseBody.contentLength()
+                        val source = responseBody.source()
+                        val output = ByteArrayOutputStream()
+                        val buffer = ByteArray(64 * 1024)
+                        var downloadedBytes = 0L
+                        while (true) {
+                            val count = source.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            downloadedBytes += count
+                            if (totalBytes > 0) {
+                                onDownloadProgress(
+                                    (downloadedBytes * 100 / totalBytes).toInt().coerceIn(0, 100),
+                                )
+                            }
+                        }
+                        val responseBytes = output.toByteArray()
                         if (responseBytes.isEmpty()) {
                             lastErrorMessage = "Remote AI chapter page is empty"
                             ChapterPageFetchResult.Failed(
@@ -332,6 +365,7 @@ class RemotePageUpscaler(
     fun streamChapterPages(
         job: StartedChapterJob,
         pageIndexes: Set<Int>,
+        onProgress: (pageIndex: Int, stage: String, percent: Int?) -> Unit = { _, _, _ -> },
         onPageReady: (pageIndex: Int, bytes: ByteArray) -> Unit,
     ): ChapterStreamFetchResult {
         lastErrorMessage = null
@@ -374,6 +408,7 @@ class RemotePageUpscaler(
                 readChapterPageStream(
                     responseSource = response.body.source(),
                     pageIndexes = pageIndexes,
+                    onProgress = onProgress,
                     onPageReady = onPageReady,
                 )
             }
@@ -393,6 +428,7 @@ class RemotePageUpscaler(
     private fun readChapterPageStream(
         responseSource: BufferedSource,
         pageIndexes: Set<Int>,
+        onProgress: (pageIndex: Int, stage: String, percent: Int?) -> Unit,
         onPageReady: (pageIndex: Int, bytes: ByteArray) -> Unit,
     ): ChapterStreamFetchResult {
         while (true) {
@@ -407,7 +443,15 @@ class RemotePageUpscaler(
 
             val event = JSONObject(eventLine)
             when (event.optString("type")) {
-                "start", "heartbeat" -> Unit
+                "start" -> Unit
+                "heartbeat" -> {
+                    val progress = event.optJSONObject("progress") ?: JSONObject()
+                    progress.keys().forEach { pageIndexText ->
+                        val item = progress.optJSONObject(pageIndexText) ?: return@forEach
+                        val percent = if (item.isNull("percent")) null else item.optInt("percent").coerceIn(0, 100)
+                        onProgress(pageIndexText.toIntOrNull() ?: return@forEach, item.optString("stage"), percent)
+                    }
+                }
                 "done" -> return ChapterStreamFetchResult.Completed
                 "cancelled" -> return ChapterStreamFetchResult.Cancelled
                 "error" -> {
@@ -430,7 +474,20 @@ class RemotePageUpscaler(
                         )
                     }
 
-                    val responseBytes = responseSource.readByteArray(byteCount)
+                    val output = ByteArrayOutputStream(byteCount.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                    var remaining = byteCount
+                    while (remaining > 0L) {
+                        val chunkSize = minOf(64 * 1024L, remaining)
+                        val chunk = responseSource.readByteArray(chunkSize)
+                        output.write(chunk)
+                        remaining -= chunk.size
+                        onProgress(
+                            pageIndex,
+                            "downloading_to_phone",
+                            ((byteCount - remaining) * 100 / byteCount).toInt(),
+                        )
+                    }
+                    val responseBytes = output.toByteArray()
                     val frameSeparator = responseSource.readByte()
                     if (frameSeparator != '\n'.code.toByte()) {
                         lastErrorMessage = "Remote AI chapter stream page frame ended unexpectedly"
@@ -469,7 +526,7 @@ class RemotePageUpscaler(
         }
 
         val preparedImage = prepareRequestImage(source.peek().readByteArray()) ?: return null
-        onProgress(ProgressStage.UPLOADING_TO_PC, 10)
+        onProgress(ProgressStage.UPLOADING_TO_PC, 0)
         val scopeId = workScope.get()
         val initialAttempt = runUpscaleRequest(
             baseUrl = baseUrlResolution.baseUrl,
@@ -506,6 +563,7 @@ class RemotePageUpscaler(
         pageCount: Int,
         metadata: ChapterJobMetadata?,
         scopeId: Long,
+        onUploadProgress: (Int) -> Unit,
     ): ChapterJobAttempt {
         val requestUrl = "${baseUrlResolution.baseUrl}/api/upscale-chapter".toHttpUrlOrNull()
         if (requestUrl == null) {
@@ -535,8 +593,26 @@ class RemotePageUpscaler(
             ?.takeIf { it.isNotEmpty() }
             ?.let { requestBuilder.header("X-Reader-AI-Chapter-Title", encodeHeaderText(it)) }
 
+        val archiveBody = object : RequestBody() {
+            override fun contentType() = REMOTE_ARCHIVE_MEDIA_TYPE.toMediaType()
+            override fun contentLength() = archiveFile.length()
+            override fun writeTo(sink: BufferedSink) {
+                val total = archiveFile.length().coerceAtLeast(1L)
+                var sent = 0L
+                archiveFile.inputStream().buffered().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        sink.write(buffer, 0, count)
+                        sent += count
+                        onUploadProgress((sent * 100 / total).toInt().coerceIn(0, 100))
+                    }
+                }
+            }
+        }
         val request = requestBuilder
-            .post(archiveFile.asRequestBody(REMOTE_ARCHIVE_MEDIA_TYPE.toMediaType()))
+            .post(archiveBody)
             .build()
 
         return runCatching {
@@ -626,9 +702,9 @@ class RemotePageUpscaler(
                     sink.write(preparedImage.bytes, offset, count)
                     offset += count
                     val fraction = offset.toFloat() / preparedImage.bytes.size.coerceAtLeast(1)
-                    onProgress(ProgressStage.UPLOADING_TO_PC, 10 + (fraction * 25).toInt())
+                    onProgress(ProgressStage.UPLOADING_TO_PC, (fraction * 100).toInt())
                 }
-                onProgress(ProgressStage.UPSCALING, 40)
+                onProgress(ProgressStage.UPSCALING, 0)
             }
         }
         val request = requestBuilder
@@ -644,8 +720,25 @@ class RemotePageUpscaler(
                     return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
                 }
 
-                onProgress(ProgressStage.DOWNLOADING_TO_PHONE, 85)
-                val responseBytes = response.body.bytes()
+                val responseBody = response.body
+                val totalBytes = responseBody.contentLength()
+                val responseOutput = ByteArrayOutputStream()
+                val responseBuffer = ByteArray(64 * 1024)
+                var downloadedBytes = 0L
+                val responseSource = responseBody.source()
+                while (true) {
+                    val count = responseSource.read(responseBuffer)
+                    if (count < 0) break
+                    responseOutput.write(responseBuffer, 0, count)
+                    downloadedBytes += count
+                    if (totalBytes > 0) {
+                        onProgress(
+                            ProgressStage.DOWNLOADING_TO_PHONE,
+                            (downloadedBytes * 100 / totalBytes).toInt().coerceIn(0, 100),
+                        )
+                    }
+                }
+                val responseBytes = responseOutput.toByteArray()
                 if (responseBytes.isEmpty()) {
                     lastErrorMessage = "Remote AI server returned an empty image"
                     return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
@@ -656,7 +749,7 @@ class RemotePageUpscaler(
                 ) ?: return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
 
                 lastErrorMessage = null
-                onProgress(ProgressStage.DOWNLOADING_TO_PHONE, 95)
+                onProgress(ProgressStage.DOWNLOADING_TO_PHONE, 100)
                 UpscaleAttempt.success(normalizedResponseBytes)
             }
         }
@@ -868,7 +961,7 @@ class RemotePageUpscaler(
     )
 
     sealed interface ChapterPageFetchResult {
-        data object Pending : ChapterPageFetchResult
+        data class Pending(val stage: String, val percent: Int?) : ChapterPageFetchResult
         data object Cancelled : ChapterPageFetchResult
         data class Ready(val bytes: ByteArray) : ChapterPageFetchResult
         data class Failed(

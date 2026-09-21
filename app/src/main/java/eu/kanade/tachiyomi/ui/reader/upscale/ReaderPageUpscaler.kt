@@ -126,18 +126,18 @@ class ReaderPageUpscaler(
             }
 
             lastFailureMessage = null
-            updateProgress(cacheFile, UpscaleStage.PREPARING, 5)
+            updateProgress(cacheFile, UpscaleStage.PREPARING, 0, indeterminate = true)
             val processedBytes = runCatching {
                 when (backendMode) {
                     ReaderPreferences.AiBackendMode.GPU -> {
-                        updateProgress(cacheFile, UpscaleStage.UPSCALING, 35)
+                        updateProgress(cacheFile, UpscaleStage.UPSCALING, 0, indeterminate = true)
                         ncnnPageUpscaler.upscaleSource(source)
                     }
                     ReaderPreferences.AiBackendMode.CPU,
                     ReaderPreferences.AiBackendMode.NPU,
                     ->
                         run {
-                            updateProgress(cacheFile, UpscaleStage.UPSCALING, 35)
+                            updateProgress(cacheFile, UpscaleStage.UPSCALING, 0, indeterminate = true)
                             anime4xPageUpscaler.upscaleSource(source)
                         }
                     ReaderPreferences.AiBackendMode.REMOTE -> remotePageUpscaler.upscaleSource(
@@ -150,7 +150,12 @@ class ReaderPageUpscaler(
                                 RemotePageUpscaler.ProgressStage.DOWNLOADING_TO_PHONE ->
                                     UpscaleStage.DOWNLOADING_TO_PHONE
                             }
-                            updateProgress(cacheFile, mappedStage, percent)
+                            updateProgress(
+                                cacheFile,
+                                mappedStage,
+                                percent,
+                                indeterminate = mappedStage == UpscaleStage.UPSCALING,
+                            )
                         },
                     )
                 }
@@ -407,8 +412,13 @@ class ReaderPageUpscaler(
             )
         }
 
-    private fun updateProgress(cacheFile: File, stage: UpscaleStage, percent: Int) {
-        progressFlow(cacheFile).value = UpscaleProgress(stage, percent.coerceIn(0, 100))
+    private fun updateProgress(
+        cacheFile: File,
+        stage: UpscaleStage,
+        percent: Int,
+        indeterminate: Boolean = false,
+    ) {
+        progressFlow(cacheFile).value = UpscaleProgress(stage, percent.coerceIn(0, 100), indeterminate)
     }
 
     fun consumeLastFailureMessage(): String? {
@@ -615,7 +625,7 @@ class ReaderPageUpscaler(
         )
 
         val directChapterJob = if (readerPreferences.remoteAiDirectDownload.get()) {
-            pendingTargets.forEach { updateProgress(it.cacheFile, UpscaleStage.DOWNLOADING_TO_PC, 10) }
+            pendingTargets.forEach { updateProgress(it.cacheFile, UpscaleStage.DOWNLOADING_TO_PC, 0) }
             val directPages = pendingTargets.mapNotNull { target ->
                 val request = runCatching { target.page.remoteImageRequest?.invoke() }.getOrNull()
                     ?: return@mapNotNull null
@@ -636,7 +646,7 @@ class ReaderPageUpscaler(
             0
         } else {
             try {
-                pendingTargets.forEach { updateProgress(it.cacheFile, UpscaleStage.UPLOADING_TO_PC, 15) }
+                pendingTargets.forEach { updateProgress(it.cacheFile, UpscaleStage.PREPARING, 0) }
                 ZipOutputStream(archiveFile.outputStream().buffered()).use { zipOutput ->
                     var preparedPageCount = 0
                     pendingTargets.forEach { target ->
@@ -673,6 +683,10 @@ class ReaderPageUpscaler(
                         zipOutput.write(entryBytes)
                         zipOutput.closeEntry()
                         preparedPageCount += 1
+                        val preparePercent = preparedPageCount * 100 / pendingTargets.size.coerceAtLeast(1)
+                        pendingTargets.forEach {
+                            updateProgress(it.cacheFile, UpscaleStage.PREPARING, preparePercent)
+                        }
                     }
                     preparedPageCount
                 }
@@ -691,11 +705,18 @@ class ReaderPageUpscaler(
                 archiveFile = archiveFile,
                 pageCount = preparedPageCount,
                 metadata = chapterMetadata,
+                onUploadProgress = { percent ->
+                    pendingTargets.forEach {
+                        updateProgress(it.cacheFile, UpscaleStage.UPLOADING_TO_PC, percent)
+                    }
+                },
             )
         } finally {
             archiveFile.delete()
         } ?: return
-        pendingTargets.forEach { updateProgress(it.cacheFile, UpscaleStage.UPSCALING, 55) }
+        pendingTargets.forEach {
+            updateProgress(it.cacheFile, UpscaleStage.UPSCALING, 0, indeterminate = true)
+        }
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
 
         if (isRemoteWholeChapterStreamModeSelected()) {
@@ -703,9 +724,22 @@ class ReaderPageUpscaler(
                 val streamResult = remotePageUpscaler.streamChapterPages(
                     job = chapterJob,
                     pageIndexes = remainingTargets.keys,
+                    onProgress = { pageIndex, stageName, percent ->
+                        val target = remainingTargets[pageIndex] ?: return@streamChapterPages
+                        val stage = when (stageName) {
+                            "downloading_to_pc" -> UpscaleStage.DOWNLOADING_TO_PC
+                            "downloading_to_phone" -> UpscaleStage.DOWNLOADING_TO_PHONE
+                            else -> UpscaleStage.UPSCALING
+                        }
+                        updateProgress(
+                            target.cacheFile,
+                            stage,
+                            percent ?: 0,
+                            indeterminate = percent == null,
+                        )
+                    },
                     onPageReady = { pageIndex, bytes ->
                         val target = remainingTargets.remove(pageIndex) ?: return@streamChapterPages
-                        updateProgress(target.cacheFile, UpscaleStage.DOWNLOADING_TO_PHONE, 90)
                         target.cacheFile.parentFile?.mkdirs()
                         target.cacheFile.writeBytesAtomically(bytes)
                         updateProgress(target.cacheFile, UpscaleStage.READY, 100)
@@ -774,9 +808,22 @@ class ReaderPageUpscaler(
                     continue
                 }
 
-                when (val fetchResult = remotePageUpscaler.fetchChapterPage(chapterJob, pageIndex)) {
+                when (
+                    val fetchResult = remotePageUpscaler.fetchChapterPage(chapterJob, pageIndex) { percent ->
+                        updateProgress(target.cacheFile, UpscaleStage.DOWNLOADING_TO_PHONE, percent)
+                    }
+                ) {
                     is RemotePageUpscaler.ChapterPageFetchResult.Pending -> {
-                        updateProgress(target.cacheFile, UpscaleStage.UPSCALING, 60)
+                        val stage = when (fetchResult.stage) {
+                            "downloading_to_pc" -> UpscaleStage.DOWNLOADING_TO_PC
+                            else -> UpscaleStage.UPSCALING
+                        }
+                        updateProgress(
+                            target.cacheFile,
+                            stage,
+                            fetchResult.percent ?: 0,
+                            indeterminate = fetchResult.percent == null,
+                        )
                         val pendingCount = pendingPollCounts.getOrDefault(pageIndex, 0) + 1
                         pendingPollCounts[pageIndex] = pendingCount
                         nextPollAt[pageIndex] = now + wholeChapterPendingBackoffMillis(pendingCount)
@@ -785,7 +832,6 @@ class ReaderPageUpscaler(
                         return
                     }
                     is RemotePageUpscaler.ChapterPageFetchResult.Ready -> {
-                        updateProgress(target.cacheFile, UpscaleStage.DOWNLOADING_TO_PHONE, 90)
                         target.cacheFile.parentFile?.mkdirs()
                         target.cacheFile.writeBytesAtomically(fetchResult.bytes)
                         updateProgress(target.cacheFile, UpscaleStage.READY, 100)
@@ -956,6 +1002,7 @@ class ReaderPageUpscaler(
     data class UpscaleProgress(
         val stage: UpscaleStage,
         val percent: Int,
+        val indeterminate: Boolean = false,
     )
 
     enum class UpscaleStage {

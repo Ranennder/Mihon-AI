@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.21
+
+- Report real byte progress while images travel from a website to the PC, from the phone to the PC, and back to the phone.
+- Report whole-chapter upscale progress from the number of pages actually produced by Real-ESRGAN.
+- Use an indeterminate bar without a fake percentage when a server omits the file size or Real-ESRGAN cannot measure a single image internally.
+- Animate measured progress and stage changes, and fade the progress panel out over the completed image.
+
 ## v0.1.20
 
 - Update the Mihon base from 0.20.2 to 0.20.4.
