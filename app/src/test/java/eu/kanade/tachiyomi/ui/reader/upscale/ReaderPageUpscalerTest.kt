@@ -201,6 +201,7 @@ class ReaderPageUpscalerTest {
 
     @Test
     fun `phone chapter upload caches the first AI page before a later source finishes loading`() = runBlocking {
+        preferences.remoteAiChapterMode().set(ReaderPreferences.RemoteAiChapterMode.PARALLEL)
         preferences.remoteAiDirectDownload.set(false)
         preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
         page.status = Page.State.Ready
@@ -240,6 +241,7 @@ class ReaderPageUpscalerTest {
             upscaler.scheduleWholeChapterRemotePrefetch(pages)
             withTimeout(5_000) { laterSourceStarted.await() }
 
+            withTimeout(5_000) { upscaler.progress(page).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY } }
             assertTrue(upscaler.hasCachedPage(page))
             assertFalse(upscaler.hasCachedPage(laterPage))
             verify(exactly = 1) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
@@ -251,6 +253,154 @@ class ReaderPageUpscalerTest {
             verify(exactly = 2) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
         } finally {
             releaseLaterSource.countDown()
+            upscaler.invalidateRemoteWorkScope()
+        }
+    }
+
+    @Test
+    fun `parallel upload submits the next archive before the first AI result returns`() = runBlocking {
+        preferences.remoteAiChapterMode().set(ReaderPreferences.RemoteAiChapterMode.PARALLEL)
+        preferences.remoteAiDirectDownload.set(false)
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
+        page.status = Page.State.Ready
+        val laterPage = ReaderPage(9).apply {
+            chapter = page.chapter
+            status = Page.State.Ready
+            stream = { "later source".byteInputStream() }
+        }
+        val pages = listOf(page, laterPage)
+        page.chapter.state = ReaderChapter.State.Loaded(pages)
+        val firstJob = mockk<RemotePageUpscaler.StartedChapterJob>()
+        val laterJob = mockk<RemotePageUpscaler.StartedChapterJob>()
+        val firstReceiveStarted = CompletableDeferred<Unit>()
+        val secondSubmitted = CompletableDeferred<Unit>()
+        val releaseFirstResult = CountDownLatch(1)
+        every { remote.prepareChapterUploadPage(any(), any()) } answers {
+            RemotePageUpscaler.PreparedChapterUploadPage(firstArg(), secondArg(), "jpg")
+        }
+        every { remote.startChapterJobFromArchive(any(), any(), any(), any()) } answers {
+            ZipFile(firstArg<File>()).use { archive ->
+                if (archive.getEntry("0000.jpg") != null) {
+                    firstJob
+                } else {
+                    assertTrue(archive.getEntry("0009.jpg") != null)
+                    secondSubmitted.complete(Unit)
+                    laterJob
+                }
+            }
+        }
+        every { remote.streamChapterPages(any(), any(), any(), any()) } answers {
+            if (firstArg<RemotePageUpscaler.StartedChapterJob>() === firstJob) {
+                firstReceiveStarted.complete(Unit)
+                check(releaseFirstResult.await(5, TimeUnit.SECONDS))
+            }
+            for (index in arg<Set<Int>>(1)) {
+                arg<(Int, ByteArray) -> Unit>(3)(index, "AI page $index".toByteArray())
+            }
+            RemotePageUpscaler.ChapterStreamFetchResult.Completed
+        }
+
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(pages)
+            withTimeout(5_000) {
+                firstReceiveStarted.await()
+                secondSubmitted.await()
+            }
+            assertFalse(upscaler.hasCachedPage(page))
+            verify(exactly = 2) { remote.startChapterJobFromArchive(any(), 1, any(), any()) }
+            releaseFirstResult.countDown()
+            withTimeout(5_000) {
+                upscaler.progress(laterPage).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY }
+            }
+            assertTrue(upscaler.hasCachedPage(page))
+        } finally {
+            releaseFirstResult.countDown()
+            upscaler.invalidateRemoteWorkScope()
+        }
+    }
+
+    @Test
+    fun `classic is the default and submits one archive after all source pages are ready`() = runBlocking {
+        assertEquals(ReaderPreferences.RemoteAiChapterMode.CLASSIC, preferences.remoteAiChapterMode().get())
+        preferences.remoteAiDirectDownload.set(false)
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
+        page.status = Page.State.Ready
+        val laterSourceStarted = CompletableDeferred<Unit>()
+        val releaseLaterSource = CountDownLatch(1)
+        val laterPage = ReaderPage(9).apply {
+            chapter = page.chapter
+            status = Page.State.Ready
+            stream = {
+                laterSourceStarted.complete(Unit)
+                check(releaseLaterSource.await(5, TimeUnit.SECONDS))
+                "later source".byteInputStream()
+            }
+        }
+        val pages = listOf(page, laterPage)
+        page.chapter.state = ReaderChapter.State.Loaded(pages)
+        every { remote.prepareChapterUploadPage(any(), any()) } answers {
+            RemotePageUpscaler.PreparedChapterUploadPage(firstArg(), secondArg(), "jpg")
+        }
+        every { remote.startChapterJobFromArchive(any(), 2, any(), any()) } answers {
+            ZipFile(firstArg<File>()).use { archive ->
+                assertEquals(setOf("0000.jpg", "0009.jpg"), archive.entries().asSequence().map { it.name }.toSet())
+            }
+            mockk<RemotePageUpscaler.StartedChapterJob>()
+        }
+        every { remote.streamChapterPages(any(), any(), any(), any()) } answers {
+            for (index in arg<Set<Int>>(1)) {
+                arg<(Int, ByteArray) -> Unit>(3)(index, "AI page $index".toByteArray())
+            }
+            RemotePageUpscaler.ChapterStreamFetchResult.Completed
+        }
+
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(pages)
+            withTimeout(5_000) { laterSourceStarted.await() }
+            verify(exactly = 0) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
+            releaseLaterSource.countDown()
+            withTimeout(5_000) {
+                upscaler.progress(laterPage).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY }
+            }
+            assertTrue(upscaler.hasCachedPage(page))
+            verify(exactly = 1) { remote.startChapterJobFromArchive(any(), 2, any(), any()) }
+        } finally {
+            releaseLaterSource.countDown()
+            upscaler.invalidateRemoteWorkScope()
+        }
+    }
+
+    @Test
+    fun `chapter without streaming retains its existing batch sizes`() = runBlocking {
+        preferences.remoteAiDirectDownload.set(false)
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER)
+        val pages = (0..6).map { index ->
+            ReaderPage(index).apply {
+                chapter = page.chapter
+                status = Page.State.Ready
+                stream = { "source $index".byteInputStream() }
+            }
+        }
+        page.chapter.state = ReaderChapter.State.Loaded(pages)
+        val uploadedCounts = mutableListOf<Int>()
+        every { remote.prepareChapterUploadPage(any(), any()) } answers {
+            RemotePageUpscaler.PreparedChapterUploadPage(firstArg(), secondArg(), "jpg")
+        }
+        every { remote.startChapterJobFromArchive(any(), any(), any(), any()) } answers {
+            uploadedCounts += arg<Int>(1)
+            mockk<RemotePageUpscaler.StartedChapterJob>()
+        }
+        every { remote.fetchChapterPage(any(), any(), any()) } answers {
+            RemotePageUpscaler.ChapterPageFetchResult.Ready("AI page ${arg<Int>(1)}".toByteArray())
+        }
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(pages)
+            withTimeout(5_000) {
+                upscaler.progress(pages.last()).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY }
+            }
+            assertEquals(listOf(1, 4, 2), uploadedCounts)
+            assertTrue(pages.all(upscaler::hasCachedPage))
+        } finally {
             upscaler.invalidateRemoteWorkScope()
         }
     }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -14,42 +15,62 @@ import org.junit.jupiter.api.Test
 class ChapterUploadBatchesTest {
 
     @Test
-    fun `the first page reaches AI before a later source page becomes available`() = runBlocking {
-        val laterPageRequested = CompletableDeferred<Unit>()
-        val laterPageAvailable = CompletableDeferred<Unit>()
-        val completedUploads = mutableListOf<List<Int>>()
+    fun `uploads continue while earlier AI results are pending with at most two jobs in flight`() = runBlocking {
+        val firstResult = CompletableDeferred<Unit>()
+        val firstReceiveStarted = CompletableDeferred<Unit>()
+        val secondUploaded = CompletableDeferred<Unit>()
+        val submitted = mutableListOf<List<Int>>()
+        val received = mutableListOf<List<Int>>()
         val processing = async {
-            processChapterUploadBatches(listOf(0, 1, 2)) { batch ->
-                for (page in batch) {
-                    if (page == 1) {
-                        laterPageRequested.complete(Unit)
-                        laterPageAvailable.await()
+            processChapterUploadBatches(
+                pages = (0..40).toList(),
+                isReady = { true },
+                startBatch = { batch ->
+                    submitted += batch.toList()
+                    if (submitted.size == 2) secondUploaded.complete(Unit)
+                    batch.toList()
+                },
+                awaitBatch = { batch ->
+                    if (batch.first() == 0) {
+                        firstReceiveStarted.complete(Unit)
+                        firstResult.await()
                     }
-                }
-                completedUploads += batch.toList()
-            }
+                    received += batch
+                },
+            )
         }
         try {
-            withTimeout(5_000) { laterPageRequested.await() }
-            assertEquals(listOf(listOf(0)), completedUploads)
+            withTimeout(5_000) {
+                firstReceiveStarted.await()
+                secondUploaded.await()
+            }
+            yield()
+            assertEquals(listOf(listOf(0), (1..16).toList()), submitted)
+            assertTrue(received.isEmpty())
             assertFalse(processing.isCompleted)
-            laterPageAvailable.complete(Unit)
+            firstResult.complete(Unit)
             withTimeout(5_000) { processing.await() }
-            assertEquals(listOf(listOf(0), listOf(1, 2)), completedUploads)
+            assertEquals((0..40).toList(), received.flatten())
         } finally {
             processing.cancelAndJoin()
         }
     }
 
     @Test
-    fun `batches retain nonconsecutive original page indexes and never exceed four pages`() = runBlocking {
+    fun `batches retain original indexes and do not wait for an unready page to fill a batch`() = runBlocking {
         val pageIndexes = listOf(3, 7, 8, 12, 20, 22, 31, 33, 42, 51)
         val uploaded = mutableListOf<List<Int>>()
 
-        processChapterUploadBatches(pageIndexes) { uploaded += it.toList() }
+        processChapterUploadBatches(
+            pages = pageIndexes,
+            isReady = { it < 12 },
+            startBatch = { it.toList().also(uploaded::add) },
+            awaitBatch = {},
+        )
 
         assertEquals(listOf(3), uploaded.first())
-        assertTrue(uploaded.drop(1).all { it.size in 1..4 })
+        assertEquals(listOf(7, 8), uploaded[1])
+        assertTrue(uploaded.drop(2).all { it.size == 1 })
         assertEquals(pageIndexes, uploaded.flatten())
     }
 
@@ -59,11 +80,17 @@ class ChapterUploadBatchesTest {
         val pendingUpload = CompletableDeferred<Unit>()
         val submitted = mutableListOf<List<Int>>()
         val processing = launch {
-            processChapterUploadBatches((0..9).toList()) { batch ->
-                submitted += batch.toList()
-                uploadStarted.complete(Unit)
-                pendingUpload.await()
-            }
+            processChapterUploadBatches(
+                pages = (0..9).toList(),
+                isReady = { true },
+                startBatch = { batch ->
+                    submitted += batch.toList()
+                    uploadStarted.complete(Unit)
+                    pendingUpload.await()
+                    batch
+                },
+                awaitBatch = { error("Canceled upload must not be received") },
+            )
         }
 
         withTimeout(5_000) { uploadStarted.await() }
@@ -74,7 +101,64 @@ class ChapterUploadBatchesTest {
     }
 
     @Test
+    fun `canceling while results are pending cancels both stages and no third job is submitted`() = runBlocking {
+        val secondUploaded = CompletableDeferred<Unit>()
+        val pendingResult = CompletableDeferred<Unit>()
+        val submitted = mutableListOf<List<Int>>()
+        var receiverStopped = false
+        val processing = launch {
+            processChapterUploadBatches(
+                pages = (0..40).toList(),
+                isReady = { true },
+                startBatch = { batch ->
+                    submitted += batch.toList()
+                    if (submitted.size == 2) secondUploaded.complete(Unit)
+                    batch
+                },
+                awaitBatch = {
+                    try {
+                        pendingResult.await()
+                    } finally {
+                        receiverStopped = true
+                    }
+                },
+            )
+        }
+
+        withTimeout(5_000) { secondUploaded.await() }
+        yield()
+        processing.cancelAndJoin()
+
+        assertEquals(2, submitted.size)
+        assertTrue(receiverStopped)
+    }
+
+    @Test
+    fun `skipped batches release their slot so later uploads can continue`() = runBlocking {
+        val submitted = mutableListOf<Int>()
+        val received = mutableListOf<Int>()
+        withTimeout(5_000) {
+            processChapterUploadBatches(
+                pages = (0..4).toList(),
+                isReady = { false },
+                startBatch = { batch ->
+                    submitted += batch.first()
+                    batch.first().takeIf { it >= 3 }
+                },
+                awaitBatch = { received += it },
+            )
+        }
+        assertEquals((0..4).toList(), submitted)
+        assertEquals(listOf(3, 4), received)
+    }
+
+    @Test
     fun `an empty chapter does not open a remote job`() = runBlocking {
-        processChapterUploadBatches(emptyList<Int>()) { error("Unexpected upload") }
+        processChapterUploadBatches<Int, Int>(
+            pages = emptyList(),
+            isReady = { true },
+            startBatch = { error("Unexpected upload") },
+            awaitBatch = { error("Unexpected receive") },
+        )
     }
 }

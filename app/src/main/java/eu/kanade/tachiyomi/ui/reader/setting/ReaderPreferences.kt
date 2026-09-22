@@ -96,6 +96,8 @@ class ReaderPreferences(
         preferenceStore.getEnum("pref_reader_ai_remote_model", RemoteAiModel.FAST)
     val remoteAiBatchMode: Preference<RemoteAiBatchMode> =
         preferenceStore.getEnum("pref_reader_ai_remote_batch_mode", RemoteAiBatchMode.SINGLE)
+    private val remoteAiChapterModePreference: Preference<RemoteAiChapterMode> =
+        preferenceStore.getEnum("pref_reader_ai_remote_chapter_mode", RemoteAiChapterMode.CLASSIC)
     val remoteAiDirectDownload: Preference<Boolean> =
         preferenceStore.getBoolean("pref_reader_ai_remote_direct_download", false)
     val remoteAiDiscoveredBaseUrl: Preference<String> =
@@ -104,6 +106,8 @@ class ReaderPreferences(
         preferenceStore.getString(Preference.appStateKey("reader_ai_internet_url"), "")
     val remoteAiInternetAccess: Preference<Boolean> =
         preferenceStore.getBoolean("pref_reader_ai_internet_access", false)
+
+    fun remoteAiChapterMode(): Preference<RemoteAiChapterMode> = remoteAiChapterModePreference
 
     fun selectedAiBackendMode(): AiBackendMode {
         return normalizeAiBackendMode(aiBackendMode.get())
@@ -272,6 +276,23 @@ class ReaderPreferences(
             companionModelName = "realesrgan-x4plus-anime",
             cacheKey = "detailed-native4",
             companionScale = 4,
+        ),
+    }
+
+    enum class RemoteAiChapterMode(
+        val titleRes: StringResource,
+        val descriptionRes: StringResource,
+        val requestValue: String,
+    ) {
+        CLASSIC(
+            titleRes = MR.strings.reader_ai_remote_chapter_mode_classic,
+            descriptionRes = MR.strings.reader_ai_remote_chapter_mode_classic_summary,
+            requestValue = "classic",
+        ),
+        PARALLEL(
+            titleRes = MR.strings.reader_ai_remote_chapter_mode_parallel,
+            descriptionRes = MR.strings.reader_ai_remote_chapter_mode_parallel_summary,
+            requestValue = "parallel",
         ),
     }
 

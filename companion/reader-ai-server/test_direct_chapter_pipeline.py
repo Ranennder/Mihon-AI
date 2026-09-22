@@ -1,6 +1,7 @@
 """Direct chapter download/processing concurrency regressions; no GPU required."""
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -10,7 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from PIL import Image
 
@@ -54,7 +56,7 @@ class DirectChapterPipelineTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}"
 
-    def start_job(self, indexes=(0, 1), pages=None):
+    def start_job(self, indexes=(0, 1), pages=None, chapter_mode="parallel"):
         job = self.server.create_direct_chapter_job(
             request_id=self.server.next_request_id(),
             pages=pages if pages is not None else [
@@ -63,6 +65,7 @@ class DirectChapterPipelineTests(unittest.TestCase):
             ],
             requested_output_format="png", model_name="realesr-animevideov3",
             manga_title="Manga", chapter_title="Chapter", client_id="phone", scope_id=1,
+            chapter_mode=chapter_mode,
         )
 
         def stop_job():
@@ -155,7 +158,7 @@ class DirectChapterPipelineTests(unittest.TestCase):
         self.assertEqual(self.server.get_chapter_page(job.job_id, 1).bytes, body)
 
     def test_prefetch_is_bounded_and_batches_keep_manifest_order(self):
-        indexes = [7, 2, 11, 4, 9, 0, 5, 6, 8]
+        indexes = [7, 2, 11, 4, 9, 0, 5, 6, 8, *range(20, 45)]
         queues, queue_created = self.observe_prefetch_queue()
         release_first_batch = threading.Event()
         batches = []
@@ -173,20 +176,226 @@ class DirectChapterPipelineTests(unittest.TestCase):
 
         self.assertTrue(queue_created.wait(3))
         ready_queue = queues[0]
-        self.assertTrue(1 <= ready_queue.maxsize <= 4, "The producer queue must be bounded")
+        self.assertEqual(ready_queue.maxsize, 16, "Prefetch must remain bounded while amortizing model startup")
         self.assertTrue(ready_queue.producer_blocked.wait(3), "The producer never filled its prefetch queue")
-        # One active batch, four queued pages, and at most one page awaiting put().
-        self.assertLessEqual(download.call_count, 6)
+        # One active page, sixteen queued paths, and at most one awaiting put().
+        self.assertLessEqual(download.call_count, 18)
         self.assertFalse(job.completed.is_set())
         release_first_batch.set()
         self.assertTrue(job.completed.wait(3))
         self.assertIsNone(job.error)
         self.assertEqual(batches[0], [indexes[0]])
-        self.assertTrue(all(1 <= len(batch_pages) <= 4 for batch_pages in batches))
+        self.assertTrue(all(1 <= len(batch_pages) <= 16 for batch_pages in batches))
+        self.assertTrue(any(len(batch_pages) > 4 for batch_pages in batches), "Ready pages still restart the model every four images")
         self.assertEqual([index for batch_pages in batches for index in batch_pages], indexes)
         self.assertEqual(job.stable_output_pages, set(indexes))
         for index in indexes:
             self.assertEqual(self.server.get_chapter_page(job.job_id, index).bytes, self.image_bytes)
+
+    def test_parallel_download_finishes_while_first_gpu_batch_is_blocked(self):
+        gpu_started = threading.Event()
+        finish_gpu = threading.Event()
+        second_download_finished = threading.Event()
+        first_batch_finished = threading.Event()
+
+        def download(job, item, stop_event):
+            if item["page_index"] == 1:
+                self.assertTrue(gpu_started.wait(3))
+                page = self.prepare_page(job, item, stop_event)
+                second_download_finished.set()
+                return page
+            return self.prepare_page(job, item, stop_event)
+
+        def process(job, pages, input_dir, output_dir):
+            if pages[0].page_index == 0:
+                gpu_started.set()
+                self.assertTrue(finish_gpu.wait(3))
+                first_batch_finished.set()
+            return self.copy_batch(job, pages, input_dir, output_dir)
+
+        self.patch(self.server, "_download_direct_chapter_page", side_effect=download)
+        process_mock = self.patch(self.server, "_run_chapter_batch", side_effect=process)
+        job = self.start_job()
+        self.addCleanup(finish_gpu.set)
+        self.assertTrue(second_download_finished.wait(3), "The downloader waited for GPU processing to finish")
+        self.assertFalse(first_batch_finished.is_set())
+        self.assertFalse(job.completed.is_set())
+        self.assertEqual(process_mock.call_count, 1)
+        finish_gpu.set()
+        self.assertTrue(job.completed.wait(3))
+        self.assertIsNone(job.error)
+        self.assertEqual(job.stable_output_pages, {0, 1})
+
+    def test_page_in_active_multi_page_gpu_batch_is_available_over_http(self):
+        final_input_queued = threading.Event()
+        second_output_written = threading.Event()
+        finish_last_gpu_page = threading.Event()
+        private_outputs = []
+
+        class TrackingQueue(queue.Queue):
+            def put(self, item, *args, **kwargs):
+                super().put(item, *args, **kwargs)
+                if item.page_index == 2:
+                    final_input_queued.set()
+
+        self.patch(companion.queue, "Queue", side_effect=lambda *args, **kwargs: TrackingQueue(*args, **kwargs))
+
+        def batch(job, pages, input_dir, output_dir):
+            if pages[0].page_index == 0:
+                self.assertTrue(final_input_queued.wait(3))
+                return self.copy_batch(job, pages, input_dir, output_dir)
+            self.assertEqual([page.page_index for page in pages], [1, 2])
+            private_output = output_dir / "0001.png"
+            private_output.write_bytes(self.image_bytes)
+            private_outputs.append(private_output)
+            second_output_written.set()
+            self.assertTrue(finish_last_gpu_page.wait(3))
+            self.assertEqual(private_output.read_bytes(), self.image_bytes, "The monitor moved the GPU's own output")
+            (output_dir / "0002.png").write_bytes(self.image_bytes)
+            return 0
+
+        self.patch(self.server, "_download_direct_chapter_page", side_effect=self.prepare_page)
+        self.patch(self.server, "_run_chapter_batch", side_effect=batch)
+        companion_url = self.serve(self.server)
+        job = self.start_job(indexes=(0, 1, 2))
+        self.addCleanup(finish_last_gpu_page.set)
+        self.assertTrue(second_output_written.wait(3))
+        self.assertEqual(self.wait_for_page(job, 1).bytes, self.image_bytes)
+        with urlopen(f"{companion_url}/api/upscale-chapter/{job.job_id}/page/1", timeout=2) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), self.image_bytes)
+        self.assertFalse(finish_last_gpu_page.is_set())
+        self.assertFalse(job.completed.is_set())
+        self.assertIsNone(self.server.get_chapter_page(job.job_id, 2))
+        self.assertTrue(private_outputs[0].is_file())
+        finish_last_gpu_page.set()
+        self.assertTrue(job.completed.wait(3))
+        self.assertIsNone(job.error)
+        self.assertEqual(job.stable_output_pages, {0, 1, 2})
+
+    def test_classic_downloads_every_page_before_one_full_chapter_gpu_call(self):
+        second_started = threading.Event()
+        release_second = threading.Event()
+        downloaded = []
+
+        def download(job, item, stop_event):
+            if item["page_index"] == 1:
+                second_started.set()
+                self.assertTrue(release_second.wait(3))
+            page = self.prepare_page(job, item, stop_event)
+            downloaded.append(page.page_index)
+            return page
+
+        def process(job):
+            self.assertEqual(downloaded, [0, 1, 2])
+            self.assertEqual([page.page_index for page in job.pages.values()], [0, 1, 2])
+            self.assertTrue(all(page.input_format != "pending" for page in job.pages.values()))
+            self.assertEqual(list(job.page_download_progress.values()), [100, 100, 100])
+            for page in job.pages.values():
+                (job.output_dir / page.input_path.name).write_bytes(page.input_path.read_bytes())
+
+        self.patch(self.server, "_download_direct_chapter_page", side_effect=download)
+        process_mock = self.patch(self.server, "_run_chapter_job", side_effect=process)
+        parallel = self.patch(self.server, "_download_and_run_parallel_chapter_job")
+        job = self.start_job(indexes=(0, 1, 2), chapter_mode="classic")
+        self.addCleanup(release_second.set)
+        self.assertTrue(second_started.wait(3))
+        process_mock.assert_not_called()
+        self.assertEqual(self.server.get_chapter_page_progress(job.job_id, 0), ("downloading_to_pc", 100))
+        self.assertIsNone(self.server.get_chapter_page(job.job_id, 0))
+        self.assertFalse(job.completed.is_set())
+        release_second.set()
+        self.assertTrue(job.completed.wait(3))
+        self.assertIsNone(job.error)
+        process_mock.assert_called_once_with(job)
+        parallel.assert_not_called()
+        for index in range(3):
+            self.assertEqual(self.server.get_chapter_page(job.job_id, index).bytes, self.image_bytes)
+
+    def test_classic_download_error_never_starts_gpu(self):
+        original_error = OSError("Source rejected the final page")
+
+        def download(job, item, stop_event):
+            if item["page_index"] == 1:
+                raise original_error
+            return self.prepare_page(job, item, stop_event)
+
+        self.patch(self.server, "_download_direct_chapter_page", side_effect=download)
+        process = self.patch(self.server, "_run_chapter_job")
+        job = self.start_job(chapter_mode="classic")
+        self.assertTrue(job.completed.wait(3))
+        self.assertIs(job.error, original_error)
+        self.assertFalse(job.cancel_event.is_set())
+        process.assert_not_called()
+
+    def test_classic_cancellation_during_download_never_starts_gpu(self):
+        download_started = threading.Event()
+
+        def download(job, item, stop_event):
+            download_started.set()
+            self.assertTrue(job.cancel_event.wait(3))
+            self.server._check_direct_download_active(job, stop_event)
+            self.fail("Canceled download remained active")
+
+        self.patch(self.server, "_download_direct_chapter_page", side_effect=download)
+        process = self.patch(self.server, "_run_chapter_job")
+        job = self.start_job(chapter_mode="classic")
+        self.assertTrue(download_started.wait(3))
+        self.server.abort_client_work("phone")
+        self.assertTrue(job.completed.wait(3))
+        self.assertIn("canceled", str(job.error).lower())
+        process.assert_not_called()
+
+    def test_http_chapter_mode_routes_and_defaults_to_classic(self):
+        base_url = self.serve(self.server)
+        routed = []
+
+        def finish(mode):
+            def run(job, pages):
+                routed.append((job.job_id, mode))
+                job.completed.set()
+            return run
+
+        classic = self.patch(self.server, "_download_and_run_classic_chapter_job", side_effect=finish("classic"))
+        parallel = self.patch(self.server, "_download_and_run_parallel_chapter_job", side_effect=finish("parallel"))
+        body = json.dumps({"pages": [{"page_index": 0, "url": "https://source.example/0.png"}]}).encode()
+        for mode in (None, "", "classic", "parallel"):
+            with self.subTest(mode=mode):
+                headers = {"Content-Type": "application/json", "X-Reader-AI-Token": self.server.pairing_token}
+                if mode is not None:
+                    headers["X-Reader-AI-Chapter-Mode"] = mode
+                with urlopen(Request(f"{base_url}/api/upscale-chapter-direct", data=body, headers=headers), timeout=2) as response:
+                    self.assertEqual(response.status, 202)
+                    payload = json.load(response)
+                job = self.server._chapter_jobs[payload["job_id"]]
+                self.assertTrue(job.completed.wait(3))
+                expected = mode or "classic"
+                self.assertEqual(payload["chapter_mode"], expected)
+                self.assertEqual(job.chapter_mode, expected)
+                self.assertIn((job.job_id, expected), routed)
+        self.assertEqual(classic.call_count, 3)
+        self.assertEqual(parallel.call_count, 1)
+        with urlopen(f"{base_url}/health", timeout=2) as response:
+            health = json.load(response)
+        self.assertEqual(health["supported_chapter_modes"], ["classic", "parallel"])
+        self.assertEqual(health["default_chapter_mode"], "classic")
+
+    def test_invalid_http_chapter_mode_does_not_create_or_supersede_work(self):
+        base_url = self.serve(self.server)
+        create = self.patch(self.server, "create_direct_chapter_job")
+        sync = self.patch(self.server, "sync_client_scope")
+        request = Request(
+            f"{base_url}/api/upscale-chapter-direct",
+            data=json.dumps({"pages": [{"page_index": 0, "url": "https://source.example/0.png"}]}).encode(),
+            headers={"Content-Type": "application/json", "X-Reader-AI-Chapter-Mode": "turbo"},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=2)
+        with raised.exception as response:
+            self.assertEqual(response.status, 400)
+            self.assertIn("classic or parallel", response.read().decode())
+        create.assert_not_called()
+        sync.assert_not_called()
 
     def test_cancellation_unblocks_a_full_prefetch_queue(self):
         queues, queue_created = self.observe_prefetch_queue()
@@ -206,7 +415,7 @@ class DirectChapterPipelineTests(unittest.TestCase):
 
         self.assertTrue(queue_created.wait(3))
         ready_queue = queues[0]
-        self.assertTrue(1 <= ready_queue.maxsize <= 4, "The producer queue must be bounded")
+        self.assertTrue(1 <= ready_queue.maxsize <= 16, "The producer queue must be bounded")
         self.assertTrue(ready_queue.producer_blocked.wait(3))
         canceled = self.server.abort_client_work("phone")
         self.assertEqual(canceled["chapter_jobs"], 1)
@@ -215,6 +424,7 @@ class DirectChapterPipelineTests(unittest.TestCase):
         self.assertIn("canceled", str(job.error).lower())
         self.assertTrue(producer_threads)
         self.assertTrue(all(not thread.is_alive() for thread in producer_threads))
+        self.assertFalse(any(thread.name.startswith(f"reader-ai-publish-{job.job_id}-") for thread in threading.enumerate()))
 
     def test_late_download_failure_preserves_its_error_and_finished_page(self):
         fail_second_download = threading.Event()
@@ -280,7 +490,14 @@ class DirectChapterPipelineTests(unittest.TestCase):
 
     def test_partial_batch_output_is_not_published(self):
         partial_written = threading.Event()
+        partial_inspected = threading.Event()
         finish_batch = threading.Event()
+        original_open = Image.open
+
+        def inspect_image(source, *args, **kwargs):
+            if isinstance(source, Path) and source.suffix == ".snapshot":
+                partial_inspected.set()
+            return original_open(source, *args, **kwargs)
 
         def batch(job, pages, input_dir, output_dir):
             self.assertNotEqual(output_dir, job.output_dir)
@@ -293,14 +510,57 @@ class DirectChapterPipelineTests(unittest.TestCase):
 
         self.patch(self.server, "_download_direct_chapter_page", side_effect=self.prepare_page)
         self.patch(self.server, "_run_chapter_batch", side_effect=batch)
+        self.patch(companion.Image, "open", side_effect=inspect_image)
         job = self.start_job(indexes=(0,))
         self.addCleanup(finish_batch.set)
 
         self.assertTrue(partial_written.wait(3))
+        self.assertTrue(partial_inspected.wait(3), "The monitor did not inspect the stable but incomplete image")
         self.assertIsNone(self.server.get_chapter_page(job.job_id, 0))
         self.assertEqual(job.stable_output_pages, set())
         self.assertFalse(job.completed.is_set())
         finish_batch.set()
+        self.assertTrue(job.completed.wait(3))
+        self.assertIsNone(job.error)
+        self.assertEqual(self.server.get_chapter_page(job.job_id, 0).bytes, self.image_bytes)
+
+    def test_monitor_rejects_black_output_then_publishes_valid_replacement(self):
+        black_rejected = threading.Event()
+        replace_black_output = threading.Event()
+        finish_gpu = threading.Event()
+        original_check = companion._chapter_output_requires_fallback
+
+        def check_output(input_path, output_path):
+            rejected = original_check(input_path, output_path)
+            if output_path.suffix == ".snapshot" and rejected:
+                black_rejected.set()
+            return rejected
+
+        def batch(job, pages, input_dir, output_dir):
+            output = output_dir / "0000.png"
+            Image.new("RGB", (3, 2), "black").save(output, "PNG")
+            self.assertTrue(replace_black_output.wait(3))
+            output.write_bytes(self.image_bytes)
+            self.assertTrue(finish_gpu.wait(3))
+            # A later whole-batch retry must not change an already published
+            # snapshot that the reader may have consumed.
+            Image.new("RGB", (3, 2), "red").save(output, "PNG")
+            return 0
+
+        self.patch(companion, "_chapter_output_requires_fallback", side_effect=check_output)
+        self.patch(self.server, "_download_direct_chapter_page", side_effect=self.prepare_page)
+        self.patch(self.server, "_run_chapter_batch", side_effect=batch)
+        job = self.start_job(indexes=(0,))
+        self.addCleanup(finish_gpu.set)
+        self.addCleanup(replace_black_output.set)
+        self.assertTrue(black_rejected.wait(3))
+        self.assertIsNone(self.server.get_chapter_page(job.job_id, 0))
+        self.assertEqual(job.stable_output_pages, set())
+        replace_black_output.set()
+        self.assertEqual(self.wait_for_page(job, 0).bytes, self.image_bytes)
+        self.assertFalse(job.completed.is_set())
+        self.assertFalse(finish_gpu.is_set())
+        finish_gpu.set()
         self.assertTrue(job.completed.wait(3))
         self.assertIsNone(job.error)
         self.assertEqual(self.server.get_chapter_page(job.job_id, 0).bytes, self.image_bytes)

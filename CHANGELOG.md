@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.28
+
+- Add Classic and Parallel options specifically for Chapter Stream. Classic is the default and restores downloading the complete chapter before its main AI processing run.
+- In Parallel, prepare and upload the next batch from the phone while the previous batch is processed and its results return. Keep at most two submitted batches in flight.
+- Overlap direct companion downloads with GPU processing, and group already downloaded pages into larger batches without waiting to fill them, reducing repeated model startup when pages are ready.
+- Return completed direct-download pages during batch processing, after validating the image and publishing it atomically.
+- Preserve ordinary Chapter upload batches and individual-page modes, and cancel pending work when switching the Chapter Stream option.
+
+Update both the Android app and Windows companion. In the reader's AI settings, select Chapter Stream, then choose Classic or Parallel under Chapter processing.
+
 ## v0.1.27
 
 - Start direct companion upscaling as soon as the first source page is downloaded, while later pages download in the background.

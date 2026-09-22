@@ -287,14 +287,21 @@ class RemotePageUpscaler(
     ): ChapterJobAttempt {
         val url = "${resolution.baseUrl}/api/upscale-chapter-direct".toHttpUrlOrNull()
             ?: return ChapterJobAttempt.failure(UpscaleFailureKind.CONFIGURATION)
+        val chapterMode = if (readerPreferences.remoteAiBatchMode.get().shouldStreamWholeChapter) {
+            readerPreferences.remoteAiChapterMode().get()
+        } else {
+            ReaderPreferences.RemoteAiChapterMode.PARALLEL
+        }
         val builder = Request.Builder().url(url)
             .header("Accept", "application/json")
             .header("X-Reader-AI-Output-Format", REMOTE_OUTPUT_FORMAT)
             .header("X-Reader-AI-Model-Name", readerPreferences.remoteAiModel.get().companionModelName)
             .header(HEADER_CLIENT_ID, clientId)
             .header(HEADER_WORK_SCOPE, scopeId.toString())
+            .header("X-Reader-AI-Chapter-Mode", chapterMode.requestValue)
         readerPreferences.remoteAiToken.get().trim().takeIf(String::isNotEmpty)
             ?.let { builder.header("X-Reader-AI-Token", it) }
+        metadata?.totalPages?.let { builder.header("X-Reader-AI-Page-Count", it.toString()) }
         metadata?.mangaTitle?.takeIf(String::isNotBlank)
             ?.let { builder.header("X-Reader-AI-Manga-Title", encodeHeaderText(it)) }
         metadata?.chapterTitle?.takeIf(String::isNotBlank)

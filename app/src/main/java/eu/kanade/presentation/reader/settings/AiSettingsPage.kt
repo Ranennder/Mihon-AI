@@ -24,6 +24,7 @@ internal fun ColumnScope.AiPage(viewModel: ReaderSettingsViewModel) {
     val remoteAiToken by viewModel.preferences.remoteAiToken.collectAsState()
     val remoteAiModel by viewModel.preferences.remoteAiModel.collectAsState()
     val remoteAiBatchMode by viewModel.preferences.remoteAiBatchMode.collectAsState()
+    val remoteAiChapterMode by viewModel.preferences.remoteAiChapterMode().collectAsState()
     val remoteAiDirectDownload by viewModel.preferences.remoteAiDirectDownload.collectAsState()
     val remoteAiInternetAccess by viewModel.preferences.remoteAiInternetAccess.collectAsState()
     val internetStatus = rememberRemoteAiInternetStatus(viewModel.preferences)
@@ -66,6 +67,12 @@ internal fun ColumnScope.AiPage(viewModel: ReaderSettingsViewModel) {
                     label = { Text(stringResource(batchMode.titleRes)) },
                 )
             }
+        }
+        if (remoteAiBatchMode.shouldStreamWholeChapter) {
+            AiChapterModeSelector(
+                selectedMode = remoteAiChapterMode,
+                onModeSelected = viewModel::setRemoteAiChapterMode,
+            )
         }
         CheckboxItem(
             label = stringResource(MR.strings.pref_reader_ai_remote_direct_download),

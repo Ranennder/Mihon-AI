@@ -43,7 +43,12 @@ Launching another Windows companion closes the previous companion on the configu
 
 For the beta direct route, enable `Companion downloads pages directly`. It works for individual pages and whole-chapter batches. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading images from the phone.
 
-With v0.1.27 or later, direct chapter downloads overlap with upscaling: the first downloaded page can start processing while the next pages download. A bounded queue limits the prepared pages waiting for the GPU; ready pages are processed in small batches using the existing GPU process limit. When the phone uploads a chapter instead, it sends the first page separately, then batches of up to four pages. Update both the Android app and companion to receive both improvements.
+With v0.1.28, `Chapter Stream` has a separate `Chapter processing` choice:
+
+- `Classic` (default): download the complete chapter, then process it in one main GPU run while streaming finished pages back.
+- `Parallel`: download upcoming pages while the GPU processes earlier pages. Phone uploads have independent submission and result-receiving stages with at most two jobs in flight. Direct companion downloads use a bounded queue of 16 prepared pages; after the first page, up to 16 already downloaded pages share a GPU run without waiting to fill a batch. Completed, validated images can return before that batch finishes.
+
+Update both the Android app and companion. The new choice is shown only for `Chapter Stream`; ordinary `Chapter` phone uploads retain their existing first-page/four-page batches. Parallel mode keeps the existing one-GPU-process limit. It overlaps network transfers and processing; it does not keep the model resident between batches.
 
 To use the companion away from home, enable `Internet access (beta)` in Mihon while the phone and PC are on the same Wi-Fi. Mihon starts the bundled Cloudflare Quick Tunnel through the local companion and saves its temporary HTTPS address and pairing token automatically. No router configuration, QR code, account, or separate software installation is required. The address changes whenever the companion restarts, so pair again on the same Wi-Fi after each restart.
 

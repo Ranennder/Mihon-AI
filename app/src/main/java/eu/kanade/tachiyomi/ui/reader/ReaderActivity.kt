@@ -259,6 +259,7 @@ class ReaderActivity : BaseActivity() {
                 onChangeAiBackend = ::setAiBackendFromSettings,
                 onChangeRemoteAiModel = ::setRemoteAiModelFromSettings,
                 onChangeRemoteAiBatchMode = ::setRemoteAiBatchModeFromSettings,
+                onChangeRemoteAiChapterMode = ::setRemoteAiChapterModeFromSettings,
             )
         }
 
@@ -613,6 +614,28 @@ class ReaderActivity : BaseActivity() {
             keepCurrentImageUntilReady = true,
         )
         showUpscaleStateToast(enabled = true)
+    }
+
+    private fun setRemoteAiChapterModeFromSettings(mode: ReaderPreferences.RemoteAiChapterMode) {
+        if (readerPreferences.remoteAiChapterMode().get() == mode) {
+            return
+        }
+
+        readerPreferences.remoteAiChapterMode().set(mode)
+        if (!readerPreferences.upscalePagesX2.get() ||
+            readerPreferences.selectedAiBackendMode() != ReaderPreferences.AiBackendMode.REMOTE ||
+            !readerPreferences.remoteAiBatchMode.get().shouldStreamWholeChapter
+        ) {
+            return
+        }
+
+        viewModel.onUpscaleStateChanged(true)
+        viewModel.prepareCurrentPageForUpscaleReload()
+        viewModel.prepareCurrentChapterForUpscalePrefetch()
+        viewModel.state.value.viewer?.refreshForImageConfig(
+            forceBlockingCurrentPage = true,
+            keepCurrentImageUntilReady = true,
+        )
     }
 
     private fun showUpscaleStateToast(enabled: Boolean) {

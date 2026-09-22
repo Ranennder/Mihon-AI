@@ -79,8 +79,9 @@ LOG_FILE_NAME = "companion.log"
 CHAPTER_ARCHIVE_FORMAT = "zip"
 CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
-DIRECT_CHAPTER_PREFETCH_PAGES = 4
-DIRECT_CHAPTER_BATCH_PAGES = 4
+DIRECT_CHAPTER_PREFETCH_PAGES = 16
+DIRECT_CHAPTER_BATCH_PAGES = 16
+SUPPORTED_CHAPTER_MODES = ("classic", "parallel")
 CHAPTER_STREAM_POLL_SECONDS = 0.2
 CHAPTER_STREAM_HEARTBEAT_SECONDS = 15.0
 INTERNET_TUNNEL_START_TIMEOUT_SECONDS = 45.0
@@ -277,6 +278,7 @@ class ChapterUpscaleJob:
     client_id: str | None = None
     scope_id: int | None = None
     chapter_page_count: int | None = None
+    chapter_mode: str = "classic"
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     error: Exception | None = None
@@ -520,8 +522,10 @@ class ReaderAiServer(ThreadingHTTPServer):
         client_id: str | None = None,
         scope_id: int | None = None,
         chapter_page_count: int | None = None,
+        chapter_mode: str = "classic",
     ) -> ChapterUpscaleJob:
         """Register immediately, then download source images in the background."""
+        chapter_mode = _resolve_chapter_mode(chapter_mode)
         indexes = [int(item["page_index"]) for item in pages]
         if not indexes or any(index < 0 for index in indexes) or len(set(indexes)) != len(indexes):
             raise ValueError("Direct chapter pages must have unique nonnegative indexes")
@@ -557,6 +561,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             client_id=client_id,
             scope_id=scope_id,
             chapter_page_count=chapter_page_count,
+            chapter_mode=chapter_mode,
             page_download_progress={page_index: None for page_index in placeholders},
         )
         job.worker_thread = threading.Thread(
@@ -571,6 +576,31 @@ class ReaderAiServer(ThreadingHTTPServer):
         return job
 
     def _download_and_run_direct_chapter_job(self, job: ChapterUpscaleJob, pages: list[dict[str, Any]]) -> None:
+        if job.chapter_mode == "classic":
+            self._download_and_run_classic_chapter_job(job, pages)
+        else:
+            self._download_and_run_parallel_chapter_job(job, pages)
+
+    def _download_and_run_classic_chapter_job(self, job: ChapterUpscaleJob, pages: list[dict[str, Any]]) -> None:
+        """Download the complete chapter, then load the GPU model once."""
+        stop_event = threading.Event()
+        try:
+            for item in pages:
+                prepared = self._download_direct_chapter_page(job, item, stop_event)
+                self._check_direct_download_active(job, stop_event)
+                with job.state_lock:
+                    job.pages[prepared.page_index] = prepared
+                    job.page_download_progress[prepared.page_index] = 100
+            self._check_direct_download_active(job, stop_event)
+            self._run_chapter_job(job)
+        except Exception as exc:  # noqa: BLE001
+            if job.error is None:
+                job.error = exc
+            _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] Direct chapter job error: {exc}")
+        finally:
+            job.completed.set()
+
+    def _download_and_run_parallel_chapter_job(self, job: ChapterUpscaleJob, pages: list[dict[str, Any]]) -> None:
         ready: queue.Queue[PreparedChapterPage] = queue.Queue(maxsize=DIRECT_CHAPTER_PREFETCH_PAGES)
         producer_stop = threading.Event()
         downloads_finished = threading.Event()
@@ -640,9 +670,24 @@ class ReaderAiServer(ThreadingHTTPServer):
                         os.link(page.input_path, target)
                     except OSError:
                         shutil.copyfile(page.input_path, target)
-                self._run_chapter_batch(job, batch, input_dir, output_dir)
+                monitor_stop = threading.Event()
+                monitor = threading.Thread(
+                    target=self._monitor_chapter_batch_outputs,
+                    args=(job, batch, output_dir, monitor_stop),
+                    name=f"reader-ai-publish-{job.job_id}-{batch_index}",
+                    daemon=True,
+                )
+                monitor.start()
+                try:
+                    self._run_chapter_batch(job, batch, input_dir, output_dir)
+                finally:
+                    monitor_stop.set()
+                    monitor.join()
                 self._check_direct_download_active(job, producer_stop)
                 for page in batch:
+                    with job.state_lock:
+                        if page.page_index in job.stable_output_pages:
+                            continue
                     output = _resolve_produced_output_path(
                         output_dir / f"{page.input_path.stem}.{job.batch_output_format}",
                         job.batch_output_format,
@@ -667,6 +712,75 @@ class ReaderAiServer(ThreadingHTTPServer):
             # files, even when the GPU stage has already failed or canceled.
             producer.join()
             job.completed.set()
+
+    def _monitor_chapter_batch_outputs(
+        self,
+        job: ChapterUpscaleJob,
+        pages: list[PreparedChapterPage],
+        output_dir: Path,
+        stop_event: threading.Event,
+    ) -> None:
+        """Publish validated snapshots without modifying the GPU's output files."""
+        observations: dict[int, tuple[tuple[int, int], float]] = {}
+        rejected_outputs: dict[int, tuple[int, int]] = {}
+        staging_dir = output_dir.parent / "publish"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        while not stop_event.wait(CHAPTER_STREAM_POLL_SECONDS):
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                return
+            for page in pages:
+                if stop_event.is_set():
+                    return
+                with job.state_lock:
+                    if page.page_index in job.stable_output_pages:
+                        continue
+                snapshot = staging_dir / f"{page.page_index:04d}.snapshot"
+                try:
+                    output = _resolve_produced_output_path(
+                        output_dir / f"{page.input_path.stem}.{job.batch_output_format}",
+                        job.batch_output_format,
+                    )
+                    if output is None:
+                        continue
+                    stat = output.stat()
+                    signature = (stat.st_size, stat.st_mtime_ns)
+                    if rejected_outputs.get(page.page_index) == signature:
+                        continue
+                    now = time.monotonic()
+                    previous = observations.get(page.page_index)
+                    if previous is None or previous[0] != signature:
+                        observations[page.page_index] = (signature, now)
+                        continue
+                    if stat.st_size == 0 or now - previous[1] < CHAPTER_PAGE_STABILITY_SECONDS:
+                        continue
+                    # A stable length alone is insufficient: an encoder can
+                    # pause mid-image. Validate an immutable snapshot, including
+                    # decoding/black-frame checks, before HTTP can see it.
+                    shutil.copyfile(output, snapshot)
+                    after = output.stat()
+                    if signature != (after.st_size, after.st_mtime_ns):
+                        observations.pop(page.page_index, None)
+                        continue
+                    try:
+                        with Image.open(snapshot) as image:
+                            image.verify()
+                    except (OSError, ValueError, SyntaxError):
+                        rejected_outputs[page.page_index] = signature
+                        continue
+                    if _chapter_output_requires_fallback(page.input_path, snapshot):
+                        rejected_outputs[page.page_index] = signature
+                        continue
+                    if stop_event.is_set() or job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                        return
+                    snapshot.replace(job.output_dir / output.name)
+                    with job.state_lock:
+                        job.stable_output_pages.add(page.page_index)
+                except (OSError, ValueError, SyntaxError):
+                    # The encoder or fallback may still be replacing this file.
+                    # The batch owner handles terminal processing errors.
+                    continue
+                finally:
+                    snapshot.unlink(missing_ok=True)
 
     def _check_direct_download_active(self, job: ChapterUpscaleJob, stop_event: threading.Event) -> None:
         if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
@@ -743,6 +857,10 @@ class ReaderAiServer(ThreadingHTTPServer):
             ready_count = len(job.ready_pages | job.stable_output_pages)
             if page_index in job.ready_pages or page_index in job.stable_output_pages:
                 return "ready", 100
+            if job.chapter_mode == "classic" and page_index in job.page_download_progress and any(
+                percent is None or percent < 100 for percent in job.page_download_progress.values()
+            ):
+                return "downloading_to_pc", download_percent
             if page_index in job.page_download_progress and (download_percent is None or download_percent < 100):
                 return "downloading_to_pc", download_percent
         if job.total_pages > 0:
@@ -1360,6 +1478,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "batch_size": self.server.config.batch_size,
                 "batch_wait_milliseconds": self.server.config.batch_wait_milliseconds,
                 "supported_models": list(SUPPORTED_MODEL_NAMES),
+                "supported_chapter_modes": list(SUPPORTED_CHAPTER_MODES),
+                "default_chapter_mode": "classic",
                 "model_profiles": SUPPORTED_MODELS,
                 "companion_release_tag": current_release_tag,
                 "auto_update_enabled": current_release_tag is not None,
@@ -1834,6 +1954,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             pages = manifest.get("pages")
             if not isinstance(pages, list) or not pages:
                 raise ValueError("Direct chapter manifest has no pages")
+            try:
+                chapter_mode = _resolve_chapter_mode(self.headers.get("X-Reader-AI-Chapter-Mode") or "")
+            except ValueError as exc:
+                self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+                return
 
             request_id = self.server.next_request_id()
             output_format = (self.headers.get("X-Reader-AI-Output-Format") or self.server.config.output_format).lower().strip(".")
@@ -1856,12 +1981,18 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 client_id=client_id,
                 scope_id=scope_id,
                 chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
+                chapter_mode=chapter_mode,
             )
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] "
-                f"Accepted direct download job: {chapter_job.display_label} ({chapter_job.total_pages} pages)",
+                f"Accepted direct download job: {chapter_job.display_label} ({chapter_job.total_pages} pages, {chapter_mode})",
             )
-            self._send_json(HTTPStatus.ACCEPTED, {"job_id": chapter_job.job_id, "page_count": len(chapter_job.pages), "reused_existing_job": False})
+            self._send_json(HTTPStatus.ACCEPTED, {
+                "job_id": chapter_job.job_id,
+                "page_count": len(chapter_job.pages),
+                "chapter_mode": chapter_mode,
+                "reused_existing_job": False,
+            })
         except Exception as exc:  # noqa: BLE001
             self.log_message("Direct chapter error: %s", exc)
             self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
@@ -2318,6 +2449,13 @@ def _is_full_black_extrema(extrema: tuple[tuple[int, int], ...]) -> bool:
 def _sanitize_extension(value: str) -> str:
     value = value.lower().strip().strip(".")
     return value if value in {"jpg", "jpeg", "png", "webp"} else "png"
+
+
+def _resolve_chapter_mode(value: str) -> str:
+    mode = value.strip().lower() or "classic"
+    if mode not in SUPPORTED_CHAPTER_MODES:
+        raise ValueError("Unsupported chapter mode; expected classic or parallel")
+    return mode
 
 
 def _parse_optional_int_header(value: str) -> int | None:

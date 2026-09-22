@@ -678,10 +678,21 @@ class ReaderPageUpscaler(
         }
         if (allowDirectDownload && readerPreferences.remoteAiDirectDownload.get()) {
             runWholeChapterRemoteBatch(pendingTargets, allowDirectDownload = true)
-        } else {
-            processChapterUploadBatches(pendingTargets) { batch ->
+        } else if (!isRemoteWholeChapterStreamModeSelected()) {
+            // The new strategy applies only to Chapter Stream; preserve Chapter's existing batches.
+            val batches = listOf(pendingTargets.take(1)) + pendingTargets.drop(1).chunked(4)
+            for (batch in batches) {
                 runWholeChapterRemoteBatch(batch, allowDirectDownload = false)
             }
+        } else if (readerPreferences.remoteAiChapterMode().get() == ReaderPreferences.RemoteAiChapterMode.CLASSIC) {
+            runWholeChapterRemoteBatch(pendingTargets, allowDirectDownload = false)
+        } else {
+            processChapterUploadBatches(
+                pages = pendingTargets,
+                isReady = { it.page.status == Page.State.Ready },
+                startBatch = { startWholeChapterRemoteBatch(it, allowDirectDownload = false) },
+                awaitBatch = { awaitWholeChapterRemoteBatch(it) },
+            )
         }
     }
 
@@ -689,18 +700,24 @@ class ReaderPageUpscaler(
         cacheTargets: List<ChapterCacheTarget>,
         allowDirectDownload: Boolean,
     ) {
+        startWholeChapterRemoteBatch(cacheTargets, allowDirectDownload)?.let { awaitWholeChapterRemoteBatch(it) }
+    }
+
+    private suspend fun startWholeChapterRemoteBatch(
+        cacheTargets: List<ChapterCacheTarget>,
+        allowDirectDownload: Boolean,
+    ): StartedChapterBatch? {
         coroutineContext.ensureActive()
-        val processingContext = coroutineContext
         val pendingTargets = cacheTargets.filter {
             it.generation == cacheGeneration(it.cacheFile).get() && !it.cacheFile.isReadyCacheFile()
         }
         if (pendingTargets.isEmpty()) {
-            return
+            return null
         }
 
         val firstTarget = pendingTargets.first()
         val chapter = firstTarget.page.chapter.chapter
-        val chapterId = chapter.id ?: return
+        val chapterId = chapter.id ?: return null
         val mangaId = chapter.manga_id ?: 0L
         val chapterJobKey = buildRemoteChapterJobKey(
             mangaId = mangaId,
@@ -734,12 +751,13 @@ class ReaderPageUpscaler(
         }
         coroutineContext.ensureActive()
         if (allowDirectDownload && directChapterJob == null) {
-            // Missing direct URLs or a rejected manifest must not restore the full-chapter upload barrier.
+            // Keep the selected chapter strategy when falling back to phone uploads.
             runWholeChapterRemotePrefetch(pendingTargets, allowDirectDownload = false)
-            return
+            return null
         }
 
         val archiveFile = File(cacheRoot, "chapter-upload-${UUID.randomUUID()}.zip")
+        val submittedTargets = if (directChapterJob != null) pendingTargets.toMutableList() else mutableListOf()
         val preparedPageCount = if (directChapterJob != null) {
             0
         } else {
@@ -765,7 +783,7 @@ class ReaderPageUpscaler(
                         val preparedPage = remotePageUpscaler.prepareChapterUploadPage(
                             pageIndex = target.page.index,
                             sourceBytes = sourceBytes,
-                        ) ?: return
+                        ) ?: error("Unable to prepare chapter page ${target.page.index}")
                         coroutineContext.ensureActive()
                         val entryName = buildString {
                             append(preparedPage.pageIndex.toString().padStart(4, '0'))
@@ -784,6 +802,7 @@ class ReaderPageUpscaler(
                         )
                         zipOutput.write(entryBytes)
                         zipOutput.closeEntry()
+                        submittedTargets += target
                         preparedPageCount += 1
                         val preparePercent = preparedPageCount * 100 / pendingTargets.size.coerceAtLeast(1)
                         pendingTargets.forEach {
@@ -797,9 +816,14 @@ class ReaderPageUpscaler(
                 throw e
             }
         }
-        if (directChapterJob == null && preparedPageCount != pendingTargets.size) {
+        if (directChapterJob == null &&
+            (
+                preparedPageCount == 0 ||
+                    pendingTargets.any { it !in submittedTargets && !it.cacheFile.isReadyCacheFile() }
+                )
+        ) {
             archiveFile.delete()
-            return
+            return null
         }
 
         val chapterJob = directChapterJob ?: try {
@@ -816,16 +840,24 @@ class ReaderPageUpscaler(
             )
         } finally {
             archiveFile.delete()
-        } ?: return
+        } ?: return null
         coroutineContext.ensureActive()
-        pendingTargets.forEach {
+        submittedTargets.forEach {
             updateProgress(it, UpscaleStage.UPSCALING, 0, indeterminate = true)
         }
+        return StartedChapterBatch(submittedTargets, chapterJob, directChapterJob != null)
+    }
+
+    private suspend fun awaitWholeChapterRemoteBatch(batch: StartedChapterBatch) {
+        coroutineContext.ensureActive()
+        val processingContext = coroutineContext
+        val pendingTargets = batch.targets
+        val chapterJob = batch.job
         val remainingTargets = pendingTargets.associateBy { it.page.index }.toMutableMap()
 
         suspend fun failOrUploadRemainingPages(message: String) {
             lastFailureMessage = message
-            if (directChapterJob != null) {
+            if (batch.directDownload) {
                 runWholeChapterRemotePrefetch(remainingTargets.values.toList(), allowDirectDownload = false)
                 if (remainingTargets.values.all { it.cacheFile.isReadyCacheFile() }) {
                     lastFailureMessage = null
@@ -1004,6 +1036,12 @@ class ReaderPageUpscaler(
 
         failOrUploadRemainingPages("Remote AI chapter job timed out before all pages were ready")
     }
+
+    private data class StartedChapterBatch(
+        val targets: List<ChapterCacheTarget>,
+        val job: RemotePageUpscaler.StartedChapterJob,
+        val directDownload: Boolean,
+    )
 
     private suspend fun waitForWholeChapterCache(
         page: ReaderPage,

@@ -942,4 +942,9 @@
     <string name="reader_ai_internet_pairing">Подключение к компаньону для доступа через интернет…</string>
     <string name="reader_ai_internet_saved">Сохранён интернет-адрес: %1$s. После перезапуска компаньона повторите сопряжение в одной сети Wi-Fi.</string>
     <string name="reader_ai_internet_pairing_failed">Не удалось настроить доступ через интернет: %1$s. Подключите телефон и ПК к одной сети Wi-Fi, затем выключите и включите доступ через интернет для повторной попытки.</string>
+    <string name="pref_reader_ai_remote_chapter_mode">Обработка главы</string>
+    <string name="reader_ai_remote_chapter_mode_classic">Обычный</string>
+    <string name="reader_ai_remote_chapter_mode_parallel">Параллельный</string>
+    <string name="reader_ai_remote_chapter_mode_classic_summary">Сначала загружается вся глава, затем начинается AI-обработка.</string>
+    <string name="reader_ai_remote_chapter_mode_parallel_summary">Следующие страницы загружаются, пока AI обрабатывает уже загруженные.</string>
 </resources>

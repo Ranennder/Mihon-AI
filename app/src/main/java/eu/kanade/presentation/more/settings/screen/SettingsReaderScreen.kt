@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.LocalView
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.widget.BasePreferenceWidget
 import eu.kanade.presentation.reader.settings.AiBackendSelector
+import eu.kanade.presentation.reader.settings.AiChapterModeSelector
 import eu.kanade.presentation.reader.settings.rememberRemoteAiInternetStatus
 import eu.kanade.presentation.reader.settings.remoteAiServerStatusText
 import eu.kanade.presentation.reader.settings.remoteAiServerUrlPreferenceSubtitle
@@ -84,6 +85,8 @@ object SettingsReaderScreen : SearchableSettings {
         val fullscreen by fullscreenPref.collectAsState()
         val upscaleEnabled by readerPreferences.upscalePagesX2.collectAsState()
         val rawAiBackendMode by readerPreferences.aiBackendMode.collectAsState()
+        val remoteAiBatchMode by readerPreferences.remoteAiBatchMode.collectAsState()
+        val remoteAiChapterMode by readerPreferences.remoteAiChapterMode().collectAsState()
         val remoteAiBaseUrl by readerPreferences.remoteAiBaseUrl.collectAsState()
         val remoteAiDiscoveredBaseUrl by readerPreferences.remoteAiDiscoveredBaseUrl.collectAsState()
         val internetStatus = rememberRemoteAiInternetStatus(readerPreferences)
@@ -103,7 +106,7 @@ object SettingsReaderScreen : SearchableSettings {
 
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_category_display),
-            preferenceItems = listOf(
+            preferenceItems = listOfNotNull(
                 Preference.PreferenceItem.ListPreference(
                     preference = readerPreferences.defaultOrientationType,
                     entries = ReaderOrientation.entries.drop(1)
@@ -174,6 +177,25 @@ object SettingsReaderScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_reader_ai_remote_batch_mode),
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
                 ),
+                if (aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE &&
+                    remoteAiBatchMode.shouldStreamWholeChapter
+                ) {
+                    Preference.PreferenceItem.CustomPreference(
+                        title = stringResource(MR.strings.pref_reader_ai_remote_chapter_mode),
+                    ) {
+                        BasePreferenceWidget(
+                            subcomponent = {
+                                AiChapterModeSelector(
+                                    selectedMode = remoteAiChapterMode,
+                                    enabled = upscaleEnabled,
+                                    onModeSelected = readerPreferences.remoteAiChapterMode()::set,
+                                )
+                            },
+                        )
+                    }
+                } else {
+                    null
+                },
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.remoteAiDirectDownload,
                     title = stringResource(MR.strings.pref_reader_ai_remote_direct_download),
