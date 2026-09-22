@@ -231,7 +231,7 @@ class ReaderPageUpscalerTest {
             mockk<RemotePageUpscaler.StartedChapterJob>()
         }
         every { remote.streamChapterPages(any(), any(), any(), any()) } answers {
-            for (index in arg<Set<Int>>(1)) {
+            for (index in arg<Set<Int>>(1).toList()) {
                 arg<(Int, ByteArray) -> Unit>(3)(index, "AI page $index".toByteArray())
             }
             RemotePageUpscaler.ChapterStreamFetchResult.Completed
@@ -294,7 +294,7 @@ class ReaderPageUpscalerTest {
                 firstReceiveStarted.complete(Unit)
                 check(releaseFirstResult.await(5, TimeUnit.SECONDS))
             }
-            for (index in arg<Set<Int>>(1)) {
+            for (index in arg<Set<Int>>(1).toList()) {
                 arg<(Int, ByteArray) -> Unit>(3)(index, "AI page $index".toByteArray())
             }
             RemotePageUpscaler.ChapterStreamFetchResult.Completed
@@ -348,7 +348,7 @@ class ReaderPageUpscalerTest {
             mockk<RemotePageUpscaler.StartedChapterJob>()
         }
         every { remote.streamChapterPages(any(), any(), any(), any()) } answers {
-            for (index in arg<Set<Int>>(1)) {
+            for (index in arg<Set<Int>>(1).toList()) {
                 arg<(Int, ByteArray) -> Unit>(3)(index, "AI page $index".toByteArray())
             }
             RemotePageUpscaler.ChapterStreamFetchResult.Completed
