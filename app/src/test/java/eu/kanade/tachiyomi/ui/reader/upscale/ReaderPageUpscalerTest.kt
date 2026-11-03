@@ -200,6 +200,85 @@ class ReaderPageUpscalerTest {
     }
 
     @Test
+    fun `a terminal polled direct job uploads the remaining pages without retrying the failed job`() = runBlocking {
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
+        val secondPage = ReaderPage(1).apply {
+            chapter = page.chapter
+            remoteImageRequest = page.remoteImageRequest
+            stream = {
+                sourceReads++
+                "second original".byteInputStream()
+            }
+        }
+        page.chapter.state = ReaderChapter.State.Loaded(listOf(page, secondPage))
+        val directJob = mockk<RemotePageUpscaler.StartedChapterJob>()
+        val uploadJob = mockk<RemotePageUpscaler.StartedChapterJob>()
+        every { remote.startDirectChapterJob(any(), any()) } returns directJob
+        every { remote.streamChapterPages(directJob, any(), any(), any()) } returns
+            RemotePageUpscaler.ChapterStreamFetchResult.Unsupported
+        every { remote.fetchChapterPage(directJob, 0, any()) } returns
+            RemotePageUpscaler.ChapterPageFetchResult.Ready("direct first".toByteArray())
+        every { remote.fetchChapterPage(directJob, 1, any()) } returns
+            RemotePageUpscaler.ChapterPageFetchResult.Failed("Source connection refused", retryable = false)
+        every { remote.prepareChapterUploadPage(1, any()) } answers {
+            assertEquals("second original", secondArg<ByteArray>().decodeToString())
+            RemotePageUpscaler.PreparedChapterUploadPage(1, secondArg(), "jpg")
+        }
+        every { remote.startChapterJobFromArchive(any(), 1, any(), any()) } returns uploadJob
+        every { remote.streamChapterPages(uploadJob, setOf(1), any(), any()) } answers {
+            arg<(Int, ByteArray) -> Unit>(3)(1, "uploaded second".toByteArray())
+            RemotePageUpscaler.ChapterStreamFetchResult.Completed
+        }
+
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(listOf(page, secondPage))
+            withTimeout(5_000) {
+                upscaler.progress(secondPage).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY }
+            }
+
+            assertEquals("direct first", upscaler.processPage(page).readUtf8())
+            assertEquals("uploaded second", upscaler.processPage(secondPage).readUtf8())
+            assertEquals(1, sourceReads)
+            verify(exactly = 1) { remote.fetchChapterPage(directJob, 0, any()) }
+            verify(exactly = 1) { remote.fetchChapterPage(directJob, 1, any()) }
+            verify(exactly = 1) { remote.startDirectChapterJob(any(), any()) }
+            verify(exactly = 1) { remote.startChapterJobFromArchive(any(), 1, any(), any()) }
+        } finally {
+            upscaler.invalidateRemoteWorkScope()
+        }
+    }
+
+    @Test
+    fun `a transient gateway failure and pending page keep waiting for the same direct job`() = runBlocking {
+        preferences.remoteAiBatchMode.set(ReaderPreferences.RemoteAiBatchMode.CHAPTER_STREAM)
+        page.chapter.state = ReaderChapter.State.Loaded(listOf(page))
+        val directJob = mockk<RemotePageUpscaler.StartedChapterJob>()
+        every { remote.startDirectChapterJob(any(), any()) } returns directJob
+        every { remote.streamChapterPages(directJob, any(), any(), any()) } returns
+            RemotePageUpscaler.ChapterStreamFetchResult.Unsupported
+        every { remote.fetchChapterPage(directJob, 0, any()) } returnsMany listOf(
+            RemotePageUpscaler.ChapterPageFetchResult.Failed("Gateway temporarily unavailable", retryable = true),
+            RemotePageUpscaler.ChapterPageFetchResult.Pending("upscaling", null),
+            RemotePageUpscaler.ChapterPageFetchResult.Ready("direct result".toByteArray()),
+        )
+
+        try {
+            upscaler.scheduleWholeChapterRemotePrefetch(listOf(page))
+            withTimeout(5_000) {
+                upscaler.progress(page).first { it.stage == ReaderPageUpscaler.UpscaleStage.READY }
+            }
+
+            assertEquals("direct result", upscaler.processPage(page).readUtf8())
+            assertEquals(0, sourceReads)
+            verify(exactly = 3) { remote.fetchChapterPage(directJob, 0, any()) }
+            verify(exactly = 1) { remote.startDirectChapterJob(any(), any()) }
+            verify(exactly = 0) { remote.startChapterJobFromArchive(any(), any(), any(), any()) }
+        } finally {
+            upscaler.invalidateRemoteWorkScope()
+        }
+    }
+
+    @Test
     fun `phone chapter upload caches the first AI page before a later source finishes loading`() = runBlocking {
         preferences.remoteAiChapterMode().set(ReaderPreferences.RemoteAiChapterMode.PARALLEL)
         preferences.remoteAiDirectDownload.set(false)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import json
 import queue
+import socket
 import threading
 import unittest
 import zipfile
@@ -12,8 +13,8 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from PIL import Image
 
@@ -256,6 +257,123 @@ class CompanionNetworkingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"Only HTTP\(S\)"):
                 self.server.get_chapter_page(job.job_id, 0)
 
+    def test_refused_source_connection_is_terminal_for_polling_and_stream_without_leaking_secrets(self):
+        # A closed local port reproduces a real connection refusal without DNS,
+        # external services, GPU work, or dependence on Windows proxy settings.
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            refused_port = reserved.getsockname()[1]
+        base_url = self.serve_companion()
+        source_url = f"http://127.0.0.1:{refused_port}/private-image-path?token=url-query-secret"
+        manifest = {"pages": [
+            {"page_index": index, "url": source_url, "headers": {"Cookie": "session=cookie-secret"}}
+            for index in range(2)
+        ]}
+        opener = build_opener(ProxyHandler({}))
+        request = Request(
+            f"{base_url}/api/upscale-chapter-direct", data=json.dumps(manifest).encode(),
+            headers={"Content-Type": "application/json", "X-Reader-AI-Token": self.server.pairing_token},
+        )
+        with patch.object(companion, "_DIRECT_PAGE_OPENER", opener), patch.object(companion, "_emit_log_line") as log:
+            with opener.open(request, timeout=2) as response:
+                self.assertEqual(response.status, 202)
+                job_id = json.load(response)["job_id"]
+            job = self.server._chapter_jobs[job_id]
+            self.assertTrue(job.completed.wait(5))
+            self.assertIsInstance(job.error, companion.SourcePageDownloadError)
+            responses = []
+            for index in range(2):
+                with self.assertRaises(HTTPError) as raised:
+                    opener.open(f"{base_url}/api/upscale-chapter/{job_id}/page/{index}", timeout=2)
+                with raised.exception as response:
+                    self.assertEqual(response.code, 502)
+                    self.assertEqual(response.headers["X-Reader-AI-Job-State"], "failed")
+                    responses.append(response.read().decode())
+            with opener.open(f"{base_url}/api/upscale-chapter/{job_id}/stream", timeout=2) as response:
+                self.assertEqual(json.loads(response.readline())["type"], "start")
+                error = json.loads(response.readline())
+                self.assertEqual(error["type"], "error")
+                self.assertEqual(error["job_state"], "failed")
+                responses.append(error["message"])
+            logs = "\n".join(str(call.args[0]) for call in log.call_args_list)
+        origin = f"http://127.0.0.1:{refused_port}"
+        self.assertIn(origin, logs)
+        self.assertIn("Source page 1 download failed", logs)
+        for text in [logs, *responses]:
+            for secret in ("private-image-path", "url-query-secret", "cookie-secret"):
+                self.assertNotIn(secret, text)
+
+    def test_source_http_error_reason_and_userinfo_are_not_logged(self):
+        class RefusingSource(BaseHTTPRequestHandler):
+            def do_GET(self):
+                # Even an upstream reason phrase must not flow into job logs.
+                self.send_response(403, "Forbidden reason-phrase-secret")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        source = ThreadingHTTPServer(("127.0.0.1", 0), RefusingSource)
+        self.addCleanup(source.server_close)
+        thread = threading.Thread(target=source.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(source.shutdown)
+        source_url = f"http://127.0.0.1:{source.server_port}/private-path?auth=query-secret"
+        with patch.object(companion, "_DIRECT_PAGE_OPENER", build_opener(ProxyHandler({}))), \
+                patch.object(companion, "_emit_log_line") as log:
+            job = self.server.create_direct_chapter_job(
+                request_id="req-private", pages=[{"page_index": 0, "url": source_url,
+                                                  "headers": {"Authorization": "Bearer bearer-secret"}}],
+                requested_output_format="png", model_name="realesr-animevideov3",
+                manga_title="Manga", chapter_title="Chapter",
+            )
+            self.assertTrue(job.completed.wait(5))
+            logs = "\n".join(str(call.args[0]) for call in log.call_args_list)
+        self.assertIn(f"http://127.0.0.1:{source.server_port}", logs)
+        self.assertIn("HTTP 403", logs)
+        for secret in ("private-path", "query-secret", "bearer-secret", "reason-phrase-secret"):
+            self.assertNotIn(secret, logs)
+        self.assertEqual(
+            companion._source_page_origin("https://private-user:private-password@source.example/path?secret=query"),
+            "https://source.example:443",
+        )
+
+    def test_nonterminal_runtime_error_does_not_mark_the_job_failed(self):
+        base_url = self.serve_companion()
+        with patch.object(self.server, "get_chapter_page", side_effect=RuntimeError("Temporary upstream error")):
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"{base_url}/api/upscale-chapter/pending/page/0", timeout=2)
+            with raised.exception as response:
+                self.assertEqual(response.code, 502)
+                self.assertIsNone(response.headers.get("X-Reader-AI-Job-State"))
+
+    def test_source_error_racing_with_cancellation_does_not_log_raw_upstream_exception(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job = companion.ChapterUpscaleJob(
+                job_id="cancelled", request_id="req-cancelled", created_at=0,
+                model_name="realesr-animevideov3", native_scale=2,
+                requested_output_format="png", batch_output_format="png",
+                workspace=root, input_dir=root, output_dir=root, pages={},
+            )
+
+            def fail_while_cancelling(*args, **kwargs):
+                job.cancel_event.set()
+                raise URLError("https://upstream.example/private?token=upstream-secret")
+
+            with patch.object(companion._DIRECT_PAGE_OPENER, "open", side_effect=fail_while_cancelling), \
+                    patch.object(companion, "_emit_log_line") as log:
+                self.server._download_and_run_direct_chapter_job(
+                    job, [{"page_index": 0, "url": "https://upstream.example/page"}],
+                )
+                logs = "\n".join(str(call.args[0]) for call in log.call_args_list)
+            self.assertTrue(job.completed.is_set())
+            self.assertEqual(str(job.error), "Chapter upscale was canceled")
+            self.assertNotIn("upstream-secret", logs)
+            self.assertNotIn("/private", logs)
+
     def test_single_page_zip_returns_job_before_upscale_then_can_be_polled(self):
         self.server.config.mode = "subprocess"
         original = BytesIO()
@@ -297,6 +415,7 @@ class CompanionNetworkingTests(unittest.TestCase):
             )
             with urlopen(page_request, timeout=2) as response:
                 self.assertEqual(response.status, 202)
+                self.assertIsNone(response.headers.get("X-Reader-AI-Job-State"))
                 self.assertEqual(json.load(response)["stage"], "upscaling")
             release_upscale.set()
             self.assertTrue(job.completed.wait(2))

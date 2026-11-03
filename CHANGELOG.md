@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.29
+
+- Fall back to uploading pages from the phone as soon as the companion reports a failed chapter job, instead of repeatedly polling that failed job for about two minutes.
+- Preserve retries for temporary network and proxy failures, pending jobs, and older companions that do not send the terminal job-state marker.
+- Include the source server origin and connection error code in direct-download failure diagnostics without logging page paths, query strings, credentials, or cookies.
+
+Update both the Android app and Windows companion for immediate fallback. Aidoku AI uses image uploads and does not need an IPA update for this fix.
+
 ## v0.1.28
 
 - Add Classic and Parallel options specifically for Chapter Stream. Classic is the default and restores downloading the complete chapter before its main AI processing run.

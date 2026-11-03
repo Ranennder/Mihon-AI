@@ -411,7 +411,8 @@ class RemotePageUpscaler(
                             ?: "Remote AI chapter page request returned HTTP ${response.code}"
                         ChapterPageFetchResult.Failed(
                             message = lastErrorMessage!!,
-                            retryable = response.code >= 500,
+                            retryable = response.code >= 500 &&
+                                !response.header(HEADER_JOB_STATE).equals("failed", ignoreCase = true),
                         )
                     }
                 }
@@ -1144,6 +1145,7 @@ class RemotePageUpscaler(
         private const val HEADER_CLIENT_ID = "X-Reader-AI-Client-Id"
         private const val HEADER_TRACE_ID = "X-Reader-AI-Trace-Id"
         private const val HEADER_WORK_SCOPE = "X-Reader-AI-Work-Scope"
+        private const val HEADER_JOB_STATE = "X-Reader-AI-Job-State"
 
         private fun encodeHeaderText(value: String): String {
             return URLEncoder.encode(value, StandardCharsets.UTF_8.name())

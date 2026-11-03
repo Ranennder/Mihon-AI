@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path, PureWindowsPath
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote_plus, urlparse
 from urllib.request import HTTPRedirectHandler
 from urllib.request import Request as UrlRequest
@@ -112,6 +113,50 @@ class _SafePageRedirectHandler(HTTPRedirectHandler):
 
 
 _DIRECT_PAGE_OPENER = build_opener(_SafePageRedirectHandler())
+
+
+class ChapterJobFailedError(RuntimeError):
+    """A completed job cannot produce another result without a new upload."""
+
+
+def _source_page_origin(page_url: str) -> str:
+    """Only a network origin is diagnostic: paths and URLs can carry secrets."""
+    try:
+        parsed = urlparse(page_url)
+        host = (parsed.hostname or "").encode("idna").decode("ascii")
+        if parsed.scheme not in {"http", "https"} or not re.fullmatch(r"[a-zA-Z0-9.:-]+", host):
+            return "<invalid-origin>"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{parsed.scheme}://{host}:{port}"
+    except (ValueError, UnicodeError):
+        return "<invalid-origin>"
+
+
+def _source_page_failure_reason(error: Exception) -> str:
+    # Never stringify an upstream exception: HTTP reason phrases and URL errors
+    # may include the original URL, query parameters, credentials or cookies.
+    if isinstance(error, HTTPError):
+        return f"HTTP {error.code}"
+    reason = error.reason if isinstance(error, URLError) else error
+    description = type(reason).__name__
+    if isinstance(reason, OSError):
+        winerror = getattr(reason, "winerror", None)
+        if winerror is not None:
+            description += f", WinError {winerror}"
+        if reason.errno is not None:
+            description += f", errno {reason.errno}"
+    return description
+
+
+class SourcePageDownloadError(RuntimeError):
+    def __init__(self, page_index: int, page_url: str, cause: Exception):
+        origin = _source_page_origin(page_url)
+        reason = _source_page_failure_reason(cause)
+        super().__init__(f"Source page {page_index + 1} download failed at {origin} ({reason})")
+
+
 _HTTP_ACCESS_LOG_RE = re.compile(r'^"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/[^\"]+"\s+(?P<status>\d{3})\s+-$')
 _RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _REQUEST_DISPLAY_LABELS: dict[str, str] = {}
@@ -806,7 +851,6 @@ class ReaderAiServer(ThreadingHTTPServer):
             if str(key).lower() not in {"host", "content-length", "accept-encoding"}
         }
         headers["Accept-Encoding"] = "identity"
-        request = UrlRequest(page_url, headers=headers, method="GET")
         _emit_log_line(
             f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] "
             f"{job.display_label} - PC downloading source page {page_index + 1}/{job.display_page_count}",
@@ -814,6 +858,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         temporary_input = job.input_dir / f"{page_index:04d}.downloading"
         received = 0
         try:
+            request = UrlRequest(page_url, headers=headers, method="GET")
             with _DIRECT_PAGE_OPENER.open(request, timeout=60) as response, temporary_input.open("wb") as target:
                 total = max(0, int(response.headers.get("Content-Length") or "0"))
                 while True:
@@ -844,6 +889,15 @@ class ReaderAiServer(ThreadingHTTPServer):
                 f"{job.display_label} - Source page {page_index + 1}/{job.display_page_count} downloaded ({received} bytes)",
             )
             return PreparedChapterPage(page_index, input_path, extension)
+        except Exception as exc:  # noqa: BLE001
+            if job.cancel_event.is_set() or stop_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                # An upstream error can arrive concurrently with cancellation.
+                # Its message still must not reach the job-level logger.
+                raise RuntimeError("Chapter upscale was canceled") from exc
+            # The same safe error reaches job-level logs and later page polls.
+            # Keep the real exception as a cause for debugging without exposing
+            # its potentially credential-bearing message in normal logs/API.
+            raise SourcePageDownloadError(page_index, page_url, exc) from exc
         finally:
             temporary_input.unlink(missing_ok=True)
 
@@ -1075,7 +1129,7 @@ class ReaderAiServer(ThreadingHTTPServer):
 
         if job.completed.is_set():
             if job.error is not None:
-                raise RuntimeError(str(job.error))
+                raise ChapterJobFailedError(str(job.error))
             raise FileNotFoundError(f"Chapter page {page_index} is not available")
 
         return None
@@ -1514,11 +1568,12 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.NOT_FOUND, "Chapter page not found")
             return
         except RuntimeError as exc:
-            if _is_cancellation_message(exc):
+            if not isinstance(exc, ChapterJobFailedError) and _is_cancellation_message(exc):
                 self._send_text(HTTPStatus.GONE, str(exc))
                 return
             self.log_message("Chapter page fetch error: %s", exc)
-            self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
+            headers = {"X-Reader-AI-Job-State": "failed"} if isinstance(exc, ChapterJobFailedError) else None
+            self._send_text(HTTPStatus.BAD_GATEWAY, str(exc), headers=headers)
             return
 
         if processed_image is None:
@@ -1579,12 +1634,13 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
                     except RuntimeError as exc:
-                        self._write_chapter_stream_event(
-                            {
-                                "type": "cancelled" if _is_cancellation_message(exc) else "error",
-                                "message": str(exc),
-                            },
-                        )
+                        event = {
+                            "type": "cancelled" if not isinstance(exc, ChapterJobFailedError) and _is_cancellation_message(exc) else "error",
+                            "message": str(exc),
+                        }
+                        if isinstance(exc, ChapterJobFailedError):
+                            event["job_state"] = "failed"
+                        self._write_chapter_stream_event(event)
                         return
 
                     if processed_image is None:
@@ -2052,11 +2108,13 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_text(self, status: HTTPStatus, message: str) -> None:
+    def _send_text(self, status: HTTPStatus, message: str, headers: dict[str, str] | None = None) -> None:
         body = message.encode("utf-8", errors="replace")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
