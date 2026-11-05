@@ -56,6 +56,23 @@ Pairing waits for the tunnel connection to register and uses HTTP/2 over TCP. Tu
 
 ## Build the `.exe`
 
+Companion v0.1.30 preserves the fast model's existing 2x scale and one GPU pass.
+When JPEG is requested with `realesr-animevideov3`, inference writes lossless PNG
+internally and the response uses JPEG quality 100 with 4:4:4 chroma. This preserves
+thin colored edges otherwise blurred by the Windows encoder's default 4:2:0.
+Explicit PNG requests remain lossless; other models retain their output policy.
+This improves output encoding, without adding details to the neural model.
+
+The manual **Build Windows Companion only** GitHub Actions workflow runs the
+Python tests, builds the standalone EXE, checks frozen instance handoff, and
+uploads an EXE plus a SHA-256 manifest. It does not build Android, create a tag,
+publish a release, or replace a running Companion. Normal `v*` release tags still
+invoke the complete Android-and-Companion release workflow.
+
+For a reproducible codec-only CPU comparison, run
+`python benchmark_fast_quality.py --output benchmark.json`. Its timings exclude
+GPU inference, Windows WIC encoding, disk I/O, and network transfers.
+
 If you only have the Python script, build a standalone executable on Windows:
 
 ```bat

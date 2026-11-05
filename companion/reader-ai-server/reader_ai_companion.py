@@ -73,6 +73,9 @@ JPEG_OUTPUT_FORMATS = {"jpg", "jpeg"}
 PNG_OUTPUT_FORMAT = "png"
 INTERNAL_CHUNK_FORMAT = "png"
 JPEG_QUALITY = 95
+FAST_MODEL_NAME = "realesr-animevideov3"
+FAST_JPEG_QUALITY = 100
+FAST_JPEG_MAX_DIMENSION = 65500  # Pillow/libjpeg's encoder limit, below JPEG's 16-bit header limit.
 MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
@@ -1122,9 +1125,14 @@ class ReaderAiServer(ThreadingHTTPServer):
                             job.stable_output_pages.add(page_index)
                             job.observed_output_sizes.pop(page_index, None)
 
-                return ProcessedImage(
-                    bytes=produced_output_path.read_bytes(),
-                    output_format=_sanitize_extension(produced_output_path.suffix),
+                return _finish_fast_output(
+                    ProcessedImage(
+                        bytes=produced_output_path.read_bytes(),
+                        output_format=_sanitize_extension(produced_output_path.suffix),
+                    ),
+                    model_name=job.model_name,
+                    requested_output_format=job.requested_output_format,
+                    cancel_event=job.cancel_event,
                 )
 
         if job.completed.is_set():
@@ -1218,6 +1226,9 @@ class ReaderAiServer(ThreadingHTTPServer):
                         process_registry=self,
                     )
                     for item in batch:
+                        if item.cancel_event.is_set() or self._is_scope_stale(item.client_id, item.scope_id):
+                            item.error = RuntimeError(item.canceled_reason or "Remote AI work was canceled")
+                            continue
                         item.result = results[item.request_id]
                 else:
                     request.result = _process_single_request_in_workspace(
@@ -1337,7 +1348,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             "-m",
             str(model_dir),
             "-f",
-            job.batch_output_format,
+            _inference_output_format(job.model_name, job.batch_output_format),
             "-j",
             self.config.jobs,
         ]
@@ -2224,6 +2235,7 @@ def _process_single_request_in_workspace(
         if (
             preferred_output_format in JPEG_OUTPUT_FORMATS
             and request.requested_output_format in JPEG_OUTPUT_FORMATS
+            and _inference_output_format(request.model_name, preferred_output_format) in JPEG_OUTPUT_FORMATS
             and _should_retry_with_png(str(exc))
         ):
             return _run_subprocess_once(
@@ -2267,9 +2279,11 @@ def _run_subprocess_batch(
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    batch_output_format = requests[0].preferred_output_format or PNG_OUTPUT_FORMAT
     scale = requests[0].native_scale
     model_name = requests[0].model_name
+    batch_output_format = _inference_output_format(
+        model_name, requests[0].preferred_output_format or PNG_OUTPUT_FORMAT,
+    )
 
     stems_by_request_id: dict[str, str] = {}
     for index, request in enumerate(requests, start=1):
@@ -2352,6 +2366,8 @@ def _run_subprocess_batch(
     results: dict[str, ProcessedImage] = {}
     missing_requests: list[PendingUpscaleRequest] = []
     for request in requests:
+        if request.cancel_event.is_set():
+            continue
         produced_output_path = _resolve_produced_output_path(
             output_dir / f"{stems_by_request_id[request.request_id]}.{batch_output_format}",
             batch_output_format,
@@ -2359,10 +2375,21 @@ def _run_subprocess_batch(
         if produced_output_path is None or produced_output_path.stat().st_size == 0:
             missing_requests.append(request)
             continue
-        results[request.request_id] = ProcessedImage(
-            bytes=produced_output_path.read_bytes(),
-            output_format=_sanitize_extension(produced_output_path.suffix),
-        )
+        try:
+            results[request.request_id] = _finish_fast_output(
+                ProcessedImage(
+                    bytes=produced_output_path.read_bytes(),
+                    output_format=_sanitize_extension(produced_output_path.suffix),
+                ),
+                model_name=request.model_name,
+                requested_output_format=request.requested_output_format,
+                cancel_event=request.cancel_event,
+            )
+        except RuntimeError:
+            # A batch can contain different clients. Canceling this page while
+            # its JPEG is encoded must not discard another client's result.
+            if not request.cancel_event.is_set():
+                raise
 
     for request in missing_requests:
         fallback_workspace = workspace / f"fallback-{request.request_id}"
@@ -2414,6 +2441,8 @@ def _run_subprocess_once(
     cancel_event: threading.Event | None = None,
     process_registry: ReaderAiServer | None = None,
 ) -> ProcessedImage:
+    requested_output_format = output_format
+    output_format = _inference_output_format(model_name, output_format)
     _clear_workspace_files(workspace)
     input_path = workspace / f"input.{_sanitize_extension(input_format)}"
     output_path = workspace / f"output.{_sanitize_extension(output_format)}"
@@ -2462,9 +2491,14 @@ def _run_subprocess_once(
         reason = details or "empty output file"
         raise RuntimeError(f"Upscale process did not produce a valid {output_format} image: {reason}")
 
-    return ProcessedImage(
-        bytes=produced_output_path.read_bytes(),
-        output_format=_sanitize_extension(produced_output_path.suffix) if produced_output_path != output_path else output_format,
+    return _finish_fast_output(
+        ProcessedImage(
+            bytes=produced_output_path.read_bytes(),
+            output_format=_sanitize_extension(produced_output_path.suffix) if produced_output_path != output_path else output_format,
+        ),
+        model_name=model_name,
+        requested_output_format=requested_output_format,
+        cancel_event=cancel_event,
     )
 
 
@@ -2856,6 +2890,12 @@ def _run_chunked_subprocess(
     source_width, source_height = source_image.size
     final_width = source_width * target_scale
     final_height = source_height * target_scale
+    if (
+        model_name == FAST_MODEL_NAME
+        and final_output_format in JPEG_OUTPUT_FORMATS
+        and (final_width > FAST_JPEG_MAX_DIMENSION or final_height > FAST_JPEG_MAX_DIMENSION)
+    ):
+        final_output_format = PNG_OUTPUT_FORMAT
     final_image = Image.new("RGB", (final_width, final_height))
 
     chunk_input_height = max(512, MAX_CHUNK_OUTPUT_DIMENSION // max(native_scale, 1))
@@ -2917,7 +2957,7 @@ def _run_chunked_subprocess(
                 upscaled_chunk.close()
 
         return ProcessedImage(
-            bytes=_encode_pil_image(final_image, final_output_format),
+            bytes=_encode_pil_image(final_image, final_output_format, model_name=model_name),
             output_format=final_output_format,
         )
     finally:
@@ -2925,11 +2965,50 @@ def _run_chunked_subprocess(
         source_image.close()
 
 
-def _encode_pil_image(image: Image.Image, output_format: str) -> bytes:
+def _inference_output_format(model_name: str, output_format: str) -> str:
+    # NCNN's Windows JPEG encoder defaults to 4:2:0 chroma subsampling even at
+    # quality 100. Preserve the model's pixels before the final 4:4:4 encoding.
+    if model_name == FAST_MODEL_NAME and _sanitize_extension(output_format) in JPEG_OUTPUT_FORMATS:
+        return PNG_OUTPUT_FORMAT
+    return output_format
+
+
+def _finish_fast_output(
+    result: ProcessedImage,
+    model_name: str,
+    requested_output_format: str,
+    cancel_event: threading.Event | None = None,
+) -> ProcessedImage:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Remote AI work was canceled")
+    if (
+        model_name != FAST_MODEL_NAME
+        or _sanitize_extension(requested_output_format) not in JPEG_OUTPUT_FORMATS
+        or _sanitize_extension(result.output_format) != PNG_OUTPUT_FORMAT
+    ):
+        return result
+    size = _decode_image_size(result.bytes)
+    if size is not None and (size.width > FAST_JPEG_MAX_DIMENSION or size.height > FAST_JPEG_MAX_DIMENSION):
+        return result
+    with Image.open(BytesIO(result.bytes)) as image:
+        encoded = _encode_pil_image(image, requested_output_format, model_name=model_name)
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Remote AI work was canceled")
+    return ProcessedImage(encoded, _sanitize_extension(requested_output_format))
+
+
+def _encode_pil_image(image: Image.Image, output_format: str, model_name: str | None = None) -> bytes:
     normalized_format = _sanitize_extension(output_format)
     with BytesIO() as buffer:
         if normalized_format in JPEG_OUTPUT_FORMATS:
-            image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY)
+            rgb = image.convert("RGB")
+            try:
+                if model_name == FAST_MODEL_NAME:
+                    rgb.save(buffer, format="JPEG", quality=FAST_JPEG_QUALITY, subsampling=0)
+                else:
+                    rgb.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+            finally:
+                rgb.close()
         elif normalized_format == PNG_OUTPUT_FORMAT:
             image.save(buffer, format="PNG", compress_level=1)
         elif normalized_format == "webp":

@@ -216,6 +216,7 @@ class CompanionNetworkingTests(unittest.TestCase):
             headers={
                 "Content-Type": "application/json", "X-Reader-AI-Token": self.server.pairing_token,
                 "X-Reader-AI-Page-Count": "22",
+                "X-Reader-AI-Output-Format": "png",
             },
         )
 
