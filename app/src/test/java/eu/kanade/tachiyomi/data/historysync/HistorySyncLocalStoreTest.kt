@@ -227,4 +227,21 @@ class HistorySyncLocalStoreTest {
         store.selectAccount("first-account")
         assertEquals(20L, store.reconcile().document.records.single().progress.page)
     }
+
+    @Test
+    fun `exhausted remote clock retains the next local action instead of losing an LWW tie`() = runBlocking {
+        prepare()
+        store.reconcile(listOf(remote(time = HistorySyncProtocol.MAX_TIME)), apply = true)
+        ChapterRepositoryImpl(database).update(
+            ChapterUpdate(1, lastPageRead = 1, syncProgressPage = 2, syncTotalPages = 10),
+        )
+        assertEquals(1L, database.chaptersQueries.getChapterById(1).awaitAsOne().last_page_read)
+        val pending = database.historySyncQueries.getPending().awaitAsList().single()
+        assertEquals(HistorySyncProtocol.MAX_TIME + 1, pending.event_clock)
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { store.reconcile() }
+        }
+        assertTrue(error.message.orEmpty().contains("clock is exhausted"))
+        assertEquals(listOf(pending), database.historySyncQueries.getPending().awaitAsList())
+    }
 }

@@ -45,7 +45,7 @@ UPDATE history_sync_meta SET logical_clock = max(logical_clock, :observed) WHERE
 
 bumpClock:
 UPDATE history_sync_meta
-SET logical_clock = min(9007199254740991, max(logical_clock + 1, :nowMs))
+SET logical_clock = max(logical_clock + 1, :nowMs)
 WHERE slot = 1 AND active_account != '';
 
 recordChange:

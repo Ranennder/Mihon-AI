@@ -73,6 +73,9 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                 records.putIfAbsent(item.identity.recordId(), seed(item, snapshot.device))
             }
             for (event in snapshot.pending) {
+                require(event.event_clock in 0..HistorySyncProtocol.MAX_TIME) {
+                    "History sync clock is exhausted; pending local changes are preserved"
+                }
                 val item = resolved[event.chapter_id] ?: continue
                 val id = item.identity.recordId()
                 val current = records[id] ?: seed(item, snapshot.device)
