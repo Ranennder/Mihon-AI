@@ -40,9 +40,9 @@ class HistorySyncLocalStoreTest {
         chaptersAdapter = Chapters.Adapter(MemoColumnAdapter),
     )
     private val sourceReady = MutableStateFlow(true)
-    private val sourceManager = mockk<SourceManager> {
-        every { get(any()) } returns null
-        every { isInitialized } returns sourceReady
+    private val sourceManager = mockk<SourceManager>().also { manager ->
+        every { manager.get(any<Long>()) } returns null
+        every { manager.isInitialized } returns sourceReady
     }
     private val store = HistorySyncLocalStore(database, sourceManager)
     private val remoteDevice = "ffffffff-ffff-4fff-8fff-ffffffffffff"
