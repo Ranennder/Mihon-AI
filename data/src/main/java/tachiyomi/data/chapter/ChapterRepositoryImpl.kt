@@ -14,6 +14,7 @@ import tachiyomi.data.subscribeToList
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.chapter.model.ChapterUpdate
 import tachiyomi.domain.chapter.repository.ChapterRepository
+import java.util.UUID
 
 class ChapterRepositoryImpl(
     private val database: Database,
@@ -59,6 +60,11 @@ class ChapterRepositoryImpl(
     private suspend fun partialUpdate(vararg chapterUpdates: ChapterUpdate) {
         database.transaction {
             chapterUpdates.forEach { chapterUpdate ->
+                val previous = if (chapterUpdate.read != null || chapterUpdate.lastPageRead != null) {
+                    database.chaptersQueries.getChapterById(chapterUpdate.id).awaitAsOneOrNull()
+                } else {
+                    null
+                }
                 database.chaptersQueries.update(
                     mangaId = chapterUpdate.mangaId,
                     url = chapterUpdate.url,
@@ -76,6 +82,26 @@ class ChapterRepositoryImpl(
                     isSyncing = 0,
                     memo = chapterUpdate.memo?.let(MemoColumnAdapter::encode),
                 )
+                if (previous != null) {
+                    val completion = chapterUpdate.read?.takeIf {
+                        it != previous.read || (!it && chapterUpdate.syncProgressPage == 0L)
+                    }
+                    val progress = chapterUpdate.syncProgressPage ?: chapterUpdate.lastPageRead
+                        ?.takeIf { it != previous.last_page_read }
+                        ?.let { if (it > 0) it + 1 else 0 }
+                    if (completion != null || progress != null) {
+                        database.historySyncQueries.initialize(UUID.randomUUID().toString())
+                        database.historySyncQueries.bumpClock(System.currentTimeMillis())
+                        database.historySyncQueries.recordChange(
+                            progressPage = progress,
+                            progressTotal = chapterUpdate.syncTotalPages,
+                            completionRead = completion,
+                            historyChanged = false,
+                            historyLastRead = null,
+                            chapterId = chapterUpdate.id,
+                        )
+                    }
+                }
             }
         }
     }

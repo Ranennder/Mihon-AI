@@ -23,6 +23,7 @@ class SetReadStatus(
             read = read,
             lastPageRead = if (!read) 0 else null,
             id = chapter.id,
+            syncProgressPage = if (!read) 0 else null,
         )
     }
 

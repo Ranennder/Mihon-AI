@@ -1110,4 +1110,22 @@
     <string name="reader_ai_progress_downloading_phone">Sending enhanced image to phone</string>
     <string name="reader_ai_progress_ready">Enhanced image is ready</string>
     <string name="reader_ai_progress_failed">AI processing failed</string>
+    <string name="history_sync_title">Reading history sync</string>
+    <string name="history_sync_entry">Sync with Aidoku AI through Yandex Disk or HTTPS WebDAV</string>
+    <string name="history_sync_description">Use the same WebDAV account on both phones. Reading positions, read/unread changes, and history deletions sync without a PC. Each installation keeps its own cloud replica. Only exact website identities match; unmatched entries remain in the cloud. Library titles, bookmarks, downloads, and reading duration are not synced.</string>
+    <string name="history_sync_account">Cloud account</string>
+    <string name="history_sync_server">HTTPS WebDAV root URL</string>
+    <string name="history_sync_login">WebDAV login</string>
+    <string name="history_sync_password">App password</string>
+    <string name="history_sync_password_hint">For Yandex, create an app password for WebDAV. Leave blank to keep the saved password for this account. Credentials stay in Android Keystore protected storage and are excluded from backups.</string>
+    <string name="history_sync_enable">Enable history sync</string>
+    <string name="history_sync_now">Sync now</string>
+    <string name="history_sync_idle">Waiting to sync</string>
+    <string name="history_sync_working">Syncing reading history…</string>
+    <string name="history_sync_success">Last sync: %1$s. Matched: %2$d; unmatched: %3$d.</string>
+    <string name="history_sync_failed">Sync failed. Check the connection, HTTPS WebDAV URL, login, app password, and free cloud space. Local changes are saved and will be retried.</string>
+    <string name="history_sync_needs_account">Save a WebDAV account first.</string>
+    <string name="history_sync_disabled">Sync is disabled. Local history and pending changes are preserved.</string>
+    <string name="history_sync_save_failed">Could not save the account. Check the HTTPS URL and enter a login and app password.</string>
+    <string name="history_sync_saved">Account saved securely.</string>
 </resources>

@@ -618,8 +618,12 @@ class ReaderViewModel @JvmOverloads constructor(
             updateChapter.await(
                 ChapterUpdate(
                     id = readerChapter.chapter.id!!,
-                    read = readerChapter.chapter.read,
+                    // An open reader can retain a pre-sync chapter object.
+                    // Ordinary page moves must not undo a remote completion.
+                    read = true.takeIf { readerChapter.pages?.lastIndex == pageIndex },
                     lastPageRead = readerChapter.chapter.last_page_read.toLong(),
+                    syncProgressPage = pageIndex.toLong() + 1,
+                    syncTotalPages = readerChapter.pages?.size?.toLong(),
                 ),
             )
         }

@@ -15,6 +15,9 @@ import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.DownloadProvider
+import eu.kanade.tachiyomi.data.historysync.HistorySyncCredentialStore
+import eu.kanade.tachiyomi.data.historysync.HistorySyncLocalStore
+import eu.kanade.tachiyomi.data.historysync.HistorySyncManager
 import eu.kanade.tachiyomi.data.saver.ImageSaver
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.extension.ExtensionManager
@@ -111,6 +114,9 @@ class AppModule(val app: Application) : InjektModule {
         }
 
         addSingletonFactory { ChapterCache(app, get()) }
+        addSingletonFactory { HistorySyncCredentialStore(app) }
+        addSingletonFactory { HistorySyncLocalStore(get(), get()) }
+        addSingletonFactory { HistorySyncManager(app, get(), get(), get(), get()) }
         addSingletonFactory { CoverCache(app) }
         addSingletonFactory { ReaderPageUpscaler(app, get(), get()) }
 

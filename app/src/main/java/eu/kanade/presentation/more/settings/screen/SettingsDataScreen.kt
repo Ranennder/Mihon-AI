@@ -86,12 +86,18 @@ object SettingsDataScreen : SearchableSettings {
     override fun getPreferences(): List<Preference> {
         val backupPreferences = Injekt.get<BackupPreferences>()
         val storagePreferences = Injekt.get<StoragePreferences>()
+        val navigator = LocalNavigator.currentOrThrow
 
         return listOf(
             getStorageLocationPref(storagePreferences = storagePreferences),
             Preference.PreferenceItem.InfoPreference(stringResource(MR.strings.pref_storage_location_info)),
 
             getBackupAndRestoreGroup(backupPreferences = backupPreferences),
+            Preference.PreferenceItem.TextPreference(
+                title = stringResource(MR.strings.history_sync_title),
+                subtitle = stringResource(MR.strings.history_sync_entry),
+                onClick = { navigator.push(SettingsHistorySyncScreen) },
+            ),
             getDataGroup(),
             getExportGroup(),
         )

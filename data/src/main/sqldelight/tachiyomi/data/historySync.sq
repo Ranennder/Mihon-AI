@@ -1,0 +1,104 @@
+import kotlin.Boolean;
+
+CREATE TABLE history_sync_meta (
+    slot INTEGER NOT NULL PRIMARY KEY CHECK(slot = 1),
+    device_id TEXT NOT NULL,
+    active_account TEXT NOT NULL DEFAULT '',
+    logical_clock INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE history_sync_records (
+    account_key TEXT NOT NULL,
+    id TEXT NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY(account_key, id)
+);
+
+CREATE TABLE history_sync_outbox (
+    _id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    account_key TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    source_id INTEGER NOT NULL,
+    manga_url TEXT NOT NULL,
+    chapter_url TEXT NOT NULL,
+    manga_title TEXT NOT NULL,
+    chapter_title TEXT NOT NULL,
+    event_clock INTEGER NOT NULL,
+    progress_page INTEGER,
+    progress_total INTEGER,
+    completion_read INTEGER AS Boolean,
+    history_changed INTEGER AS Boolean NOT NULL,
+    history_last_read INTEGER
+);
+
+initialize:
+INSERT OR IGNORE INTO history_sync_meta(slot, device_id, logical_clock) VALUES(1, :deviceId, 0);
+
+getMeta:
+SELECT * FROM history_sync_meta WHERE slot = 1;
+
+selectAccount:
+UPDATE history_sync_meta SET active_account = :account WHERE slot = 1;
+
+observeClock:
+UPDATE history_sync_meta SET logical_clock = max(logical_clock, :observed) WHERE slot = 1;
+
+bumpClock:
+UPDATE history_sync_meta
+SET logical_clock = min(9007199254740991, max(logical_clock + 1, :nowMs))
+WHERE slot = 1 AND active_account != '';
+
+recordChange:
+INSERT INTO history_sync_outbox(
+    account_key, chapter_id, source_id, manga_url, chapter_url, manga_title, chapter_title,
+    event_clock, progress_page, progress_total, completion_read, history_changed, history_last_read
+)
+SELECT S.active_account, C._id, M.source, M.url, C.url, M.title, C.name, S.logical_clock,
+       :progressPage, :progressTotal, :completionRead, :historyChanged, :historyLastRead
+FROM chapters C JOIN mangas M ON M._id = C.manga_id
+CROSS JOIN history_sync_meta S
+WHERE C._id = :chapterId AND S.slot = 1 AND S.active_account != '';
+
+getPending:
+SELECT * FROM history_sync_outbox WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY _id;
+
+getPendingCount:
+SELECT count(*) FROM history_sync_outbox WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
+removePendingThrough:
+DELETE FROM history_sync_outbox WHERE _id <= :id AND account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
+getRecords:
+SELECT * FROM history_sync_records WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY id;
+
+putRecord:
+INSERT INTO history_sync_records(account_key, id, json)
+SELECT active_account, :id, :json FROM history_sync_meta WHERE slot = 1
+ON CONFLICT(account_key, id) DO UPDATE SET json = excluded.json;
+
+getLocalChapters:
+SELECT C._id AS chapter_id, C.manga_id, M.source AS source_id, M.url AS manga_url,
+       C.url AS chapter_url, M.title AS manga_title, C.name AS chapter_title,
+       C.read, C.last_page_read, H.last_read
+FROM chapters C JOIN mangas M ON M._id = C.manga_id
+LEFT JOIN history H ON H.chapter_id = C._id
+ORDER BY C._id;
+
+getHistoryChapterById:
+SELECT chapter_id FROM history WHERE _id = :historyId;
+
+getHistoryChapterIds:
+SELECT chapter_id FROM history;
+
+getMangaHistoryChapterIds:
+SELECT H.chapter_id FROM history H JOIN chapters C ON C._id = H.chapter_id WHERE C.manga_id = :mangaId;
+
+applyChapter:
+UPDATE chapters SET read = :read, last_page_read = :lastPageRead, is_syncing = 1 WHERE _id = :chapterId;
+
+finishApplyingChapter:
+UPDATE chapters SET is_syncing = 0 WHERE _id = :chapterId;
+
+applyHistory:
+INSERT INTO history(chapter_id, last_read, time_read) VALUES(:chapterId, :lastRead, 0)
+ON CONFLICT(chapter_id) DO UPDATE SET last_read = excluded.last_read;

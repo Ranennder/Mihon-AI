@@ -1,0 +1,226 @@
+{
+  "format": "aidoku-mihon-history-identity-fixtures",
+  "version": 1,
+  "cases": [
+    {
+      "name": "mangabuff-www-fragment-trailing-slash",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.mangabuff",
+        "mangaId": "123",
+        "chapterId": "456",
+        "sourceURL": "https://www.MANGABUFF.ru",
+        "mangaURL": "/manga/123/",
+        "chapterURL": "https://mangabuff.ru/manga/123/chapter/456/#image",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "mangabuff",
+        "manga": "/manga/123",
+        "chapter": "/manga/123/chapter/456",
+        "id": "8170ad98d33808c20aecae994b87a47da345baa68f9b2037248b4c3e6c82e4e4"
+      }
+    },
+    {
+      "name": "mangalib-reader-branch-preserved",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.mangalib",
+        "mangaId": "35577--example",
+        "chapterId": "v1/c2?bid=42",
+        "sourceURL": "https://mangalib.me",
+        "mangaURL": "https://mangalib.me/ru/manga/35577--example/?ui=1",
+        "chapterURL": "https://mangalib.me/ru/35577--example/read/v1/c2?ui=1&page=4&bid=42#reader",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "mangalib",
+        "manga": "/35577--example",
+        "chapter": "/35577--example/read/v1/c2?bid=42",
+        "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f"
+      }
+    },
+    {
+      "name": "slashlib-is-a-distinct-source",
+      "input": {
+        "platform": "android",
+        "sourceId": "987",
+        "mangaId": "35577--example",
+        "chapterId": "v1/c2?bid=42",
+        "sourceURL": "https://slashlib.me",
+        "mangaURL": "/35577--example",
+        "chapterURL": "/ru/35577--example/read/v1/c2?bid=42&page=2",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "slashlib",
+        "manga": "/35577--example",
+        "chapter": "/35577--example/read/v1/c2?bid=42",
+        "id": "87152c743f3fcb9f9e2f0b132228f47f9c345ee1c765c75248d5f85bd3fcc285"
+      }
+    },
+    {
+      "name": "unknown-host-port-case-and-query-preserved",
+      "input": {
+        "platform": "ios",
+        "sourceId": "custom",
+        "mangaId": "m",
+        "chapterId": "c",
+        "sourceURL": "https://www.Reader.Example:8443",
+        "mangaURL": "/Manga/One/?lang=ru",
+        "chapterURL": "/chapter/%2FCase/?branch=red&page=2#top",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "reader.example:8443",
+        "manga": "/Manga/One?lang=ru",
+        "chapter": "/chapter/%2FCase?branch=red&page=2",
+        "id": "cbaecafaa27fdea907b0f2230405329b1d93edbec4950ef648b5f8a9995b5f92"
+      }
+    },
+    {
+      "name": "senkuro-overview-url-is-not-a-chapter-identity",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.senkuro",
+        "mangaId": "manga-key",
+        "chapterId": "chapter-2",
+        "sourceURL": "https://senkuro.me",
+        "mangaURL": "/manga/42",
+        "chapterURL": "/manga/42",
+        "uniqueChapterURL": false,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "local:ios:ru.senkuro",
+        "manga": "manga-key",
+        "chapter": "chapter-2",
+        "id": "42ac5cebe6b08c777e8fa3050b060435b7381dca84e0624063c3e26ac8ec1719"
+      }
+    },
+    {
+      "name": "android-unportable-source-is-scoped",
+      "input": {
+        "platform": "android",
+        "sourceId": "123456789",
+        "mangaId": "/manga/42",
+        "chapterId": "/read/2",
+        "sourceURL": null,
+        "mangaURL": null,
+        "chapterURL": null,
+        "uniqueChapterURL": false,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "local:android:123456789",
+        "manga": "/manga/42",
+        "chapter": "/read/2",
+        "id": "2e2781e8879cd8b13d5f5579008e04c337d06e8a7ed4fbb2bad4060f3110cfcd"
+      }
+    },
+    {
+      "name": "explicitly-verified-provider-key",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.senkuro",
+        "mangaId": "manga-key",
+        "chapterId": "chapter-2",
+        "sourceURL": "https://senkuro.me",
+        "mangaURL": "/manga/42",
+        "chapterURL": "/manga/42",
+        "uniqueChapterURL": false,
+        "verifiedProviderChapterKey": "chapter-2"
+      },
+      "expected": {
+        "source": "senkuro",
+        "manga": "/manga/42",
+        "chapter": "key:chapter-2",
+        "id": "534d9d941ff66e04567e11ba2e67e2faa9b30da0c04124f45cbb892e2d4ebb2c"
+      }
+    },
+    {
+      "name": "unicode-paths-have-portable-utf8-percent-encoding",
+      "input": {
+        "platform": "ios",
+        "sourceId": "custom",
+        "mangaId": "m",
+        "chapterId": "c",
+        "sourceURL": "https://reader.example",
+        "mangaURL": "/Манга/",
+        "chapterURL": "/Глава?bid=1",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "reader.example",
+        "manga": "/%D0%9C%D0%B0%D0%BD%D0%B3%D0%B0",
+        "chapter": "/%D0%93%D0%BB%D0%B0%D0%B2%D0%B0?bid=1",
+        "id": "669d2e4ad25f726e97b4402c4d8a09b1b053f3f1b81a7d6a606eba4e80aac00f"
+      }
+    },
+    {
+      "name": "mangalib-keiyoushi-reader-empty-query-segment",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.mangalib",
+        "mangaId": "35577--example",
+        "chapterId": "v1/c2?bid=42",
+        "sourceURL": "https://mangalib.me",
+        "mangaURL": "https://mangalib.me/ru/manga/35577--example/?ui=1",
+        "chapterURL": "https://mangalib.me/ru/35577--example/read/v1/c2?&bid=42&ui=9",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "mangalib",
+        "manga": "/35577--example",
+        "chapter": "/35577--example/read/v1/c2?bid=42",
+        "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f"
+      }
+    },
+    {
+      "name": "mangalib-raw-api-route-preserves-branch",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.mangalib",
+        "mangaId": "35577--example",
+        "chapterId": "v1/c2?bid=42",
+        "sourceURL": "https://mangalib.me",
+        "mangaURL": "https://mangalib.me/ru/manga/35577--example/?ui=1",
+        "chapterURL": "/35577--example/chapter?&branch_id=42&volume=1&number=2",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "mangalib",
+        "manga": "/35577--example",
+        "chapter": "/35577--example/read/v1/c2?bid=42",
+        "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f"
+      }
+    },
+    {
+      "name": "mangalib-raw-api-route-preserves-other-semantics",
+      "input": {
+        "platform": "ios",
+        "sourceId": "ru.mangalib",
+        "mangaId": "35577--example",
+        "chapterId": "v1/c2?bid=42",
+        "sourceURL": "https://mangalib.me",
+        "mangaURL": "https://mangalib.me/ru/manga/35577--example/?ui=1",
+        "chapterURL": "/35577--example/chapter?number=2.5&volume=1&branch_id=42&translation=red%2Fblue&ui=9",
+        "uniqueChapterURL": true,
+        "verifiedProviderChapterKey": null
+      },
+      "expected": {
+        "source": "mangalib",
+        "manga": "/35577--example",
+        "chapter": "/35577--example/read/v1/c2.5?bid=42&translation=red%2Fblue",
+        "id": "749b5e882e29b61cc89b8a16bf76d271b36c82244d57abaff36fa5a35e5d7ee5"
+      }
+    }
+  ]
+}

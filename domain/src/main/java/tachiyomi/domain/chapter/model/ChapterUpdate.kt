@@ -17,6 +17,9 @@ data class ChapterUpdate(
     val scanlator: String? = null,
     val version: Long? = null,
     val memo: JsonObject? = null,
+    /** Portable one-based position; explicit zero is an intentional reset. */
+    val syncProgressPage: Long? = null,
+    val syncTotalPages: Long? = null,
 )
 
 fun Chapter.toChapterUpdate(): ChapterUpdate {

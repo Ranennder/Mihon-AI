@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.30
+
+- Add automatic reading-history synchronization with Aidoku AI 0.9.11 through Yandex Disk or an HTTPS WebDAV account. No PC is needed for history exchange.
+- Share a versioned JSON format for chapter position, completion and reading dates, with independent conflict resolution and explicit unread/history-deletion changes.
+- Preserve pending local changes offline and across process restarts; synchronize on foreground, after reading and through Android background work.
+- Match exact site/chapter identities, retain unmatched cloud records, and keep credentials in Android Keystore outside backups.
+
+Open Settings -> Data and storage -> Reading history sync on Android and the corresponding history sync page in Aidoku AI. Use the same WebDAV account on both phones. Existing backups and reading duration remain separate from history sync.
+
 ## v0.1.29
 
 - Fall back to uploading pages from the phone as soon as the companion reports a failed chapter job, instead of repeatedly polling that failed job for about two minutes.

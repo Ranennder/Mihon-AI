@@ -51,6 +51,25 @@ jobs:
       - name: Build app
         run: ./gradlew assembleRelease -Penable-updater
 
+      - name: Verify signed release APKs
+        run: |
+          set -euo pipefail
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          test -x "$build_tools/apksigner"
+          test -x "$build_tools/aapt"
+          mkdir -p validation/android
+          count=0
+          for apk in app/build/outputs/apk/release/*-release.apk; do
+            test -f "$apk"
+            name=$(basename "$apk" .apk)
+            "$build_tools/apksigner" verify --verbose --print-certs "$apk" > "validation/android/$name.signature.txt"
+            grep -q 'Signer #1 certificate SHA-256 digest: 8638a5b26be147b1fbe160e176b267205d01036c1c871d3d6f25e0be789803ec' "validation/android/$name.signature.txt"
+            "$build_tools/aapt" dump badging "$apk" > "validation/android/$name.badging.txt"
+            sha256sum "$apk" >> validation/android/SHA256SUMS
+            count=$((count + 1))
+          done
+          test "$count" -eq 5
+
       - name: Run unit tests
         id: unit_tests
         run: ./gradlew testDebugUnitTest
@@ -61,6 +80,16 @@ jobs:
         with:
           name: test-report-${{ github.sha }}
           path: app/build/reports/tests/testDebugUnitTest
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-validation-${{ github.sha }}
+          path: |
+            validation/android/
+            **/build/test-results/**/TEST-*.xml
+          if-no-files-found: warn
 
       - name: Upload APKs
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

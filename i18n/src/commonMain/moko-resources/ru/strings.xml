@@ -947,4 +947,22 @@
     <string name="reader_ai_remote_chapter_mode_parallel">Параллельный</string>
     <string name="reader_ai_remote_chapter_mode_classic_summary">Сначала загружается вся глава, затем начинается AI-обработка.</string>
     <string name="reader_ai_remote_chapter_mode_parallel_summary">Следующие страницы загружаются, пока AI обрабатывает уже загруженные.</string>
+    <string name="history_sync_title">Синхронизация истории чтения</string>
+    <string name="history_sync_entry">Синхронизация с Aidoku AI через Яндекс Диск или HTTPS WebDAV</string>
+    <string name="history_sync_description">Укажите один аккаунт WebDAV на обоих телефонах. Позиции чтения, отметки прочитано и не прочитано, удаление истории синхронизируются без компьютера. Каждая установка хранит свою облачную копию. Сопоставляются только точные адреса источников; несопоставленные записи остаются в облаке. Библиотека, закладки, загрузки и время чтения не синхронизируются.</string>
+    <string name="history_sync_account">Облачный аккаунт</string>
+    <string name="history_sync_server">Корневой HTTPS-адрес WebDAV</string>
+    <string name="history_sync_login">Логин WebDAV</string>
+    <string name="history_sync_password">Пароль приложения</string>
+    <string name="history_sync_password_hint">Для Яндекса создайте пароль приложения для WebDAV. Оставьте поле пустым, чтобы сохранить пароль этого аккаунта. Данные защищены Android Keystore и не попадают в резервные копии.</string>
+    <string name="history_sync_enable">Включить синхронизацию истории</string>
+    <string name="history_sync_now">Синхронизировать сейчас</string>
+    <string name="history_sync_idle">Ожидание синхронизации</string>
+    <string name="history_sync_working">Синхронизация истории чтения…</string>
+    <string name="history_sync_success">Последняя синхронизация: %1$s. Сопоставлено: %2$d; не сопоставлено: %3$d.</string>
+    <string name="history_sync_failed">Не удалось синхронизировать. Проверьте сеть, HTTPS-адрес WebDAV, логин, пароль приложения и свободное место в облаке. Локальные изменения сохранены и будут отправлены повторно.</string>
+    <string name="history_sync_needs_account">Сначала сохраните аккаунт WebDAV.</string>
+    <string name="history_sync_disabled">Синхронизация выключена. Локальная история и ожидающие изменения сохранены.</string>
+    <string name="history_sync_save_failed">Не удалось сохранить аккаунт. Проверьте HTTPS-адрес, укажите логин и пароль приложения.</string>
+    <string name="history_sync_saved">Аккаунт сохранён в защищённом хранилище.</string>
 </resources>

@@ -56,7 +56,7 @@ val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
 val upstreamAppVersionName = "0.20.4"
-val mihonAiVersionName = "0.1.29"
+val mihonAiVersionName = "0.1.30"
 
 if (Config.includeTelemetry) {
     pluginManager.apply {
@@ -370,6 +370,8 @@ dependencies {
     implementation(libs.leakCanary.plumber)
 
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation("app.cash.sqldelight:sqlite-driver:${libs.versions.sqldelight.get()}")
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
 }
 
 androidComponents {
