@@ -83,8 +83,13 @@ class ChapterRepositoryImpl(
                     memo = chapterUpdate.memo?.let(MemoColumnAdapter::encode),
                 )
                 if (previous != null) {
+                    // Finishing a re-read is a new completion intent even if
+                    // the local flag is already true. Ordinary cached flags
+                    // and metadata updates must not refresh this register.
+                    val finishedReading = chapterUpdate.read == true && chapterUpdate.syncProgressPage != null &&
+                        chapterUpdate.syncProgressPage == chapterUpdate.syncTotalPages
                     val completion = chapterUpdate.read?.takeIf {
-                        it != previous.read || (!it && chapterUpdate.syncProgressPage == 0L)
+                        it != previous.read || (!it && chapterUpdate.syncProgressPage == 0L) || finishedReading
                     }
                     val progress = chapterUpdate.syncProgressPage ?: chapterUpdate.lastPageRead
                         ?.takeIf { it != previous.last_page_read }

@@ -269,4 +269,20 @@ class HistorySyncLocalStoreTest {
         assertEquals(3L, attempt.await().document.records.single().progress.page)
         assertEquals(0L, database.historySyncQueries.getPendingCount().awaitAsOne())
     }
+
+    @Test
+    fun `finishing an already read chapter beats an earlier unseen cloud unread intent`() = runBlocking {
+        prepare(read = true, page = 3, date = 1000)
+        store.reconcile()
+        ChapterRepositoryImpl(database).update(
+            ChapterUpdate(1, read = true, lastPageRead = 9, syncProgressPage = 10, syncTotalPages = 10),
+        )
+        val pending = database.historySyncQueries.getPending().awaitAsList().single()
+        assertEquals(true, pending.completion_read)
+        val result = store.reconcile(listOf(remote(read = false, page = 2, history = 1500, time = 1500)), apply = true)
+        assertTrue(result.document.records.single().completion.read)
+        assertEquals(pending.event_clock, result.document.records.single().completion.modifiedAt)
+        assertEquals(10L, result.document.records.single().progress.page)
+        assertTrue(database.chaptersQueries.getChapterById(1).awaitAsOne().read)
+    }
 }
