@@ -370,7 +370,7 @@ dependencies {
     implementation(libs.leakCanary.plumber)
 
     testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation("app.cash.sqldelight:sqlite-driver:${libs.versions.sqldelight.get()}")
+    testImplementation(libs.sqldelight.sqliteDriver)
     testImplementation("net.sf.kxml:kxml2:2.3.0")
 }
 
