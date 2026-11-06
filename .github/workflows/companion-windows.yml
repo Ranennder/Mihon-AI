@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Version embedded in the standalone Companion (does not publish a release)
         required: true
-        default: v0.1.31
+        default: v0.1.32
         type: string
 
 permissions:

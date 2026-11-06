@@ -50,6 +50,35 @@ With v0.1.28, `Chapter Stream` has a separate `Chapter processing` choice:
 
 Update both the Android app and companion. The new choice is shown only for `Chapter Stream`; ordinary `Chapter` phone uploads retain their existing first-page/four-page batches. Parallel mode keeps the existing one-GPU-process limit. It overlaps network transfers and processing; it does not keep the model resident between batches.
 
+### Uploaded chapter batches (Companion 0.1.32)
+
+Aidoku AI can prepare normal phone-downloaded pages using the existing
+`POST /api/upscale-chapter` ZIP route, independently of the optional PC direct-download
+checkbox. A multi-page ZIP starts one NCNN directory process, so its pages share
+one model load. The client sends the visible page first, then bounded chunks of
+up to 16 pages, split at the first roughly 30% of the chapter, followed by the
+remaining pages and the next chapter. First-page and per-page fallback runs can
+still be single-image processes.
+
+Uploaded ZIP requests may set `X-Reader-AI-Priority-Count` to a positive count no
+larger than the number of images in that ZIP (default 1). HTTP 202 now echoes
+`priority_count`; readiness uses the same authenticated chapter status and page
+GET endpoints as direct downloads. Archive entries use numeric, zero-based page
+stems, local to that upload. Existing Android uploads without the header retain
+the default. Malformed archives or invalid priority do not supersede valid work.
+
+Completed outputs are validated and atomically published while the directory
+process is still running. Fast JPEG encoding remains on the separate, bounded CPU
+delivery worker. GPU output files are kept separate from published files. Logs
+show `route=uploaded-zip`, the actual number of pages, directory input, model and
+scale; any per-page safety fallback is logged separately.
+
+This reduces process/model setup between pages in the same chunk. The bundled
+NCNN CLI loads a finite directory and exits; it does not expose a resident worker
+protocol. The model is therefore **not** retained across chunks, and decoding,
+encoding, Vulkan tiles, network delays and safety fallbacks can still leave gaps
+in GPU activity. Automated fixture tests do not measure physical RTX 5080 load.
+
 To use the companion away from home, enable `Internet access (beta)` in Mihon while the phone and PC are on the same Wi-Fi. Mihon starts the bundled Cloudflare Quick Tunnel through the local companion and saves its temporary HTTPS address and pairing token automatically. No router configuration, QR code, account, or separate software installation is required. The address changes whenever the companion restarts, so pair again on the same Wi-Fi after each restart.
 
 Pairing waits for the tunnel connection to register and uses HTTP/2 over TCP. Tunnel startup errors are recorded in `companion.log`. When running the Python script, install `cloudflared` on `PATH` or place it next to the script.

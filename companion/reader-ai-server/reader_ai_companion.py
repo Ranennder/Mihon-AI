@@ -504,6 +504,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         client_id: str | None = None,
         scope_id: int | None = None,
         chapter_page_count: int | None = None,
+        priority_count: int = 1,
     ) -> tuple[ChapterUpscaleJob, bool]:
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
@@ -519,12 +520,16 @@ class ReaderAiServer(ThreadingHTTPServer):
         output_dir = workspace / "chapter-out"
         input_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
-        pages = _extract_chapter_archive(
-            archive_path=archive_path,
-            input_dir=input_dir,
-        )
-        if not pages:
-            raise RuntimeError("Chapter archive did not contain any image pages")
+        try:
+            pages = _extract_chapter_archive(archive_path=archive_path, input_dir=input_dir)
+            if not pages:
+                raise ValueError("Chapter archive did not contain any image pages")
+            priority_count = _resolve_chapter_priority_count(priority_count, len(pages))
+        except Exception:
+            shutil.rmtree(workspace, ignore_errors=True)
+            raise
+        # A malformed upload must not cancel the reader's preceding valid job.
+        self.sync_client_scope(client_id, scope_id)
 
         reusable_job = self._find_reusable_chapter_job(
             pages=pages,
@@ -534,6 +539,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             chapter_title=chapter_title,
             client_id=client_id,
             scope_id=scope_id,
+            priority_count=priority_count,
         )
         if reusable_job is not None:
             shutil.rmtree(workspace, ignore_errors=True)
@@ -556,6 +562,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             client_id=client_id,
             scope_id=scope_id,
             chapter_page_count=chapter_page_count,
+            priority_count=priority_count,
         )
         thread = threading.Thread(
             target=self._run_chapter_job,
@@ -1023,6 +1030,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         chapter_title: str | None,
         client_id: str | None,
         scope_id: int | None,
+        priority_count: int = 1,
     ) -> ChapterUpscaleJob | None:
         if not client_id or scope_id is None:
             return None
@@ -1049,6 +1057,8 @@ class ReaderAiServer(ThreadingHTTPServer):
                 if ((job.chapter_title or "").strip() or None) != normalized_chapter_title:
                     continue
                 if job.total_pages != page_count:
+                    continue
+                if job.priority_count != priority_count:
                     continue
                 if job.pages.keys() != pages.keys():
                     continue
@@ -1444,12 +1454,38 @@ class ReaderAiServer(ThreadingHTTPServer):
     def _run_chapter_job(self, job: ChapterUpscaleJob) -> None:
         started_at = time.perf_counter()
         queue_wait_seconds = max(0.0, time.time() - job.created_at)
+        pages = list(job.pages.values())
+        gpu_output = job.workspace / "gpu-out"
+        monitor_stop = threading.Event()
+        monitor = threading.Thread(
+            target=self._monitor_chapter_batch_outputs,
+            args=(job, pages, gpu_output, monitor_stop),
+            name=f"reader-ai-publish-{job.job_id}-archive",
+            daemon=True,
+        )
         try:
-            fallback_count = self._run_chapter_batch(job, list(job.pages.values()), job.input_dir, job.output_dir)
-            with job.state_lock:
-                job.stable_output_pages.update(job.pages)
-            for page_index in job.pages:
-                self._schedule_chapter_delivery(job, page_index)
+            gpu_output.mkdir(parents=True, exist_ok=True)
+            monitor.start()
+            try:
+                fallback_count = self._run_chapter_batch(job, pages, job.input_dir, gpu_output)
+            finally:
+                monitor_stop.set()
+                monitor.join()
+            for page in pages:
+                if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                    raise RuntimeError("Chapter upscale was canceled")
+                with job.state_lock:
+                    if page.page_index in job.stable_output_pages:
+                        continue
+                output = _resolve_produced_output_path(
+                    gpu_output / f"{page.input_path.stem}.{job.batch_output_format}", job.batch_output_format,
+                )
+                if output is None or output.stat().st_size == 0:
+                    raise RuntimeError(f"Chapter page {page.page_index} has no upscale output")
+                output.replace(job.output_dir / output.name)
+                with job.state_lock:
+                    job.stable_output_pages.add(page.page_index)
+                self._schedule_chapter_delivery(job, page.page_index)
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - "
                 f"Chapter upscale finished in {time.perf_counter() - started_at:.2f}s "
@@ -1511,7 +1547,8 @@ class ReaderAiServer(ThreadingHTTPServer):
             (
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
                 f"[{job.request_id}] {job.display_label} - Starting chapter batch "
-                f"({len(pages)} pages, {job.model_name} -> {job.batch_output_format})"
+                f"({len(pages)} pages, input=directory, priority={job.priority_count}, "
+                f"{job.model_name} x{job.native_scale} -> {job.batch_output_format})"
             ),
         )
         completed = _run_logged_subprocess(
@@ -1526,9 +1563,12 @@ class ReaderAiServer(ThreadingHTTPServer):
         )
         if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
             raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
+        safe_fallback_count = 0
         if completed.returncode != 0:
             if _should_retry_with_safe_vulkan_settings(completed.details):
                 safe_config = _build_safe_vulkan_retry_config(self.config)
+                safe_fallback_count = len(pages)
+                _emit_log_line(f"[{job.request_id}] Directory GPU batch failed; retrying {len(pages)} pages individually with safe Vulkan settings")
                 for prepared_page in pages:
                     if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
                         raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
@@ -1581,6 +1621,8 @@ class ReaderAiServer(ThreadingHTTPServer):
                 produced_output_path.unlink(missing_ok=True)
                 fallback_pages.append(prepared_page)
 
+        if fallback_pages:
+            _emit_log_line(f"[{job.request_id}] Directory GPU batch has {len(fallback_pages)} missing or invalid outputs; retrying those pages individually")
         for prepared_page in fallback_pages:
             if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
                 raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
@@ -1616,7 +1658,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             fallback_output_path.write_bytes(processed_image.bytes)
         if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
             raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-        return len(fallback_pages)
+        return safe_fallback_count + len(fallback_pages)
 
     def _cleanup_expired_chapter_jobs(self) -> None:
         cutoff = time.time() - CHAPTER_JOB_RETENTION_SECONDS
@@ -2104,7 +2146,13 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
-        self.server.sync_client_scope(client_id, scope_id)
+        try:
+            priority_count = int((self.headers.get("X-Reader-AI-Priority-Count") or "1").strip())
+            if priority_count < 1:
+                raise ValueError("Chapter priority count must be positive")
+        except ValueError as exc:
+            self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         request_id = self.server.next_request_id()
 
         upload_workspace = self.server._workspace_root / "incoming-chapters"
@@ -2132,7 +2180,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 client_id=client_id,
                 scope_id=scope_id,
                 chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
+                priority_count=priority_count,
             )
+        except ValueError as exc:
+            self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         except zipfile.BadZipFile:
             self._send_text(HTTPStatus.BAD_REQUEST, "Chapter archive is not a valid zip file")
             return
@@ -2161,7 +2213,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             (
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
                 f"[{request_id}] Accepted chapter upscale request: {chapter_job.display_label} "
-                f"({chapter_job.total_pages} pages, {body_size} bytes, model={model_name}, output={output_format}) "
+                f"({chapter_job.total_pages} pages, route=uploaded-zip, priority={chapter_job.priority_count}, "
+                f"{body_size} bytes, model={model_name}, output={output_format}) "
                 f"from {self.client_address[0]}"
             ),
             console=False,
@@ -2175,6 +2228,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "model_name": chapter_job.model_name,
                 "output_format": chapter_job.batch_output_format,
                 "reused_existing_job": reused_existing_job,
+                "priority_count": chapter_job.priority_count,
             },
         )
 
