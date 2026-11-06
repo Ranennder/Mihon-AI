@@ -63,7 +63,8 @@ jobs:
             test -f "$apk"
             name=$(basename "$apk" .apk)
             "$build_tools/apksigner" verify --verbose --print-certs "$apk" > "validation/android/$name.signature.txt"
-            grep -q 'Signer #1 certificate SHA-256 digest: 8638a5b26be147b1fbe160e176b267205d01036c1c871d3d6f25e0be789803ec' "validation/android/$name.signature.txt"
+            certificates=$(sed -nE 's/^(Signer #[0-9]+|V[0-9]+ Signer:) certificate SHA-256 digest: ([0-9a-f]{64})$/\2/p' "validation/android/$name.signature.txt" | sort -u)
+            test "$certificates" = '8638a5b26be147b1fbe160e176b267205d01036c1c871d3d6f25e0be789803ec'
             "$build_tools/aapt" dump badging "$apk" > "validation/android/$name.badging.txt"
             sha256sum "$apk" >> validation/android/SHA256SUMS
             count=$((count + 1))
