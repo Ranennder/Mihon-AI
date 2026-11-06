@@ -5,6 +5,9 @@ import app.cash.sqldelight.async.coroutines.awaitAsOne
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -36,7 +39,11 @@ class HistorySyncLocalStoreTest {
         mangasAdapter = Mangas.Adapter(StringListColumnAdapter, UpdateStrategyColumnAdapter, MemoColumnAdapter),
         chaptersAdapter = Chapters.Adapter(MemoColumnAdapter),
     )
-    private val sourceManager = mockk<SourceManager> { every { get(any()) } returns null }
+    private val sourceReady = MutableStateFlow(true)
+    private val sourceManager = mockk<SourceManager> {
+        every { get(any()) } returns null
+        every { isInitialized } returns sourceReady
+    }
     private val store = HistorySyncLocalStore(database, sourceManager)
     private val remoteDevice = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 
@@ -243,5 +250,23 @@ class HistorySyncLocalStoreTest {
         }
         assertTrue(error.message.orEmpty().contains("clock is exhausted"))
         assertEquals(listOf(pending), database.historySyncQueries.getPending().awaitAsList())
+    }
+
+    @Test
+    fun `source startup preserves pending actions and allows native writes before identity resolution`() = runBlocking {
+        prepare()
+        sourceReady.value = false
+        val repository = ChapterRepositoryImpl(database)
+        repository.update(ChapterUpdate(1, lastPageRead = 1, syncProgressPage = 2))
+        val attempt = async(start = CoroutineStart.UNDISPATCHED) { store.reconcile() }
+        assertFalse(attempt.isCompleted)
+        assertEquals(1L, database.historySyncQueries.getPendingCount().awaitAsOne())
+        assertTrue(database.historySyncQueries.getRecords().awaitAsList().isEmpty())
+        // A native write can still commit while source initialization is pending.
+        repository.update(ChapterUpdate(1, lastPageRead = 2, syncProgressPage = 3))
+        assertEquals(2L, database.historySyncQueries.getPendingCount().awaitAsOne())
+        sourceReady.value = true
+        assertEquals(3L, attempt.await().document.records.single().progress.page)
+        assertEquals(0L, database.historySyncQueries.getPendingCount().awaitAsOne())
     }
 }

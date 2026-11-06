@@ -7,6 +7,8 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import tachiyomi.data.Database
 import tachiyomi.data.History_sync_outbox
@@ -62,6 +64,9 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
      * overwritten by the snapshot that initiated that pull. */
     suspend fun reconcile(remote: List<HistorySyncDocument> = emptyList(), apply: Boolean = false): Result {
         remote.forEach(HistorySyncProtocol::validate)
+        // Resolve identities only after installed sources exist. Waiting before
+        // opening a transaction lets source initialization finish its DB work.
+        sourceManager.isInitialized.first { it }
         repeat(5) {
             currentCoroutineContext().ensureActive()
             val snapshot = readSnapshot()

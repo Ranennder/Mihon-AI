@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.data.historysync
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
