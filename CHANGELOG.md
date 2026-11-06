@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.31
+
+- Fetch direct chapter images with a bounded parallel download window while preserving manifest reading order.
+- Support a priority prefix for quickly preparing the visible page and the first portion of a chapter, then process larger ready batches while later pages download.
+- Add authenticated chapter readiness status for Aidoku AI, including already published pages when a later download fails.
+- Preserve cancellation by client/work scope, terminal failure fallback, and safe handling of source headers during redirects.
+- Rebuild all five signed Android APK variants as 0.1.31; the existing Android direct-download chapter API remains compatible.
+
+Update the Windows Companion for the direct-download pipeline improvements. Actual GPU throughput and physical-phone scrolling were not benchmarked by the automated tests.
+
 ## v0.1.30
 
 - Add automatic reading-history synchronization with Aidoku AI 0.9.11 through Yandex Disk or an HTTPS WebDAV account. No PC is needed for history exchange.

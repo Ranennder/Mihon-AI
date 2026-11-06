@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import ctypes
 import errno
 import filecmp
@@ -85,6 +86,7 @@ CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
 DIRECT_CHAPTER_PREFETCH_PAGES = 16
 DIRECT_CHAPTER_BATCH_PAGES = 16
+DIRECT_CHAPTER_DOWNLOAD_WORKERS = 4
 SUPPORTED_CHAPTER_MODES = ("classic", "parallel")
 CHAPTER_STREAM_POLL_SECONDS = 0.2
 CHAPTER_STREAM_HEARTBEAT_SECONDS = 15.0
@@ -103,6 +105,7 @@ _LOG_REQUEST_RE = re.compile(r"^\[(req-[^\]]+)\]\s+(.*)$")
 _PROGRESS_RE = re.compile(r"^(?P<percent>\d+(?:[.,]\d+)?)%$")
 _CHAPTER_PAGE_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/page/(\d+)$")
 _CHAPTER_STREAM_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/stream$")
+_CHAPTER_STATUS_PATH_RE = re.compile(r"^/api/upscale-chapter/([^/]+)/status$")
 _PAGE_PROGRESS_LABEL_RE = re.compile(r"^(?P<context>.+?) - (?P<page>\d+/\d+)$")
 
 
@@ -327,6 +330,10 @@ class ChapterUpscaleJob:
     scope_id: int | None = None
     chapter_page_count: int | None = None
     chapter_mode: str = "classic"
+    priority_count: int = 1
+    delivery_paths: dict[int, Path] = field(default_factory=dict, repr=False)
+    delivery_pending: set[int] = field(default_factory=set, repr=False)
+    delivery_errors: dict[int, str] = field(default_factory=dict, repr=False)
     completed: threading.Event = field(default_factory=threading.Event, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     error: Exception | None = None
@@ -406,6 +413,9 @@ class ReaderAiServer(ThreadingHTTPServer):
         self._active_processes: dict[str, set[Any]] = {}
         self._active_processes_lock = threading.Lock()
         self._subprocess_slot = threading.Semaphore(1)
+        # Encoding a complete AI bitmap is CPU work, not a GPU lease. Keep one
+        # bitmap active and cache final bytes on disk, never a chapter in RAM.
+        self._delivery_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reader-ai-delivery")
         for worker_index in range(max(1, config.max_workers)):
             workspace = self._workspace_root / f"worker-{worker_index}"
             workspace.mkdir(parents=True, exist_ok=True)
@@ -571,12 +581,14 @@ class ReaderAiServer(ThreadingHTTPServer):
         scope_id: int | None = None,
         chapter_page_count: int | None = None,
         chapter_mode: str = "classic",
+        priority_count: int = 1,
     ) -> ChapterUpscaleJob:
         """Register immediately, then download source images in the background."""
         chapter_mode = _resolve_chapter_mode(chapter_mode)
         indexes = [int(item["page_index"]) for item in pages]
         if not indexes or any(index < 0 for index in indexes) or len(set(indexes)) != len(indexes):
             raise ValueError("Direct chapter pages must have unique nonnegative indexes")
+        priority_count = _resolve_chapter_priority_count(priority_count, len(pages))
         self._cleanup_expired_chapter_jobs()
         job_id = uuid.uuid4().hex[:12]
         workspace = self._chapter_jobs_root / job_id
@@ -610,6 +622,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             scope_id=scope_id,
             chapter_page_count=chapter_page_count,
             chapter_mode=chapter_mode,
+            priority_count=priority_count,
             page_download_progress={page_index: None for page_index in placeholders},
         )
         job.worker_thread = threading.Thread(
@@ -656,22 +669,55 @@ class ReaderAiServer(ThreadingHTTPServer):
 
         def download_pages() -> None:
             try:
-                for item in pages:
-                    self._check_direct_download_active(job, producer_stop)
-                    prepared = self._download_direct_chapter_page(job, item, producer_stop)
-                    self._check_direct_download_active(job, producer_stop)
-                    with job.state_lock:
-                        job.pages[prepared.page_index] = prepared
-                        job.page_download_progress[prepared.page_index] = 100
-                    # Only paths are queued. A slow GPU cannot accumulate image
-                    # bodies in memory or an unbounded number of pending inputs.
-                    while True:
-                        self._check_direct_download_active(job, producer_stop)
-                        try:
-                            ready.put(prepared, timeout=0.1)
-                            break
-                        except queue.Full:
-                            continue
+                # Fetch a small window concurrently, but hand inputs to the GPU
+                # in manifest order. A slow CDN request must not serialize all
+                # network I/O or let lower pages overtake the visible first page.
+                with ThreadPoolExecutor(max_workers=DIRECT_CHAPTER_DOWNLOAD_WORKERS,
+                                        thread_name_prefix=f"reader-ai-fetch-{job.job_id}") as executor:
+                    remaining = iter(pages)
+                    pending = []
+
+                    def submit_next() -> None:
+                        item = next(remaining, None)
+                        if item is not None:
+                            pending.append(executor.submit(self._download_direct_chapter_page, job, item, producer_stop))
+
+                    for _ in range(min(DIRECT_CHAPTER_DOWNLOAD_WORKERS, len(pages))):
+                        submit_next()
+                    try:
+                        while pending:
+                            future = pending.pop(0)
+                            while True:
+                                self._check_direct_download_active(job, producer_stop)
+                                try:
+                                    prepared = future.result(timeout=0.1)
+                                    break
+                                except FutureTimeoutError:
+                                    continue
+                            self._check_direct_download_active(job, producer_stop)
+                            with job.state_lock:
+                                job.pages[prepared.page_index] = prepared
+                                job.page_download_progress[prepared.page_index] = 100
+                            # Paths, not bodies, are queued. Disk inputs are
+                            # bounded by this queue plus the four active fetches.
+                            while True:
+                                self._check_direct_download_active(job, producer_stop)
+                                try:
+                                    ready.put(prepared, timeout=0.1)
+                                    break
+                                except queue.Full:
+                                    continue
+                            submit_next()
+                    except Exception as exc:  # noqa: BLE001
+                        if not producer_stop.is_set():
+                            download_errors.append(exc)
+                            if job.error is None:
+                                job.error = exc
+                        producer_stop.set()
+                        raise
+                    finally:
+                        for future in pending:
+                            future.cancel()
             except Exception as exc:  # noqa: BLE001
                 if not producer_stop.is_set():
                     download_errors.append(exc)
@@ -685,28 +731,45 @@ class ReaderAiServer(ThreadingHTTPServer):
         )
         producer.start()
         batch_index = 0
+        processed_count = 0
+        deferred_page = None
         try:
             while True:
                 self._check_direct_download_active(job, producer_stop)
                 if download_errors:
                     raise download_errors[0]
-                try:
-                    first = ready.get(timeout=0.1)
-                except queue.Empty:
-                    if downloads_finished.is_set():
-                        if download_errors:
-                            raise download_errors[0]
-                        break
-                    continue
+                if deferred_page is not None:
+                    first = deferred_page
+                    deferred_page = None
+                else:
+                    try:
+                        first = ready.get(timeout=0.1)
+                    except queue.Empty:
+                        if downloads_finished.is_set():
+                            if download_errors:
+                                raise download_errors[0]
+                            break
+                        continue
                 batch = [first]
                 # The first page starts immediately. Later batches use only
                 # inputs already available, never waiting to fill a batch.
                 if batch_index > 0:
-                    while len(batch) < DIRECT_CHAPTER_BATCH_PAGES:
+                    # Publish the requested warmup prefix before starting a
+                    # large tail batch; the visible first page never waits.
+                    limit = DIRECT_CHAPTER_BATCH_PAGES
+                    if processed_count < job.priority_count:
+                        limit = min(limit, job.priority_count - processed_count)
+                    while len(batch) < limit:
                         try:
-                            batch.append(ready.get_nowait())
+                            following = ready.get_nowait()
                         except queue.Empty:
                             break
+                        # The bundled directory CLI sorts file names. Split at
+                        # a wrap so numeric file order matches manifest priority.
+                        if following.page_index < batch[-1].page_index:
+                            deferred_page = following
+                            break
+                        batch.append(following)
                 batch_workspace = job.workspace / f"direct-batch-{batch_index:04d}"
                 input_dir = batch_workspace / "in"
                 output_dir = batch_workspace / "out"
@@ -747,7 +810,9 @@ class ReaderAiServer(ThreadingHTTPServer):
                     output.replace(job.output_dir / output.name)
                     with job.state_lock:
                         job.stable_output_pages.add(page.page_index)
+                    self._schedule_chapter_delivery(job, page.page_index)
                 shutil.rmtree(batch_workspace)
+                processed_count += len(batch)
                 batch_index += 1
         except Exception as exc:  # noqa: BLE001
             if job.error is None:
@@ -823,6 +888,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                     snapshot.replace(job.output_dir / output.name)
                     with job.state_lock:
                         job.stable_output_pages.add(page.page_index)
+                    self._schedule_chapter_delivery(job, page.page_index)
                 except (OSError, ValueError, SyntaxError):
                     # The encoder or fallback may still be replacing this file.
                     # The batch owner handles terminal processing errors.
@@ -911,8 +977,8 @@ class ReaderAiServer(ThreadingHTTPServer):
             raise KeyError(job_id)
         with job.state_lock:
             download_percent = job.page_download_progress.get(page_index)
-            ready_count = len(job.ready_pages | job.stable_output_pages)
-            if page_index in job.ready_pages or page_index in job.stable_output_pages:
+            ready_count = len(job.delivery_paths)
+            if page_index in job.delivery_paths:
                 return "ready", 100
             if job.chapter_mode == "classic" and page_index in job.page_download_progress and any(
                 percent is None or percent < 100 for percent in job.page_download_progress.values()
@@ -923,6 +989,30 @@ class ReaderAiServer(ThreadingHTTPServer):
         if job.total_pages > 0:
             return "upscaling", ready_count * 100 // job.total_pages
         return "upscaling", None
+
+    def get_chapter_status(self, job_id: str) -> dict[str, Any]:
+        with self._chapter_jobs_lock:
+            job = self._chapter_jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        cancelled = job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id)
+        with job.state_lock:
+            ready = set(job.delivery_paths)
+            priority = set(list(job.pages)[:job.priority_count])
+            payload = {
+                "job_id": job.job_id,
+                "state": "cancelled" if cancelled else "failed" if job.error is not None
+                         else "completed" if job.completed.is_set() and not job.delivery_pending else "running",
+                "page_count": job.total_pages,
+                "ready_count": len(ready),
+                "ready_indices": sorted(ready),
+                "priority_count": job.priority_count,
+                "priority_ready_count": len(ready & priority),
+                "priority_ready": priority.issubset(ready),
+            }
+            if job.error is not None:
+                payload["error"] = str(job.error)
+            return payload
 
     def _find_reusable_chapter_job(
         self,
@@ -1092,8 +1182,9 @@ class ReaderAiServer(ThreadingHTTPServer):
         return True
 
     def _cancel_chapter_job(self, job: ChapterUpscaleJob, reason: str) -> bool:
-        if job.completed.is_set():
-            return False
+        with job.state_lock:
+            if job.completed.is_set() and not job.delivery_pending:
+                return False
         job.cancel_event.set()
         if job.error is None:
             job.error = RuntimeError(reason)
@@ -1125,15 +1216,15 @@ class ReaderAiServer(ThreadingHTTPServer):
                             job.stable_output_pages.add(page_index)
                             job.observed_output_sizes.pop(page_index, None)
 
-                return _finish_fast_output(
-                    ProcessedImage(
-                        bytes=produced_output_path.read_bytes(),
-                        output_format=_sanitize_extension(produced_output_path.suffix),
-                    ),
-                    model_name=job.model_name,
-                    requested_output_format=job.requested_output_format,
-                    cancel_event=job.cancel_event,
-                )
+                self._schedule_chapter_delivery(job, page_index)
+                with job.state_lock:
+                    delivery_path = job.delivery_paths.get(page_index)
+                    delivery_error = job.delivery_errors.get(page_index)
+                if delivery_error is not None:
+                    raise ChapterJobFailedError(delivery_error)
+                if delivery_path is None:
+                    return None
+                return ProcessedImage(delivery_path.read_bytes(), _sanitize_extension(delivery_path.suffix))
 
         if job.completed.is_set():
             if job.error is not None:
@@ -1141,6 +1232,62 @@ class ReaderAiServer(ThreadingHTTPServer):
             raise FileNotFoundError(f"Chapter page {page_index} is not available")
 
         return None
+
+    def _schedule_chapter_delivery(self, job: ChapterUpscaleJob, page_index: int) -> None:
+        output = job.resolve_output_path(page_index)
+        if output is None or job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+            return
+        needs_encode = (job.model_name == FAST_MODEL_NAME
+                        and _sanitize_extension(job.requested_output_format) in JPEG_OUTPUT_FORMATS
+                        and _sanitize_extension(output.suffix) == PNG_OUTPUT_FORMAT)
+        with job.state_lock:
+            if page_index in job.delivery_paths or page_index in job.delivery_pending or page_index in job.delivery_errors:
+                return
+            if not needs_encode:
+                job.delivery_paths[page_index] = output
+                return
+            job.delivery_pending.add(page_index)
+        try:
+            self._delivery_executor.submit(self._materialize_chapter_delivery, job, page_index, output)
+        except RuntimeError:
+            with job.state_lock:
+                job.delivery_pending.discard(page_index)
+            if not job.cancel_event.is_set():
+                raise
+
+    def _materialize_chapter_delivery(self, job: ChapterUpscaleJob, page_index: int, source: Path) -> None:
+        temporary = None
+        try:
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                return
+            result = _finish_fast_output(
+                ProcessedImage(source.read_bytes(), _sanitize_extension(source.suffix)),
+                model_name=job.model_name, requested_output_format=job.requested_output_format,
+                cancel_event=job.cancel_event,
+            )
+            directory = job.workspace / "delivery"
+            directory.mkdir(exist_ok=True)
+            destination = directory / f"{page_index:04d}.{result.output_format}"
+            temporary = destination.with_suffix(destination.suffix + ".writing")
+            temporary.write_bytes(result.bytes)
+            if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
+                return
+            temporary.replace(destination)
+            with job.state_lock:
+                job.delivery_paths[page_index] = destination
+        except Exception as exc:  # noqa: BLE001
+            if not job.cancel_event.is_set():
+                message = f"Chapter page {page_index} final encoding failed ({type(exc).__name__})"
+                with job.state_lock:
+                    job.delivery_errors[page_index] = message
+                if job.error is None:
+                    job.error = RuntimeError(message)
+                _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {message}")
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            with job.state_lock:
+                job.delivery_pending.discard(page_index)
 
     def get_chapter_page_indexes(self, job_id: str) -> list[int]:
         with self._chapter_jobs_lock:
@@ -1299,6 +1446,10 @@ class ReaderAiServer(ThreadingHTTPServer):
         queue_wait_seconds = max(0.0, time.time() - job.created_at)
         try:
             fallback_count = self._run_chapter_batch(job, list(job.pages.values()), job.input_dir, job.output_dir)
+            with job.state_lock:
+                job.stable_output_pages.update(job.pages)
+            for page_index in job.pages:
+                self._schedule_chapter_delivery(job, page_index)
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{job.request_id}] {job.display_label} - "
                 f"Chapter upscale finished in {time.perf_counter() - started_at:.2f}s "
@@ -1473,7 +1624,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             expired_job_ids = [
                 job_id
                 for job_id, job in self._chapter_jobs.items()
-                if job.completed.is_set() and job.created_at < cutoff
+                if job.completed.is_set() and not job.delivery_pending and job.created_at < cutoff
             ]
             expired_jobs = [self._chapter_jobs.pop(job_id) for job_id in expired_job_ids]
 
@@ -1491,6 +1642,9 @@ class ReaderAiServer(ThreadingHTTPServer):
                 jobs = list(getattr(self, "_chapter_jobs", {}).values())
             for job in jobs:
                 self._cancel_chapter_job(job, "Companion was closed")
+            delivery_executor = getattr(self, "_delivery_executor", None)
+            if delivery_executor is not None:
+                delivery_executor.shutdown(wait=False, cancel_futures=True)
             for _ in worker_threads:
                 self._processing_queue.put(_STOP_PROCESSING)
             all_workers = [*worker_threads, *(job.worker_thread for job in jobs if job.worker_thread is not None)]
@@ -1500,12 +1654,14 @@ class ReaderAiServer(ThreadingHTTPServer):
             workspace_owner = getattr(self, "_workspace_root_owner", None)
             if workspace_owner is not None:
                 remaining_workers = [thread for thread in all_workers if thread.is_alive()]
-                if remaining_workers:
+                if remaining_workers or delivery_executor is not None:
                     # Direct jobs join their download producer before exiting.
                     # Keep its files alive while a canceled HTTP read unwinds.
                     def cleanup_after_workers() -> None:
                         for thread in remaining_workers:
                             thread.join()
+                        if delivery_executor is not None:
+                            delivery_executor.shutdown(wait=True, cancel_futures=True)
                         workspace_owner.cleanup()
 
                     threading.Thread(target=cleanup_after_workers, name="reader-ai-cleanup", daemon=True).start()
@@ -1558,6 +1714,19 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         chapter_stream_match = _CHAPTER_STREAM_PATH_RE.match(parsed.path)
         if chapter_stream_match is not None:
             self._handle_chapter_stream_request(chapter_stream_match.group(1))
+            return
+
+        chapter_status_match = _CHAPTER_STATUS_PATH_RE.match(parsed.path)
+        if chapter_status_match is not None:
+            if not self._authorize():
+                self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+                return
+            try:
+                status = self.server.get_chapter_status(chapter_status_match.group(1))
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "Chapter job not found")
+                return
+            self._send_json(HTTPStatus.OK, status)
             return
 
         chapter_page_match = _CHAPTER_PAGE_PATH_RE.match(parsed.path)
@@ -2022,6 +2191,11 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(pages, list) or not pages:
                 raise ValueError("Direct chapter manifest has no pages")
             try:
+                priority_count = _resolve_chapter_priority_count(manifest.get("priority_count", 1), len(pages))
+            except ValueError as exc:
+                self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            try:
                 chapter_mode = _resolve_chapter_mode(self.headers.get("X-Reader-AI-Chapter-Mode") or "")
             except ValueError as exc:
                 self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
@@ -2049,6 +2223,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 scope_id=scope_id,
                 chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
                 chapter_mode=chapter_mode,
+                priority_count=priority_count,
             )
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] "
@@ -2058,6 +2233,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "job_id": chapter_job.job_id,
                 "page_count": len(chapter_job.pages),
                 "chapter_mode": chapter_mode,
+                "priority_count": chapter_job.priority_count,
                 "reused_existing_job": False,
             })
         except Exception as exc:  # noqa: BLE001
@@ -2548,6 +2724,12 @@ def _resolve_chapter_mode(value: str) -> str:
     if mode not in SUPPORTED_CHAPTER_MODES:
         raise ValueError("Unsupported chapter mode; expected classic or parallel")
     return mode
+
+
+def _resolve_chapter_priority_count(value: Any, page_count: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= page_count:
+        raise ValueError("priority_count must be an integer between 1 and the page count")
+    return value
 
 
 def _parse_optional_int_header(value: str) -> int | None:

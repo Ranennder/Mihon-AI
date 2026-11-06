@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -248,7 +249,15 @@ class FastOutputQualityTests(unittest.TestCase):
         job.completed.set()
         snapshot = output_dir / "0000.png"
         original_snapshot = snapshot.read_bytes()
-        result = server.get_chapter_page(job.job_id, 0)
+        with patch.object(companion, "_encode_pil_image", wraps=companion._encode_pil_image) as encode:
+            deadline = time.monotonic() + 3
+            result = None
+            while result is None and time.monotonic() < deadline:
+                result = server.get_chapter_page(job.job_id, 0)
+                time.sleep(0.001)
+            self.assertIsNotNone(result)
+            self.assertEqual(server.get_chapter_page(job.job_id, 0), result)
+            self.assertEqual(encode.call_count, 1, "A repeated page GET re-encoded the full bitmap")
         self.assert_jpeg_444(result, (128, 96))
         self.assertEqual(snapshot.read_bytes(), original_snapshot)
         self.assertEqual(len(self.calls), 1)
