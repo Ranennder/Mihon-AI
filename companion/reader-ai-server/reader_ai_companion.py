@@ -1761,7 +1761,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         chapter_status_match = _CHAPTER_STATUS_PATH_RE.match(parsed.path)
         if chapter_status_match is not None:
             if not self._authorize():
-                self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+                self._reject_unauthorized()
                 return
             try:
                 status = self.server.get_chapter_status(chapter_status_match.group(1))
@@ -1777,7 +1777,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         if not self._authorize():
-            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            self._reject_unauthorized()
             return
 
         job_id, page_index_text = chapter_page_match.groups()
@@ -1808,7 +1808,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_chapter_stream_request(self, job_id: str) -> None:
         if not self._authorize():
-            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            self._reject_unauthorized()
             return
 
         try:
@@ -1956,7 +1956,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_single_upscale_request(self) -> None:
         if not self._authorize():
-            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            self._reject_unauthorized()
             return
 
         content_length = self.headers.get("Content-Length")
@@ -2101,7 +2101,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_chapter_upscale_request(self) -> None:
         if not self._authorize():
-            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            self._reject_unauthorized()
             return
 
         content_length = self.headers.get("Content-Length")
@@ -2234,7 +2234,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_direct_chapter_upscale_request(self) -> None:
         if not self._authorize():
-            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            self._reject_unauthorized()
             return
         try:
             body_size = int(self.headers.get("Content-Length") or "0")
@@ -2296,7 +2296,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_abort_client_request(self) -> None:
         if not self._authorize():
-            self._send_text(HTTPStatus.FORBIDDEN, "Invalid or missing X-Reader-AI-Token")
+            self._reject_unauthorized()
             return
 
         client_id = _decode_optional_text_header(self.headers.get("X-Reader-AI-Client-Id"))
@@ -2326,6 +2326,16 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         if self.headers.get("CF-Connecting-IP"):
             return supplied_token == self.server.pairing_token
         return not supplied_token or supplied_token == self.server.pairing_token
+
+    def _reject_unauthorized(self) -> None:
+        # Authorization precedes body reads, including large streamed ZIP uploads.
+        # Reusing this connection would parse unread image/manifest bytes as HTTP.
+        self.close_connection = True
+        self._send_text(
+            HTTPStatus.FORBIDDEN,
+            "Invalid or missing X-Reader-AI-Token",
+            headers={"Connection": "close"},
+        )
 
     def _send_binary(self, status: HTTPStatus, body: bytes, output_format: str) -> None:
         mime = mimetypes.types_map.get(f".{output_format}", "application/octet-stream")

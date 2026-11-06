@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import zipfile
+from http.client import HTTPConnection
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -177,6 +178,50 @@ class UploadedChapterPipelineTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 400)
                 self.assertEqual(self.server._client_scopes["phone"], 1)
                 self.assertEqual(self.server._chapter_jobs, {})
+        process.assert_not_called()
+
+    def test_auth_rejection_closes_unread_upload_connection_before_a_safe_retry(self):
+        process = self.patch(companion, "_run_logged_subprocess")
+        routes = [
+            ("POST", "/api/upscale"),
+            ("POST", "/api/upscale-chapter"),
+            ("POST", "/api/upscale-chapter-direct"),
+            ("POST", "/api/abort-client"),
+            ("GET", "/api/upscale-chapter/missing/status"),
+            ("GET", "/api/upscale-chapter/missing/page/0"),
+            ("GET", "/api/upscale-chapter/missing/stream"),
+        ]
+        for method, path in routes:
+            with self.subTest(method=method, path=path):
+                connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+                self.addCleanup(connection.close)
+                # Send only a prefix of a large declared body: rejecting credentials
+                # must not drain the upload, process it, or retain these bytes.
+                connection.request(method, path, body=b"synthetic-unread-body", headers={
+                    "X-Reader-AI-Token": "wrong-fixture-token",
+                    "Content-Type": "application/zip",
+                    "Content-Length": str(512 * 1024 * 1024),
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                self.assertEqual(response.getheader("Connection"), "close")
+                self.assertTrue(response.will_close)
+                self.assertEqual(response.read(), b"Invalid or missing X-Reader-AI-Token")
+                self.assertIsNone(connection.sock)
+                # HTTPConnection reconnects after Connection: close. The exact
+                # read-only auth check used by the phone must still work.
+                connection.request("GET", "/api/upscale-chapter/missing/status", headers={
+                    "X-Reader-AI-Token": "fixture-token",
+                })
+                verified = connection.getresponse()
+                self.assertEqual(verified.status, 404)
+                self.assertEqual(verified.read(), b"Chapter job not found")
+                connection.request("GET", "/health")
+                health = connection.getresponse()
+                self.assertEqual(health.status, 200)
+                self.assertTrue(json.loads(health.read())["ok"])
+                connection.close()
+        self.assertEqual(self.server._chapter_jobs, {})
         process.assert_not_called()
 
     def test_legacy_upload_defaults_to_one_priority_page_and_still_batches_all_images(self):
