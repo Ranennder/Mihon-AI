@@ -143,6 +143,27 @@ class TargetWidthTests(unittest.TestCase):
             self.assertNotEqual(image.getpixel((image.width // 2, image.height - 1)), (0, 0, 0))
         self.assertEqual(headers["X-Reader-AI-Target-Width"], str(width))
 
+    def test_chapter_page_keeps_width_echo_if_job_expires_after_bytes_are_read(self):
+        expected = self.submit("zip", 129, companion.FAST_MODEL_NAME, count=1)[0][0]
+        job = next(iter(self.server._chapter_jobs.values()))
+        self.assertTrue(job.completed.wait(2))
+        get_page = self.server.get_chapter_page
+
+        def get_then_expire(job_id, page_index):
+            result = get_page(job_id, page_index)
+            self.assertIsNotNone(result)
+            with self.server._chapter_jobs_lock:
+                self.server._chapter_jobs.pop(job_id)
+            return result
+
+        with patch.object(self.server, "get_chapter_page", side_effect=get_then_expire):
+            with self.http(f"/api/upscale-chapter/{job.job_id}/page/0") as response:
+                self.assertEqual(response.status, 200)
+                body = response.read()
+                self.assertEqual(body, expected)
+                self.assert_size((body, response.headers), (129, 76), 129)
+        self.assertNotIn(job.job_id, self.server._chapter_jobs)
+
     def test_both_models_resize_up_down_and_native_on_every_endpoint(self):
         for model, scale in ((companion.FAST_MODEL_NAME, 2), ("realesrgan-x4plus-anime", 4)):
             for route in ("single", "zip", "direct"):

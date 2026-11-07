@@ -1856,6 +1856,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
         job_id, page_index_text = chapter_page_match.groups()
         try:
+            with self.server._chapter_jobs_lock:
+                target_width = self.server._chapter_jobs[job_id].target_width
             processed_image = self.server.get_chapter_page(job_id, int(page_index_text))
         except KeyError:
             self._send_text(HTTPStatus.NOT_FOUND, "Chapter job not found")
@@ -1878,8 +1880,6 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         self.server.note_chapter_page_ready(job_id, int(page_index_text))
-        with self.server._chapter_jobs_lock:
-            target_width = self.server._chapter_jobs[job_id].target_width
         self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format, target_width=target_width)
 
     def _handle_chapter_stream_request(self, job_id: str) -> None:

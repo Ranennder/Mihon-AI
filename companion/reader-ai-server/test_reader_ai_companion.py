@@ -342,13 +342,15 @@ class CompanionNetworkingTests(unittest.TestCase):
         )
 
     def test_nonterminal_runtime_error_does_not_mark_the_job_failed(self):
+        job, _ = self.create_upload_job(b"pending-page")
         base_url = self.serve_companion()
         with patch.object(self.server, "get_chapter_page", side_effect=RuntimeError("Temporary upstream error")):
             with self.assertRaises(HTTPError) as raised:
-                urlopen(f"{base_url}/api/upscale-chapter/pending/page/0", timeout=2)
+                urlopen(f"{base_url}/api/upscale-chapter/{job.job_id}/page/0", timeout=2)
             with raised.exception as response:
                 self.assertEqual(response.code, 502)
                 self.assertIsNone(response.headers.get("X-Reader-AI-Job-State"))
+        self.assertIsNone(job.error)
 
     def test_source_error_racing_with_cancellation_does_not_log_raw_upstream_exception(self):
         with TemporaryDirectory() as temporary:
