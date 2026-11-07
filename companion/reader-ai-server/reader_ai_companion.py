@@ -3420,10 +3420,17 @@ def _prepare_width_input(
             f"inference={inference.width}x{inference.height} x{native_scale}, "
             f"output={final.width}x{final.height}", console=False,
         )
-        if image.size == (inference.width, inference.height):
+        png_modes = {"1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16", "I;16B"}
+        if image.size == (inference.width, inference.height) and image.mode in png_modes:
             return body, input_format
         with image.resize((inference.width, inference.height), Image.Resampling.LANCZOS) as resized:
-            return _encode_pil_image(resized, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
+            if resized.mode in png_modes:
+                return _encode_pil_image(resized, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
+            # JPEG sources can be CMYK; PNG cannot store that color mode.
+            # Preserve alpha for other unsupported modes that contain it.
+            mode = "RGBA" if any(band.upper() == "A" for band in resized.getbands()) else "RGB"
+            with resized.convert(mode) as converted:
+                return _encode_pil_image(converted, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
 
 
 def _finish_width_output(

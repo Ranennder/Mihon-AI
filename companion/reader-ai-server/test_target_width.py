@@ -169,6 +169,33 @@ class TargetWidthTests(unittest.TestCase):
         self.assertTrue(any("source=720x315, inference=1024x448 x2, output=2048x896" in str(call)
                             for call in self.logs.call_args_list))
 
+    def test_cmyk_jpeg_is_converted_before_lossless_preparation_on_every_endpoint(self):
+        with Image.new("CMYK", (80, 120), (35, 120, 200, 10)) as source:
+            buffer = BytesIO()
+            source.save(buffer, "JPEG", quality=95)
+            self.source = buffer.getvalue()
+        with Image.open(BytesIO(self.source)) as decoded:
+            self.assertEqual(decoded.mode, "CMYK")
+            with decoded.convert("RGB") as rgb:
+                expected_color = rgb.getpixel((40, 60))
+        # Equal working dimensions must also normalize an unsupported mode,
+        # rather than bypassing preparation and forwarding CMYK to inference.
+        prepared, extension = companion._prepare_width_input(self.source, "jpg", 2, 160, "fixture-cmyk")
+        self.assertEqual(extension, "png")
+        with Image.open(BytesIO(prepared)) as image:
+            self.assertEqual((image.mode, image.size), ("RGB", (80, 120)))
+            self.assertEqual(image.getpixel((40, 60)), expected_color)
+        for model in (companion.FAST_MODEL_NAME, "realesrgan-x4plus-anime"):
+            for route in ("single", "zip", "direct"):
+                with self.subTest(model=model, route=route):
+                    self.calls.clear()
+                    result = self.submit(route, 128, model, count=1)[0]
+                    self.assert_size(result, (128, 192), 128)
+                    self.assertEqual(len(self.calls), 1)
+                    with Image.open(BytesIO(result[0])) as image:
+                        self.assertEqual(image.mode, "RGB")
+                        self.assertEqual(image.getpixel((64, 96)), expected_color)
+
     def test_parallel_direct_chapters_keep_width_for_every_batch(self):
         for model in (companion.FAST_MODEL_NAME, "realesrgan-x4plus-anime"):
             with self.subTest(model=model):
