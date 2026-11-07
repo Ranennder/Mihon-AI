@@ -50,6 +50,51 @@ With v0.1.28, `Chapter Stream` has a separate `Chapter processing` choice:
 
 Update both the Android app and companion. The new choice is shown only for `Chapter Stream`; ordinary `Chapter` phone uploads retain their existing first-page/four-page batches. Parallel mode keeps the existing one-GPU-process limit. It overlaps network transfers and processing; it does not keep the model resident between batches.
 
+### Per-model output width (Companion 0.1.33)
+
+The phone stores separate output width settings for Fast and Detailed. Both
+default to Auto: Fast uses the device's physical short-side width in pixels,
+and Detailed uses three times that width. The phone resolves Auto to a positive
+pixel width before sending a request. Manual settings accept 0 for the model's
+native scale, or any whole-number width from 64 through 16384 pixels. Height
+follows the original page's aspect ratio. A 720-pixel page requested at 2048
+pixels returns exactly 2048 pixels wide.
+Custom-width processing also limits the source and projected output to
+134,217,728 pixels (128 Mi pixels). Extremely tall pages can therefore require a
+smaller width even when the numeric width itself is allowed. Geometry is checked
+before resizing or inference; direct-download jobs report the limit after the
+source dimensions become available. The native setting retains its existing
+behavior.
+
+All three processing routes accept `X-Reader-AI-Target-Width`:
+`POST /api/upscale`, `POST /api/upscale-chapter` (ZIP), and
+`POST /api/upscale-chapter-direct`. Omission or 0 preserves the previous native
+2x/4x behavior. Invalid values return HTTP 400 before superseding existing work.
+Successful processing and chapter acceptance responses echo the applied setting
+in the same header; chapter acceptance/status JSON also includes `target_width`,
+and finished chapter page GET responses carry the header. Clients requesting a
+positive width require that echo, so an older companion cannot silently return
+native output under a custom-width cache entry. Update the companion and phone
+app together. Width is included in batching, active-job reuse and phone caches.
+
+For an explicit width, the companion proportionally resizes the source to
+approximately `width / native model scale`, runs one native AI pass, then rounds
+the result to the exact requested width and original aspect ratio. For example,
+Fast processes a 720-pixel source at an input width of 1024 before its 2x pass to
+produce 2048 pixels. This also reduces inference work when the requested width
+is smaller. The model choice still determines the learned processing: resizing
+does not create arbitrary additional learned detail. Each page gets one AI pass,
+apart from safety retries. Source crops prepared by the phone remain the source
+for this sizing.
+
+Prepared inference inputs and final rounding use lossless PNG internally. Final
+Fast JPEGs retain quality 100 and 4:4:4 chroma. Very tall pages use overlapping
+inference chunks, and outputs beyond the JPEG or WebP encoder's dimension limit
+fall back to PNG. Chapter sizing/encoding runs on the bounded CPU delivery worker
+and keeps validated early-page delivery. Logs record the original, inference and
+final dimensions for explicit widths; fixture tests verify geometry and protocol
+behavior, without measuring physical GPU quality or performance.
+
 ### Uploaded chapter batches (Companion 0.1.32)
 
 Aidoku AI can prepare normal phone-downloaded pages using the existing

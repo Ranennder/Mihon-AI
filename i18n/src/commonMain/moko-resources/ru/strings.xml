@@ -943,6 +943,13 @@
     <string name="reader_ai_internet_saved">Сохранён интернет-адрес: %1$s. После перезапуска компаньона повторите сопряжение в одной сети Wi-Fi.</string>
     <string name="reader_ai_internet_pairing_failed">Не удалось настроить доступ через интернет: %1$s. Подключите телефон и ПК к одной сети Wi-Fi, затем выключите и включите доступ через интернет для повторной попытки.</string>
     <string name="pref_reader_ai_remote_chapter_mode">Обработка главы</string>
+    <string name="pref_reader_ai_target_width">Ширина результата</string>
+    <string name="pref_reader_ai_target_width_summary">Авто использует физическую ширину экрана телефона для Fast и утроенную ширину для Detailed. Своя ширина сохраняется отдельно для каждой модели. Пропорции оригинала сохраняются.</string>
+    <string name="reader_ai_target_width_auto">Авто (%1$d пикс.)</string>
+    <string name="reader_ai_target_width_native">Исходный масштаб модели</string>
+    <string name="reader_ai_target_width_pixels">%1$d пикс.</string>
+    <string name="reader_ai_target_width_unit">Ширина в пикселях</string>
+    <string name="reader_ai_target_width_range">Введите 64–16384 пикселей или 0 для исходного масштаба модели.</string>
     <string name="reader_ai_remote_chapter_mode_classic">Обычный</string>
     <string name="reader_ai_remote_chapter_mode_parallel">Параллельный</string>
     <string name="reader_ai_remote_chapter_mode_classic_summary">Сначала загружается вся глава, затем начинается AI-обработка.</string>

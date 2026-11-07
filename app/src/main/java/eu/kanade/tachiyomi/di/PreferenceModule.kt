@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.historysync.HistorySyncPreferences
 import eu.kanade.tachiyomi.network.NetworkPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import eu.kanade.tachiyomi.ui.reader.setting.physicalPortraitScreenWidth
 import eu.kanade.tachiyomi.util.system.isDebugBuildType
 import tachiyomi.core.common.preference.AndroidPreferenceStore
 import tachiyomi.core.common.preference.PreferenceStore
@@ -57,7 +58,7 @@ class PreferenceModule(val app: Application) : InjektModule {
             UpdatesPreferences(get())
         }
         addSingletonFactory {
-            ReaderPreferences(get())
+            ReaderPreferences(get()) { physicalPortraitScreenWidth(app) }
         }
         addSingletonFactory {
             TrackPreferences(get())

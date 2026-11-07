@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.33
+
+- Add independent output-width settings for Fast and Detailed in the reader and global reader settings.
+- Default Auto to the physical portrait screen width for Fast and three times that width for Detailed, on Android and iPhone. Custom widths and ordinary model scaling remain available separately.
+- Preserve aspect ratio, capture the chosen width in queued requests and cache keys, and stop stale work when settings change.
+- Apply widths to single pages, uploaded chapter ZIPs and PC-downloaded chapters. Reject old companions that ignore a custom-width request.
+- Limit oversized requested image allocations before processing, retaining long-page chunking, PNG fallback and early batch delivery.
+
+Update both the phone app and Windows Companion. Model choice and output width are independent settings.
+
 ## v0.1.31
 
 - Fetch direct chapter images with a bounded parallel download window while preserving manifest reading order.

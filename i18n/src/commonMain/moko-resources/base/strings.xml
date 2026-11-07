@@ -557,6 +557,13 @@
     <string name="pref_reader_ai_remote_model">Remote AI model</string>
     <string name="reader_ai_remote_model_fast">Fast</string>
     <string name="reader_ai_remote_model_detailed">Detailed</string>
+    <string name="pref_reader_ai_target_width">Output width</string>
+    <string name="pref_reader_ai_target_width_summary">Auto uses the phone’s physical screen width for Fast and 3× that width for Detailed. Each model also saves a custom width. Height keeps the original aspect ratio.</string>
+    <string name="reader_ai_target_width_auto">Auto (%1$d px)</string>
+    <string name="reader_ai_target_width_native">Model native scale</string>
+    <string name="reader_ai_target_width_pixels">%1$d px</string>
+    <string name="reader_ai_target_width_unit">Width in pixels</string>
+    <string name="reader_ai_target_width_range">Enter 64–16384 pixels, or 0 for the model’s native scale.</string>
     <string name="pref_reader_ai_remote_batch_mode">Remote batch mode</string>
     <string name="pref_reader_ai_remote_chapter_mode">Chapter processing</string>
     <string name="reader_ai_remote_chapter_mode_classic">Classic</string>

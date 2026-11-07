@@ -11,6 +11,7 @@ import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.widget.BasePreferenceWidget
 import eu.kanade.presentation.reader.settings.AiBackendSelector
 import eu.kanade.presentation.reader.settings.AiChapterModeSelector
+import eu.kanade.presentation.reader.settings.AiTargetWidthSettings
 import eu.kanade.presentation.reader.settings.rememberRemoteAiInternetStatus
 import eu.kanade.presentation.reader.settings.remoteAiServerStatusText
 import eu.kanade.presentation.reader.settings.remoteAiServerUrlPreferenceSubtitle
@@ -177,6 +178,14 @@ object SettingsReaderScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_reader_ai_remote_batch_mode),
                     enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
                 ),
+                Preference.PreferenceItem.CustomPreference(
+                    title = stringResource(MR.strings.pref_reader_ai_target_width),
+                ) {
+                    AiTargetWidthSettings(
+                        preferences = readerPreferences,
+                        enabled = upscaleEnabled && aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE,
+                    )
+                },
                 if (aiBackendMode == ReaderPreferences.AiBackendMode.REMOTE &&
                     remoteAiBatchMode.shouldStreamWholeChapter
                 ) {

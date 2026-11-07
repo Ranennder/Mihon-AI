@@ -11,6 +11,7 @@ import tachiyomi.i18n.MR
 
 class ReaderPreferences(
     preferenceStore: PreferenceStore,
+    private val devicePortraitWidth: () -> Int,
 ) {
 
     // region General
@@ -94,6 +95,10 @@ class ReaderPreferences(
     val remoteAiToken: Preference<String> = preferenceStore.getString("pref_reader_ai_remote_token", "")
     val remoteAiModel: Preference<RemoteAiModel> =
         preferenceStore.getEnum("pref_reader_ai_remote_model", RemoteAiModel.FAST)
+    val remoteAiFastTargetWidth: Preference<Int> =
+        preferenceStore.getInt("pref_reader_ai_remote_fast_target_width", AI_TARGET_WIDTH_AUTO)
+    val remoteAiDetailedTargetWidth: Preference<Int> =
+        preferenceStore.getInt("pref_reader_ai_remote_detailed_target_width", AI_TARGET_WIDTH_AUTO)
     val remoteAiBatchMode: Preference<RemoteAiBatchMode> =
         preferenceStore.getEnum("pref_reader_ai_remote_batch_mode", RemoteAiBatchMode.SINGLE)
     private val remoteAiChapterModePreference: Preference<RemoteAiChapterMode> =
@@ -108,6 +113,28 @@ class ReaderPreferences(
         preferenceStore.getBoolean("pref_reader_ai_internet_access", false)
 
     fun remoteAiChapterMode(): Preference<RemoteAiChapterMode> = remoteAiChapterModePreference
+
+    fun remoteAiTargetWidth(model: RemoteAiModel): Preference<Int> = when (model) {
+        RemoteAiModel.FAST -> remoteAiFastTargetWidth
+        RemoteAiModel.DETAILED -> remoteAiDetailedTargetWidth
+    }
+
+    fun remoteAiConfig(model: RemoteAiModel = remoteAiModel.get()): RemoteAiConfig {
+        val storedWidth = remoteAiTargetWidth(model).get()
+        val width = storedWidth.takeIf(::isValidAiTargetWidth) ?: model.defaultTargetWidth
+        return RemoteAiConfig(model, if (width == AI_TARGET_WIDTH_AUTO) remoteAiAutoTargetWidth(model) else width)
+    }
+
+    fun remoteAiAutoTargetWidth(model: RemoteAiModel): Int {
+        val multiplier = if (model == RemoteAiModel.DETAILED) 3 else 1
+        return (devicePortraitWidth().toLong() * multiplier)
+            .coerceIn(AI_TARGET_WIDTH_MIN.toLong(), AI_TARGET_WIDTH_MAX.toLong()).toInt()
+    }
+
+    fun setRemoteAiTargetWidth(model: RemoteAiModel, width: Int) {
+        require(isValidAiTargetWidth(width)) { "Target width must be Auto, native, or a supported pixel width" }
+        remoteAiTargetWidth(model).set(width)
+    }
 
     fun selectedAiBackendMode(): AiBackendMode {
         return normalizeAiBackendMode(aiBackendMode.get())
@@ -264,19 +291,30 @@ class ReaderPreferences(
         val companionModelName: String,
         val cacheKey: String,
         val companionScale: Int,
+        val defaultTargetWidth: Int,
     ) {
         FAST(
             titleRes = MR.strings.reader_ai_remote_model_fast,
             companionModelName = "realesr-animevideov3",
             cacheKey = "fast",
             companionScale = 2,
+            defaultTargetWidth = AI_TARGET_WIDTH_AUTO,
         ),
         DETAILED(
             titleRes = MR.strings.reader_ai_remote_model_detailed,
             companionModelName = "realesrgan-x4plus-anime",
             cacheKey = "detailed-native4",
             companionScale = 4,
+            defaultTargetWidth = AI_TARGET_WIDTH_AUTO,
         ),
+    }
+
+    data class RemoteAiConfig(val model: RemoteAiModel, val targetWidth: Int) {
+        init {
+            require(targetWidth == 0 || targetWidth in AI_TARGET_WIDTH_MIN..AI_TARGET_WIDTH_MAX)
+        }
+
+        val cacheKey: String get() = "${model.cacheKey}-w$targetWidth"
     }
 
     enum class RemoteAiChapterMode(
@@ -326,6 +364,18 @@ class ReaderPreferences(
     }
 
     companion object {
+        const val AI_TARGET_WIDTH_AUTO = -1
+        const val AI_TARGET_WIDTH_MIN = 64
+        const val AI_TARGET_WIDTH_MAX = 16384
+
+        fun isValidAiTargetWidth(width: Int): Boolean =
+            width == AI_TARGET_WIDTH_AUTO || width == 0 || width in AI_TARGET_WIDTH_MIN..AI_TARGET_WIDTH_MAX
+
+        fun parseAiTargetWidth(value: String): Int? = value.trim()
+            .takeIf { it.matches(Regex("[0-9]+")) }
+            ?.toIntOrNull()
+            ?.takeIf(::isValidAiTargetWidth)
+
         const val WEBTOON_PADDING_MIN = 0
         const val WEBTOON_PADDING_MAX = 25
 

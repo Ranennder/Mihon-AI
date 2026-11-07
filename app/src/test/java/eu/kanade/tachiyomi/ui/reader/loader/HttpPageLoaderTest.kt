@@ -39,7 +39,7 @@ class HttpPageLoaderTest {
 
     @BeforeEach
     fun setUp() = runBlocking {
-        preferences = ReaderPreferences(InMemoryPreferenceStore()).apply {
+        preferences = ReaderPreferences(InMemoryPreferenceStore()) { 1320 }.apply {
             upscalePagesX2.set(true)
             aiBackendMode.set(ReaderPreferences.AiBackendMode.REMOTE)
             remoteAiDirectDownload.set(true)

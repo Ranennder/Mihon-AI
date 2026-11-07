@@ -59,6 +59,10 @@ internal fun ColumnScope.AiPage(viewModel: ReaderSettingsViewModel) {
                 )
             }
         }
+        AiTargetWidthSettings(
+            preferences = viewModel.preferences,
+            onWidthChanged = viewModel::setRemoteAiTargetWidth,
+        )
         SettingsChipRow(MR.strings.pref_reader_ai_remote_batch_mode) {
             ReaderPreferences.RemoteAiBatchMode.entries.forEach { batchMode ->
                 FilterChip(

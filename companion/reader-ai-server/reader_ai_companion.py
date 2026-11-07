@@ -69,6 +69,9 @@ SUPPORTED_MODELS = {
 }
 SUPPORTED_MODEL_NAMES = tuple(SUPPORTED_MODELS.keys())
 SUPPORTED_BATCH_SIZES = (1, 4)
+MIN_TARGET_WIDTH = 64
+MAX_TARGET_WIDTH = 16384
+MAX_TARGET_OUTPUT_PIXELS = 128 * 1024 * 1024
 JPEG_MAX_DIMENSION = 65535
 JPEG_OUTPUT_FORMATS = {"jpg", "jpeg"}
 PNG_OUTPUT_FORMAT = "png"
@@ -76,7 +79,8 @@ INTERNAL_CHUNK_FORMAT = "png"
 JPEG_QUALITY = 95
 FAST_MODEL_NAME = "realesr-animevideov3"
 FAST_JPEG_QUALITY = 100
-FAST_JPEG_MAX_DIMENSION = 65500  # Pillow/libjpeg's encoder limit, below JPEG's 16-bit header limit.
+PIL_JPEG_MAX_DIMENSION = 65500  # Below JPEG's 16-bit header limit.
+FAST_JPEG_MAX_DIMENSION = PIL_JPEG_MAX_DIMENSION
 MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
@@ -266,6 +270,7 @@ class PendingUpscaleRequest:
     preferred_output_format: str | None
     batch_size: int
     is_chunked: bool
+    target_width: int = 0
     manga_title: str | None = None
     chapter_title: str | None = None
     page_index: int | None = None
@@ -281,13 +286,14 @@ class PendingUpscaleRequest:
     canceled_reason: str | None = None
 
     @property
-    def batch_key(self) -> tuple[str, str, int, str] | None:
+    def batch_key(self) -> tuple[str, str, int, int, str] | None:
         if self.is_chunked or self.preferred_output_format is None or self.batch_size <= 1:
             return None
         return (
             self.model_name,
             self.preferred_output_format,
             self.native_scale,
+            self.target_width,
             self.chapter_display_label or "",
         )
 
@@ -324,6 +330,7 @@ class ChapterUpscaleJob:
     input_dir: Path
     output_dir: Path
     pages: dict[int, PreparedChapterPage]
+    target_width: int = 0
     manga_title: str | None = None
     chapter_title: str | None = None
     client_id: str | None = None
@@ -442,19 +449,24 @@ class ReaderAiServer(ThreadingHTTPServer):
         total_pages: int | None = None,
         client_id: str | None = None,
         scope_id: int | None = None,
+        target_width: int = 0,
     ) -> ProcessedImage:
+        _validate_target_width(target_width)
         if self.config.mode == "mock_copy":
-            return ProcessedImage(body, output_format)
+            result = ProcessedImage(body, output_format)
+            return _finish_width_output(result, model_name, output_format, body, target_width) if target_width else result
 
         native_scale = _resolve_model_scale(
             model_name=model_name,
             default_scale=self.config.scale,
         )
+        _validate_width_source(body, native_scale, target_width)
         target_scale = native_scale
         is_chunked = _requires_chunked_upscale(
             body=body,
             native_scale=native_scale,
             target_scale=target_scale,
+            target_width=target_width,
         )
         preferred_output_format = None if is_chunked else _select_output_format(
             body=body,
@@ -472,6 +484,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             preferred_output_format=preferred_output_format,
             batch_size=batch_size,
             is_chunked=is_chunked,
+            target_width=target_width,
             manga_title=manga_title,
             chapter_title=chapter_title,
             page_index=page_index,
@@ -505,7 +518,9 @@ class ReaderAiServer(ThreadingHTTPServer):
         scope_id: int | None = None,
         chapter_page_count: int | None = None,
         priority_count: int = 1,
+        target_width: int = 0,
     ) -> tuple[ChapterUpscaleJob, bool]:
+        _validate_target_width(target_width)
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
 
@@ -525,6 +540,9 @@ class ReaderAiServer(ThreadingHTTPServer):
             if not pages:
                 raise ValueError("Chapter archive did not contain any image pages")
             priority_count = _resolve_chapter_priority_count(priority_count, len(pages))
+            if target_width:
+                for page in pages.values():
+                    _validate_width_source(page.input_path.read_bytes(), native_scale, target_width)
         except Exception:
             shutil.rmtree(workspace, ignore_errors=True)
             raise
@@ -540,6 +558,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             client_id=client_id,
             scope_id=scope_id,
             priority_count=priority_count,
+            target_width=target_width,
         )
         if reusable_job is not None:
             shutil.rmtree(workspace, ignore_errors=True)
@@ -557,6 +576,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             input_dir=input_dir,
             output_dir=output_dir,
             pages=pages,
+            target_width=target_width,
             manga_title=manga_title,
             chapter_title=chapter_title,
             client_id=client_id,
@@ -589,8 +609,10 @@ class ReaderAiServer(ThreadingHTTPServer):
         chapter_page_count: int | None = None,
         chapter_mode: str = "classic",
         priority_count: int = 1,
+        target_width: int = 0,
     ) -> ChapterUpscaleJob:
         """Register immediately, then download source images in the background."""
+        _validate_target_width(target_width)
         chapter_mode = _resolve_chapter_mode(chapter_mode)
         indexes = [int(item["page_index"]) for item in pages]
         if not indexes or any(index < 0 for index in indexes) or len(set(indexes)) != len(indexes):
@@ -623,6 +645,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             input_dir=input_dir,
             output_dir=output_dir,
             pages=placeholders,
+            target_width=target_width,
             manga_title=manga_title,
             chapter_title=chapter_title,
             client_id=client_id,
@@ -1011,6 +1034,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                 "state": "cancelled" if cancelled else "failed" if job.error is not None
                          else "completed" if job.completed.is_set() and not job.delivery_pending else "running",
                 "page_count": job.total_pages,
+                "target_width": job.target_width,
                 "ready_count": len(ready),
                 "ready_indices": sorted(ready),
                 "priority_count": job.priority_count,
@@ -1031,6 +1055,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         client_id: str | None,
         scope_id: int | None,
         priority_count: int = 1,
+        target_width: int = 0,
     ) -> ChapterUpscaleJob | None:
         if not client_id or scope_id is None:
             return None
@@ -1049,6 +1074,8 @@ class ReaderAiServer(ThreadingHTTPServer):
                 if job.client_id != client_id or job.scope_id != scope_id:
                     continue
                 if job.model_name != model_name:
+                    continue
+                if job.target_width != target_width:
                     continue
                 if _sanitize_extension(job.requested_output_format) != normalized_output_format:
                     continue
@@ -1247,7 +1274,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         output = job.resolve_output_path(page_index)
         if output is None or job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
             return
-        needs_encode = (job.model_name == FAST_MODEL_NAME
+        needs_encode = job.target_width > 0 or (job.model_name == FAST_MODEL_NAME
                         and _sanitize_extension(job.requested_output_format) in JPEG_OUTPUT_FORMATS
                         and _sanitize_extension(output.suffix) == PNG_OUTPUT_FORMAT)
         with job.state_lock:
@@ -1270,9 +1297,10 @@ class ReaderAiServer(ThreadingHTTPServer):
         try:
             if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
                 return
-            result = _finish_fast_output(
+            result = _finish_width_output(
                 ProcessedImage(source.read_bytes(), _sanitize_extension(source.suffix)),
                 model_name=job.model_name, requested_output_format=job.requested_output_format,
+                source_body=job.pages[page_index].input_path.read_bytes(), target_width=job.target_width,
                 cancel_event=job.cancel_event,
             )
             directory = job.workspace / "delivery"
@@ -1522,6 +1550,47 @@ class ReaderAiServer(ThreadingHTTPServer):
         if not model_dir.is_dir():
             raise RuntimeError(f"Model directory not found: {model_dir}")
 
+        chunked_count = 0
+        directory_pages = []
+        for page in pages:
+            body = page.input_path.read_bytes()
+            if not _requires_chunked_upscale(body, job.native_scale, job.native_scale, job.target_width):
+                directory_pages.append(page)
+                continue
+            workspace = job.workspace / f"chunked-page-{page.page_index:04d}"
+            workspace.mkdir(parents=True, exist_ok=True)
+            result = _process_single_request_in_workspace(
+                config=self.config, workspace=workspace, process_registry=self,
+                request=PendingUpscaleRequest(
+                    request_id=f"{job.request_id}/page-{page.page_index}/chunked",
+                    body=body, input_format=page.input_format,
+                    requested_output_format=job.requested_output_format, model_name=job.model_name,
+                    native_scale=job.native_scale, target_width=job.target_width,
+                    preferred_output_format=None, batch_size=1, is_chunked=True,
+                    client_id=job.client_id, scope_id=job.scope_id, cancel_event=job.cancel_event,
+                ),
+            )
+            (output_dir / f"{page.input_path.stem}.{result.output_format}").write_bytes(result.bytes)
+            chunked_count += 1
+        pages = directory_pages
+        if not pages:
+            return chunked_count
+
+        inference_format = _inference_output_format(job.model_name, job.batch_output_format)
+        if job.target_width or chunked_count:
+            # Keep originals for retries, upload reuse checks and final geometry.
+            inference_dir = input_dir.with_name(input_dir.name + "-width")
+            inference_dir.mkdir(parents=True, exist_ok=True)
+            for page in pages:
+                body, extension = _prepare_width_input(
+                    page.input_path.read_bytes(), page.input_format, job.native_scale,
+                    job.target_width, f"{job.request_id}/page-{page.page_index}",
+                )
+                (inference_dir / f"{page.input_path.stem}.{extension}").write_bytes(body)
+            input_dir = inference_dir
+            if job.target_width:
+                inference_format = PNG_OUTPUT_FORMAT
+
         command = [
             str(binary),
             "-i",
@@ -1535,7 +1604,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             "-m",
             str(model_dir),
             "-f",
-            _inference_output_format(job.model_name, job.batch_output_format),
+            inference_format,
             "-j",
             self.config.jobs,
         ]
@@ -1548,7 +1617,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
                 f"[{job.request_id}] {job.display_label} - Starting chapter batch "
                 f"({len(pages)} pages, input=directory, priority={job.priority_count}, "
-                f"{job.model_name} x{job.native_scale} -> {job.batch_output_format})"
+                f"{job.model_name} x{job.native_scale}, target_width={job.target_width} -> {job.batch_output_format})"
             ),
         )
         completed = _run_logged_subprocess(
@@ -1585,12 +1654,14 @@ class ReaderAiServer(ThreadingHTTPServer):
                             requested_output_format=job.requested_output_format,
                             model_name=job.model_name,
                             native_scale=job.native_scale,
+                            target_width=job.target_width,
                             preferred_output_format=None,
                             batch_size=1,
                             is_chunked=_requires_chunked_upscale(
                                 body=fallback_body,
                                 native_scale=job.native_scale,
                                 target_scale=job.native_scale,
+                                target_width=job.target_width,
                             ),
                             client_id=job.client_id,
                             scope_id=job.scope_id,
@@ -1639,12 +1710,14 @@ class ReaderAiServer(ThreadingHTTPServer):
                     requested_output_format=job.requested_output_format,
                     model_name=job.model_name,
                     native_scale=job.native_scale,
+                    target_width=job.target_width,
                     preferred_output_format=None,
                     batch_size=1,
                     is_chunked=_requires_chunked_upscale(
                         body=fallback_body,
                         native_scale=job.native_scale,
                         target_scale=job.native_scale,
+                        target_width=job.target_width,
                     ),
                     client_id=job.client_id,
                     scope_id=job.scope_id,
@@ -1658,7 +1731,7 @@ class ReaderAiServer(ThreadingHTTPServer):
             fallback_output_path.write_bytes(processed_image.bytes)
         if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
             raise RuntimeError(job.error.args[0] if job.error is not None else "Chapter upscale was canceled")
-        return safe_fallback_count + len(fallback_pages)
+        return chunked_count + safe_fallback_count + len(fallback_pages)
 
     def _cleanup_expired_chapter_jobs(self) -> None:
         cutoff = time.time() - CHAPTER_JOB_RETENTION_SECONDS
@@ -1744,6 +1817,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "supported_chapter_modes": list(SUPPORTED_CHAPTER_MODES),
                 "default_chapter_mode": "classic",
                 "model_profiles": SUPPORTED_MODELS,
+                "target_width": {"native": 0, "minimum": MIN_TARGET_WIDTH, "maximum": MAX_TARGET_WIDTH},
                 "companion_release_tag": current_release_tag,
                 "auto_update_enabled": current_release_tag is not None,
             }
@@ -1804,7 +1878,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         self.server.note_chapter_page_ready(job_id, int(page_index_text))
-        self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
+        with self.server._chapter_jobs_lock:
+            target_width = self.server._chapter_jobs[job_id].target_width
+        self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format, target_width=target_width)
 
     def _handle_chapter_stream_request(self, job_id: str) -> None:
         if not self._authorize():
@@ -1993,6 +2069,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            target_width = _parse_target_width_header(self.headers.get("X-Reader-AI-Target-Width"))
             model_name = _resolve_requested_model_name(
                 requested_model_name=requested_model_name,
                 default_model_name=self.server.config.model_name,
@@ -2010,7 +2087,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
-        self.server.sync_client_scope(client_id, scope_id)
+        if not target_width:
+            self.server.sync_client_scope(client_id, scope_id)
         page_index = _parse_optional_int_header(page_index_header)
         total_pages = _parse_optional_int_header(total_pages_header)
         request_id = self.server.next_request_id()
@@ -2032,24 +2110,34 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                     f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
                     f"[{request_id}] Accepted upscale request: {body_size} bytes "
                     f"input={input_format} output={output_format} model={model_name} "
-                    f"batch={batch_size} from {self.client_address[0]}"
+                    f"batch={batch_size} target_width={target_width} from {self.client_address[0]}"
                 ),
                 console=False,
             )
         else:
             self.log_message(
-                "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s batch=%d from %s",
+                "[%s] Accepted upscale request: %d bytes input=%s output=%s model=%s batch=%d target_width=%d from %s",
                 request_id,
                 body_size,
                 input_format,
                 output_format,
                 model_name,
                 batch_size,
+                target_width,
                 self.client_address[0],
             )
 
         started_at = time.perf_counter()
         body = self.rfile.read(body_size)
+        try:
+            _validate_width_source(
+                body, _resolve_model_scale(model_name, self.server.config.scale), target_width,
+            )
+        except ValueError as exc:
+            self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if target_width:
+            self.server.sync_client_scope(client_id, scope_id)
         try:
             processed_image = self.server.process_image(
                 request_id,
@@ -2064,6 +2152,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 total_pages=total_pages,
                 client_id=client_id,
                 scope_id=scope_id,
+                target_width=target_width,
             )
         except subprocess.TimeoutExpired as exc:
             self.log_message("[%s] Upscale timeout after %s seconds", request_id, exc.timeout)
@@ -2097,7 +2186,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 model_name,
                 processed_image.output_format,
             )
-        self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format)
+        self._send_binary(HTTPStatus.OK, processed_image.bytes, processed_image.output_format, target_width=target_width)
 
     def _handle_chapter_upscale_request(self) -> None:
         if not self._authorize():
@@ -2138,6 +2227,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, "Unsupported output format")
             return
         try:
+            target_width = _parse_target_width_header(self.headers.get("X-Reader-AI-Target-Width"))
             model_name = _resolve_requested_model_name(
                 requested_model_name=requested_model_name,
                 default_model_name=self.server.config.model_name,
@@ -2181,6 +2271,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 scope_id=scope_id,
                 chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
                 priority_count=priority_count,
+                target_width=target_width,
             )
         except ValueError as exc:
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
@@ -2214,7 +2305,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] "
                 f"[{request_id}] Accepted chapter upscale request: {chapter_job.display_label} "
                 f"({chapter_job.total_pages} pages, route=uploaded-zip, priority={chapter_job.priority_count}, "
-                f"{body_size} bytes, model={model_name}, output={output_format}) "
+                f"{body_size} bytes, model={model_name}, target_width={target_width}, output={output_format}) "
                 f"from {self.client_address[0]}"
             ),
             console=False,
@@ -2229,12 +2320,18 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "output_format": chapter_job.batch_output_format,
                 "reused_existing_job": reused_existing_job,
                 "priority_count": chapter_job.priority_count,
+                "target_width": chapter_job.target_width,
             },
         )
 
     def _handle_direct_chapter_upscale_request(self) -> None:
         if not self._authorize():
             self._reject_unauthorized()
+            return
+        try:
+            target_width = _parse_target_width_header(self.headers.get("X-Reader-AI-Target-Width"))
+        except ValueError as exc:
+            self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
         try:
             body_size = int(self.headers.get("Content-Length") or "0")
@@ -2278,16 +2375,19 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 chapter_page_count=_parse_optional_int_header((self.headers.get("X-Reader-AI-Page-Count") or "").strip()),
                 chapter_mode=chapter_mode,
                 priority_count=priority_count,
+                target_width=target_width,
             )
             _emit_log_line(
                 f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] "
-                f"Accepted direct download job: {chapter_job.display_label} ({chapter_job.total_pages} pages, {chapter_mode})",
+                f"Accepted direct download job: {chapter_job.display_label} "
+                f"({chapter_job.total_pages} pages, {chapter_mode}, target_width={target_width})",
             )
             self._send_json(HTTPStatus.ACCEPTED, {
                 "job_id": chapter_job.job_id,
                 "page_count": len(chapter_job.pages),
                 "chapter_mode": chapter_mode,
                 "priority_count": chapter_job.priority_count,
+                "target_width": chapter_job.target_width,
                 "reused_existing_job": False,
             })
         except Exception as exc:  # noqa: BLE001
@@ -2337,12 +2437,14 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             headers={"Connection": "close"},
         )
 
-    def _send_binary(self, status: HTTPStatus, body: bytes, output_format: str) -> None:
+    def _send_binary(self, status: HTTPStatus, body: bytes, output_format: str, target_width: int | None = None) -> None:
         mime = mimetypes.types_map.get(f".{output_format}", "application/octet-stream")
         self.send_response(status)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if target_width is not None:
+            self.send_header("X-Reader-AI-Target-Width", str(target_width))
         self.end_headers()
         self.wfile.write(body)
 
@@ -2356,6 +2458,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if type(payload.get("target_width")) is int:
+            self.send_header("X-Reader-AI-Target-Width", str(payload["target_width"]))
         self.end_headers()
         self.wfile.write(body)
 
@@ -2407,6 +2511,22 @@ def _process_single_request_in_workspace(
 ) -> ProcessedImage:
     if request.cancel_event.is_set():
         raise RuntimeError(request.canceled_reason or "Remote AI work was canceled")
+    if request.target_width:
+        body, input_format = _prepare_width_input(
+            request.body, request.input_format, request.native_scale, request.target_width, request.request_id,
+        )
+        # Run exactly one native model pass at the requested working width.
+        # Keep the inference pixels lossless until the exact final rounding.
+        inference_request = replace(
+            request, body=body, input_format=input_format, target_width=0,
+            requested_output_format=PNG_OUTPUT_FORMAT, preferred_output_format=PNG_OUTPUT_FORMAT,
+            is_chunked=_requires_chunked_upscale(body, request.native_scale, request.native_scale),
+        )
+        result = _process_single_request_in_workspace(config, workspace, inference_request, process_registry)
+        return _finish_width_output(
+            result, model_name=request.model_name, requested_output_format=request.requested_output_format,
+            source_body=request.body, target_width=request.target_width, cancel_event=request.cancel_event,
+        )
     if request.is_chunked:
         return _run_chunked_subprocess(
             config=config,
@@ -2524,13 +2644,18 @@ def _run_subprocess_batch(
     batch_output_format = _inference_output_format(
         model_name, requests[0].preferred_output_format or PNG_OUTPUT_FORMAT,
     )
+    if requests[0].target_width:
+        batch_output_format = PNG_OUTPUT_FORMAT
 
     stems_by_request_id: dict[str, str] = {}
     for index, request in enumerate(requests, start=1):
         stem = f"{index:02d}-{request.request_id}"
         stems_by_request_id[request.request_id] = stem
-        input_path = input_dir / f"{stem}.{_sanitize_extension(request.input_format)}"
-        input_path.write_bytes(request.body)
+        body, input_format = _prepare_width_input(
+            request.body, request.input_format, request.native_scale, request.target_width, request.request_id,
+        )
+        input_path = input_dir / f"{stem}.{_sanitize_extension(input_format)}"
+        input_path.write_bytes(body)
 
     command = [
         str(binary),
@@ -2580,12 +2705,14 @@ def _run_subprocess_batch(
                     requested_output_format=request.requested_output_format,
                     model_name=request.model_name,
                     native_scale=request.native_scale,
+                    target_width=request.target_width,
                     preferred_output_format=request.preferred_output_format,
                     batch_size=1,
                     is_chunked=_requires_chunked_upscale(
                         body=request.body,
                         native_scale=request.native_scale,
                         target_scale=request.native_scale,
+                        target_width=request.target_width,
                     ),
                     manga_title=request.manga_title,
                     chapter_title=request.chapter_title,
@@ -2593,6 +2720,7 @@ def _run_subprocess_batch(
                     total_pages=request.total_pages,
                     client_id=request.client_id,
                     scope_id=request.scope_id,
+                    cancel_event=request.cancel_event,
                 )
                 results[request.request_id] = _process_single_request_in_workspace(
                     config=safe_config,
@@ -2616,13 +2744,15 @@ def _run_subprocess_batch(
             missing_requests.append(request)
             continue
         try:
-            results[request.request_id] = _finish_fast_output(
+            results[request.request_id] = _finish_width_output(
                 ProcessedImage(
                     bytes=produced_output_path.read_bytes(),
                     output_format=_sanitize_extension(produced_output_path.suffix),
                 ),
                 model_name=request.model_name,
                 requested_output_format=request.requested_output_format,
+                source_body=request.body,
+                target_width=request.target_width,
                 cancel_event=request.cancel_event,
             )
         except RuntimeError:
@@ -2641,12 +2771,14 @@ def _run_subprocess_batch(
             requested_output_format=request.requested_output_format,
             model_name=request.model_name,
             native_scale=request.native_scale,
+            target_width=request.target_width,
             preferred_output_format=request.preferred_output_format,
             batch_size=1,
             is_chunked=_requires_chunked_upscale(
                 body=request.body,
                 native_scale=request.native_scale,
                 target_scale=request.native_scale,
+                target_width=request.target_width,
             ),
             manga_title=request.manga_title,
             chapter_title=request.chapter_title,
@@ -2654,6 +2786,7 @@ def _run_subprocess_batch(
             total_pages=request.total_pages,
             client_id=request.client_id,
             scope_id=request.scope_id,
+            cancel_event=request.cancel_event,
         )
         results[request.request_id] = _process_single_request_in_workspace(
             config=config,
@@ -3012,10 +3145,17 @@ def _build_safe_vulkan_retry_config(config: Config) -> Config:
     return replace(config, tile_size=safe_tile_size, jobs="1:1:1", batch_size=1)
 
 
-def _requires_chunked_upscale(body: bytes, native_scale: int, target_scale: int) -> bool:
+def _requires_chunked_upscale(body: bytes, native_scale: int, target_scale: int, target_width: int = 0) -> bool:
     image_size = _decode_image_size(body)
     if image_size is None:
         return False
+
+    if target_width:
+        inference_size, final_size = _width_geometry(image_size, native_scale, target_width)
+        return max(
+            inference_size.width * native_scale, inference_size.height * native_scale,
+            final_size.width, final_size.height,
+        ) > MAX_SINGLE_OUTPUT_DIMENSION
 
     native_output_width = image_size.width * native_scale
     native_output_height = image_size.height * native_scale
@@ -3060,7 +3200,12 @@ def _decode_image_size(body: bytes) -> ImageSize | None:
     if len(body) >= 4 and body[0] == 0xFF and body[1] == 0xD8:
         return _decode_jpeg_size(body)
 
-    return None
+    try:
+        with Image.open(BytesIO(body)) as image:
+            return ImageSize(*image.size)
+    except (OSError, ValueError, SyntaxError):
+        return None
+
 
 
 def _decode_jpeg_size(body: bytes) -> ImageSize | None:
@@ -3217,6 +3362,97 @@ def _inference_output_format(model_name: str, output_format: str) -> str:
     if model_name == FAST_MODEL_NAME and _sanitize_extension(output_format) in JPEG_OUTPUT_FORMATS:
         return PNG_OUTPUT_FORMAT
     return output_format
+
+
+def _validate_target_width(target_width: int) -> int:
+    if type(target_width) is not int or (target_width != 0 and not MIN_TARGET_WIDTH <= target_width <= MAX_TARGET_WIDTH):
+        raise ValueError(f"Target width must be 0 (native) or an integer from {MIN_TARGET_WIDTH} to {MAX_TARGET_WIDTH}")
+    return target_width
+
+
+def _parse_target_width_header(value: str | None) -> int:
+    if value is None:
+        return 0
+    if not re.fullmatch(r"[0-9]+", value.strip()):
+        raise ValueError(f"Target width must be 0 (native) or an integer from {MIN_TARGET_WIDTH} to {MAX_TARGET_WIDTH}")
+    return _validate_target_width(int(value.strip()))
+
+
+def _width_geometry(source: ImageSize, native_scale: int, target_width: int) -> tuple[ImageSize, ImageSize]:
+    if source.width < 1 or source.height < 1:
+        raise ValueError("Source image dimensions must be positive")
+    if source.width * source.height > MAX_TARGET_OUTPUT_PIXELS:
+        raise ValueError(f"Source image exceeds the {MAX_TARGET_OUTPUT_PIXELS} pixel limit for custom width processing")
+    inference_width = (target_width + native_scale - 1) // native_scale
+    # Round both heights from the original aspect ratio, so inference rounding
+    # cannot accumulate into a visibly stretched long page.
+    def height_at(width: int) -> int:
+        return max(1, (source.height * width + source.width // 2) // source.width)
+    inference = ImageSize(inference_width, height_at(inference_width))
+    final = ImageSize(target_width, height_at(target_width))
+    if max(inference.width * inference.height * native_scale * native_scale,
+           final.width * final.height) > MAX_TARGET_OUTPUT_PIXELS:
+        raise ValueError(
+            f"Target width {target_width} produces an image exceeding the "
+            f"{MAX_TARGET_OUTPUT_PIXELS} pixel limit; choose a smaller width for this page"
+        )
+    return inference, final
+
+
+def _validate_width_source(body: bytes, native_scale: int, target_width: int) -> None:
+    if not target_width:
+        return
+    source = _decode_image_size(body)
+    if source is None:
+        raise ValueError("Cannot read source image dimensions for target width")
+    _width_geometry(source, native_scale, target_width)
+
+
+def _prepare_width_input(
+    body: bytes, input_format: str, native_scale: int, target_width: int, request_id: str,
+) -> tuple[bytes, str]:
+    if not target_width:
+        return body, input_format
+    with Image.open(BytesIO(body)) as image:
+        inference, final = _width_geometry(ImageSize(*image.size), native_scale, target_width)
+        _emit_log_line(
+            f"[{request_id}] Width sizing: source={image.width}x{image.height}, "
+            f"inference={inference.width}x{inference.height} x{native_scale}, "
+            f"output={final.width}x{final.height}", console=False,
+        )
+        if image.size == (inference.width, inference.height):
+            return body, input_format
+        with image.resize((inference.width, inference.height), Image.Resampling.LANCZOS) as resized:
+            return _encode_pil_image(resized, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
+
+
+def _finish_width_output(
+    result: ProcessedImage, model_name: str, requested_output_format: str,
+    source_body: bytes, target_width: int, cancel_event: threading.Event | None = None,
+) -> ProcessedImage:
+    if not target_width:
+        return _finish_fast_output(result, model_name, requested_output_format, cancel_event)
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Remote AI work was canceled")
+    source = _decode_image_size(source_body)
+    if source is None:
+        raise ValueError("Cannot read source image dimensions for target width")
+    _, final = _width_geometry(source, 1, target_width)
+    output_format = _sanitize_extension(requested_output_format)
+    if ((output_format in JPEG_OUTPUT_FORMATS and max(final.width, final.height) > PIL_JPEG_MAX_DIMENSION)
+            or (output_format == "webp" and max(final.width, final.height) > 16383)):
+        output_format = PNG_OUTPUT_FORMAT
+    with Image.open(BytesIO(result.bytes)) as image:
+        if image.size == (final.width, final.height) and _sanitize_extension(result.output_format) == output_format:
+            return result
+        if image.size == (final.width, final.height):
+            encoded = _encode_pil_image(image, output_format, model_name)
+        else:
+            with image.resize((final.width, final.height), Image.Resampling.LANCZOS) as resized:
+                encoded = _encode_pil_image(resized, output_format, model_name)
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Remote AI work was canceled")
+    return ProcessedImage(encoded, output_format)
 
 
 def _finish_fast_output(

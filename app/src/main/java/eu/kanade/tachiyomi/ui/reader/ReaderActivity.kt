@@ -260,6 +260,7 @@ class ReaderActivity : BaseActivity() {
                 onChangeRemoteAiModel = ::setRemoteAiModelFromSettings,
                 onChangeRemoteAiBatchMode = ::setRemoteAiBatchModeFromSettings,
                 onChangeRemoteAiChapterMode = ::setRemoteAiChapterModeFromSettings,
+                onChangeRemoteAiTargetWidth = ::setRemoteAiTargetWidthFromSettings,
             )
         }
 
@@ -594,6 +595,26 @@ class ReaderActivity : BaseActivity() {
         showUpscaleStateToast(enabled = true)
     }
 
+    private fun setRemoteAiTargetWidthFromSettings(model: ReaderPreferences.RemoteAiModel, width: Int) {
+        if (readerPreferences.remoteAiTargetWidth(model).get() == width) return
+        readerPreferences.setRemoteAiTargetWidth(model, width)
+        if (!readerPreferences.upscalePagesX2.get() ||
+            readerPreferences.selectedAiBackendMode() != ReaderPreferences.AiBackendMode.REMOTE ||
+            readerPreferences.remoteAiModel.get() != model
+        ) {
+            return
+        }
+
+        viewModel.onUpscaleStateChanged(true)
+        viewModel.prepareCurrentPageForUpscaleReload()
+        viewModel.prepareCurrentChapterForUpscalePrefetch()
+        viewModel.state.value.viewer?.refreshForImageConfig(
+            forceBlockingCurrentPage = true,
+            keepCurrentImageUntilReady = true,
+        )
+        showUpscaleStateToast(enabled = true)
+    }
+
     private fun setRemoteAiBatchModeFromSettings(mode: ReaderPreferences.RemoteAiBatchMode) {
         if (readerPreferences.remoteAiBatchMode.get() == mode) {
             return
@@ -649,7 +670,13 @@ class ReaderActivity : BaseActivity() {
             -> stringResource(MR.strings.reader_ai_backend_gpu)
         }
         val modelSuffix = if (backendMode == ReaderPreferences.AiBackendMode.REMOTE) {
-            ", ${stringResource(readerPreferences.remoteAiModel.get().titleRes)}"
+            val config = readerPreferences.remoteAiConfig()
+            val width = if (config.targetWidth == 0) {
+                stringResource(MR.strings.reader_ai_target_width_native)
+            } else {
+                stringResource(MR.strings.reader_ai_target_width_pixels, config.targetWidth)
+            }
+            ", ${stringResource(config.model.titleRes)}, $width"
         } else {
             ""
         }

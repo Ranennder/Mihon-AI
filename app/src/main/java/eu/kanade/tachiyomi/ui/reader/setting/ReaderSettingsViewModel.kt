@@ -20,6 +20,7 @@ class ReaderSettingsViewModel(
     private val onChangeRemoteAiModel: (ReaderPreferences.RemoteAiModel) -> Unit,
     private val onChangeRemoteAiBatchMode: (ReaderPreferences.RemoteAiBatchMode) -> Unit,
     private val onChangeRemoteAiChapterMode: (ReaderPreferences.RemoteAiChapterMode) -> Unit,
+    private val onChangeRemoteAiTargetWidth: (ReaderPreferences.RemoteAiModel, Int) -> Unit,
     val preferences: ReaderPreferences = Injekt.get(),
 ) : ViewModel() {
 
@@ -43,6 +44,10 @@ class ReaderSettingsViewModel(
 
     fun setRemoteAiModel(mode: ReaderPreferences.RemoteAiModel) {
         onChangeRemoteAiModel(mode)
+    }
+
+    fun setRemoteAiTargetWidth(model: ReaderPreferences.RemoteAiModel, width: Int) {
+        onChangeRemoteAiTargetWidth(model, width)
     }
 
     fun setRemoteAiBatchMode(mode: ReaderPreferences.RemoteAiBatchMode) {
