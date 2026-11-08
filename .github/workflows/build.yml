@@ -58,6 +58,7 @@ jobs:
           test -x "$build_tools/apksigner"
           test -x "$build_tools/aapt"
           mkdir -p validation/android
+          cp google-drive-oauth.json validation/android/google-drive-oauth.json
           count=0
           for apk in app/build/outputs/apk/release/*-release.apk; do
             test -f "$apk"
