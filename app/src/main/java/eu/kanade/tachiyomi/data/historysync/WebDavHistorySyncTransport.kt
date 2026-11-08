@@ -127,7 +127,10 @@ class WebDavHistorySyncTransport(
             OkHttpClient.Builder()
                 .cookieJar(CookieJar.NO_COOKIES)
                 .followRedirects(false).followSslRedirects(false)
-                .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS)
+                .connectTimeout(
+                    20,
+                    TimeUnit.SECONDS,
+                ).readTimeout(45, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS)
                 .build()
         }
 
@@ -178,11 +181,13 @@ class WebDavHistorySyncTransport(
                     require(responseHrefs.size == 1 && responseHrefs.single().isNotEmpty()) {
                         "Incomplete WebDAV response"
                     }
-                    require(responseStatuses.all { status ->
-                        val parts = status.split(Regex("[ \\t]+"))
-                        parts.size >= 2 && Regex("HTTP/[0-9]+(?:\\.[0-9]+)?").matches(parts[0]) &&
-                            parts[1].length == 3 && parts[1].toIntOrNull()?.let { it in 200..299 } == true
-                    }) { "WebDAV returned a partial listing" }
+                    require(
+                        responseStatuses.all { status ->
+                            val parts = status.split(Regex("[ \\t]+"))
+                            parts.size >= 2 && Regex("HTTP/[0-9]+(?:\\.[0-9]+)?").matches(parts[0]) &&
+                                parts[1].length == 3 && parts[1].toIntOrNull()?.let { it in 200..299 } == true
+                        },
+                    ) { "WebDAV returned a partial listing" }
                     val url = folder.resolve(responseHrefs.single())
                     if (url != null && sameOrigin(folder, url) && url.username.isEmpty() && url.password.isEmpty() &&
                         url.query == null && url.fragment == null &&

@@ -78,6 +78,7 @@ class HistorySyncManager internal constructor(
 
     @Volatile private var running: Job? = null
     private var started = false
+
     @Volatile private var isForeground = false
     private var changingAccount = false
     private var automaticEnabled: Boolean? = null

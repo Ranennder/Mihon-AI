@@ -104,8 +104,11 @@ class WebDavHistorySyncTransportTest {
             response(chain.request(), 204, "")
         }.build()
         val invalid = listOf(
-            account.copy(username = ""), account.copy(username = "reader:other"),
-            account.copy(username = "reader\n"), account.copy(password = ""), account.copy(password = "secret\r"),
+            account.copy(username = ""),
+            account.copy(username = "reader:other"),
+            account.copy(username = "reader\n"),
+            account.copy(password = ""),
+            account.copy(password = "secret\r"),
         )
         for (credentials in invalid) {
             assertThrows(IllegalArgumentException::class.java) { WebDavHistorySyncTransport(credentials, client) }
@@ -179,7 +182,8 @@ class WebDavHistorySyncTransportTest {
                     response(request, 405, "")
                 } else {
                     response(
-                        request, 207,
+                        request,
+                        207,
                         "<d:multistatus xmlns:d='DAV:'><d:response>$partial</d:response></d:multistatus>",
                     )
                 }
