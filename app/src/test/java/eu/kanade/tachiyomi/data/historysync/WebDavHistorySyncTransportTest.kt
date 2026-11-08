@@ -92,6 +92,24 @@ class WebDavHistorySyncTransportTest {
     }
 
     @Test
+    fun `invalid Basic credentials are rejected before any request`() {
+        val seen = mutableListOf<Request>()
+        val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+            seen += chain.request()
+            response(chain.request(), 204, "")
+        }.build()
+        val invalid = listOf(
+            account.copy(username = ""), account.copy(username = "reader:other"),
+            account.copy(username = "reader\n"), account.copy(password = ""), account.copy(password = "secret\r"),
+        )
+        for (credentials in invalid) {
+            assertThrows(IllegalArgumentException::class.java) { WebDavHistorySyncTransport(credentials, client) }
+        }
+        assertTrue(seen.isEmpty())
+        client.dispatcher.executorService.shutdown()
+    }
+
+    @Test
     fun `invalid filename writer mismatch aborts pull without any PUT`() = runBlocking {
         val methods = mutableListOf<String>()
         val other = document.copy(deviceId = "00000000-0000-4000-8000-000000000002")
@@ -136,6 +154,44 @@ class WebDavHistorySyncTransportTest {
         assertThrows(IllegalArgumentException::class.java) {
             WebDavHistorySyncTransport.validateRoot("https://user:password@dav.example/")
         }
+    }
+
+    @Test
+    fun `partial multistatus cannot become an empty successful pull`() = runBlocking {
+        val responses = listOf(
+            "<d:href>device-$device.json</d:href><d:status>HTTP/1.1 403 Forbidden</d:status>",
+            "<d:href>device-$device.json</d:href><d:propstat><d:prop/>" +
+                "<d:status>HTTP/1.1 500 Failed</d:status></d:propstat>",
+            "<d:status>HTTP/1.1 200 OK</d:status>",
+            "<d:href>device-$device.json</d:href><d:href>device-$device.json</d:href>",
+        )
+        for (partial in responses) {
+            val methods = mutableListOf<String>()
+            val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+                val request = chain.request()
+                methods += request.method
+                if (request.method == "MKCOL") {
+                    response(request, 405, "")
+                } else {
+                    response(
+                        request, 207,
+                        "<d:multistatus xmlns:d='DAV:'><d:response>$partial</d:response></d:multistatus>",
+                    )
+                }
+            }.build()
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { WebDavHistorySyncTransport(account, client).pull() }
+            }
+            assertEquals(listOf("MKCOL", "PROPFIND"), methods)
+            client.dispatcher.executorService.shutdown()
+        }
+        val successful = "<d:multistatus xmlns:d='DAV:'><d:response>" +
+            "<d:href>device-$device.json</d:href><d:propstat><d:prop/>" +
+            "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"
+        assertEquals(
+            listOf("device-$device.json"),
+            WebDavHistorySyncTransport.replicaNames(successful.toByteArray(), folder),
+        )
     }
 
     @Test

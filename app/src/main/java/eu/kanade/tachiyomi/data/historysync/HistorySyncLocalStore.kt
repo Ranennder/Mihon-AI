@@ -70,47 +70,50 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
         repeat(5) {
             currentCoroutineContext().ensureActive()
             val snapshot = readSnapshot()
+            // URL/login aliases can address the same physical cloud folder.
+            // Scope both the filename and newly authored register stamps: two
+            // account enrollments may seed different states at the same date.
+            val replicaDevice = UUID.nameUUIDFromBytes(
+                "${snapshot.device}\n${snapshot.account}".toByteArray(Charsets.UTF_8),
+            ).toString()
             val resolved = resolve(snapshot.chapters, snapshot.pending)
+            val nativeIds = snapshot.chapters.mapTo(HashSet()) { it.id }
+            val identityCounts = resolved.values.filter { it.chapter.id in nativeIds }
+                .groupingBy { it.identity.recordId() }.eachCount()
+            val unique = resolved.filterValues { (identityCounts[it.identity.recordId()] ?: 0) <= 1 }
             val records = snapshot.records.associateByTo(sortedMapOf()) { it.id }
-            for (item in resolved.values) {
+            for (item in unique.values) {
                 val chapter = item.chapter
                 if (!chapter.read && chapter.lastPage <= 0 && (chapter.lastRead ?: 0) <= 0) continue
-                records.putIfAbsent(item.identity.recordId(), seed(item, snapshot.device))
+                records.putIfAbsent(item.identity.recordId(), seed(item, replicaDevice))
             }
             for (event in snapshot.pending) {
                 require(event.event_clock in 0..HistorySyncProtocol.MAX_TIME) {
                     "History sync clock is exhausted; pending local changes are preserved"
                 }
-                val item = resolved[event.chapter_id] ?: continue
+                val item = unique[event.chapter_id] ?: continue
                 val id = item.identity.recordId()
-                val current = records[id] ?: seed(item, snapshot.device)
+                val current = records[id] ?: seed(item, replicaDevice)
                 val changed = current.copy(
                     progress = event.progress_page?.let {
                         val total = event.progress_total ?: current.progress.totalPages?.takeIf { total -> total >= it }
-                        HistorySyncProgress(it, total, event.event_clock, snapshot.device)
+                        HistorySyncProgress(it, total, event.event_clock, replicaDevice)
                     } ?: current.progress,
                     completion = event.completion_read?.let {
-                        HistorySyncCompletion(it, event.event_clock, snapshot.device)
+                        HistorySyncCompletion(it, event.event_clock, replicaDevice)
                     } ?: current.completion,
                     history = if (event.history_changed) {
-                        HistorySyncHistory(event.history_last_read, event.event_clock, snapshot.device)
+                        HistorySyncHistory(event.history_last_read, event.event_clock, replicaDevice)
                     } else {
                         current.history
                     },
                 )
                 records[id] = HistorySyncProtocol.mergeRecord(current, changed)
             }
-            // A URL/login alias may address the same physical cloud folder.
-            // Distinct account journals must never overwrite each other's
-            // replica, even if the provider temporarily omits a listing entry.
-            val replicaDevice = UUID.nameUUIDFromBytes(
-                "${snapshot.device}\n${snapshot.account}".toByteArray(Charsets.UTF_8),
-            ).toString()
             val local = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, replicaDevice, records.values.toList())
             val merged = HistorySyncProtocol.merge(replicaDevice, local, *remote.toTypedArray())
             // Check the serialized limit before committing or applying anything.
             HistorySyncProtocol.encode(merged)
-            val nativeIds = snapshot.chapters.mapTo(HashSet()) { it.id }
             val index = resolved.values.filter { it.chapter.id in nativeIds }
                 .groupBy { it.identity.recordId() }
             var applied = 0
@@ -143,7 +146,11 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                     }
                     applied += 1
                 }
-                snapshot.pending.lastOrNull()?.let { database.historySyncQueries.removePendingThrough(it._id) }
+                // Keep ambiguous native identities in the durable outbox. A
+                // duplicate row may disappear after the source list refreshes.
+                for (event in snapshot.pending) {
+                    if (event.chapter_id in unique) database.historySyncQueries.removePending(event._id)
+                }
                 true
             }
             if (committed) return Result(merged, applied, unmatched)
@@ -205,7 +212,7 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
             }.getOrNull()
             Website(chapter, base, manga, url)
         }
-        val counts = websites.groupingBy {
+        val counts = websites.groupBy {
             Triple(
                 it.chapter.source to it.chapter.mangaUrl,
                 it.base,
@@ -213,7 +220,7 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                     HistorySyncIdentityResolver.website(url, it.base, false)
                 },
             )
-        }.eachCount()
+        }.mapValues { (_, entries) -> entries.map { it.chapter.chapterUrl }.toSet().size }
         return websites.associate { website ->
             val chapter = website.chapter
             val key = Triple(

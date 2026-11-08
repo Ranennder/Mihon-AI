@@ -68,6 +68,9 @@ SELECT count(*) FROM history_sync_outbox WHERE account_key = (SELECT active_acco
 removePendingThrough:
 DELETE FROM history_sync_outbox WHERE _id <= :id AND account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
 
+removePending:
+DELETE FROM history_sync_outbox WHERE _id = :id AND account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
 getRecords:
 SELECT * FROM history_sync_records WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY id;
 

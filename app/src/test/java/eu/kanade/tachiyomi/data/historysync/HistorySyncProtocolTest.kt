@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.data.historysync
 
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -22,6 +24,27 @@ class HistorySyncProtocolTest {
 
     private fun document(record: HistorySyncRecord, device: String = a) =
         HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, device, listOf(record))
+
+    @Test
+    fun `shared Swift and Kotlin wire fixture converges in every order and round trips`() {
+        val text = requireNotNull(javaClass.getResourceAsStream("/history-sync/merge-registers-v1.json"))
+            .bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val fixture = HistorySyncProtocol.json.parseToJsonElement(text).jsonObject
+        val documents = fixture.getValue("documents").jsonArray.map {
+            HistorySyncProtocol.decode(it.toString().toByteArray(Charsets.UTF_8))
+        }
+        val expected = HistorySyncProtocol.decode(fixture.getValue("expected").toString().toByteArray(Charsets.UTF_8))
+        assertEquals(3, documents.size)
+        documents.forEach { assertEquals(it, HistorySyncProtocol.decode(HistorySyncProtocol.encode(it))) }
+        for (x in documents.indices) {
+            for (y in documents.indices.filter { it != x }) {
+                val z = documents.indices.single { it != x && it != y }
+                val merged = HistorySyncProtocol.merge(expected.deviceId, documents[x], documents[y], documents[z])
+                assertEquals(expected, merged)
+                assertEquals(expected, HistorySyncProtocol.decode(HistorySyncProtocol.encode(merged)))
+            }
+        }
+    }
 
     @Test
     fun `independent registers retain remote completion during newer local page change`() {

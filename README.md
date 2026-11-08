@@ -27,6 +27,9 @@ Mihon AI is an Android reader built around AI-upscaled pages for manga, manhwa, 
 - On-device `GPU` mode for local and offline usage.
 - Reader caching and prefetch to keep AI pages ready ahead of you.
 - Separate Mihon AI app versioning.
+- Cloud reading-history sync with Aidoku AI on iPhone: immediate on opening,
+  every 10 seconds while active, with offline changes retained. A PC is not
+  needed for history. [Настройка двух телефонов через бесплатный Koofr](docs/HISTORY_SYNC.md).
 
 ## Download
 

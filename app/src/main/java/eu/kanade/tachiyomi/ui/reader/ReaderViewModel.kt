@@ -148,6 +148,8 @@ class ReaderViewModel @JvmOverloads constructor(
             field = value
         }
 
+    private val progressTracker = ReaderProgressTracker(restoredFromState = chapterPageIndex >= 0)
+
     /**
      * The chapter loader for the loaded manga. It'll be null until [manga] is set.
      */
@@ -466,9 +468,15 @@ class ReaderViewModel @JvmOverloads constructor(
         val selectedChapter = page.chapter
         val pages = selectedChapter.pages ?: return
 
+        val persistProgress = page.status !is Page.State.Error && progressTracker.shouldPersist(
+            chapterId = selectedChapter.chapter.id!!,
+            pageIndex = page.index,
+            pageCount = pages.size,
+        )
+
         // Save last page read and mark as read if needed
         viewModelScope.launchNonCancellable {
-            updateChapterProgress(selectedChapter, page)
+            updateChapterProgress(selectedChapter, page, persistProgress)
         }
 
         if (selectedChapter != getCurrentChapter()) {
@@ -599,7 +607,7 @@ class ReaderViewModel @JvmOverloads constructor(
      * Saves the chapter progress (last read page and whether it's read)
      * if incognito mode isn't on.
      */
-    private suspend fun updateChapterProgress(readerChapter: ReaderChapter, page: Page) {
+    private suspend fun updateChapterProgress(readerChapter: ReaderChapter, page: Page, persistProgress: Boolean) {
         val pageIndex = page.index
 
         mutableState.update {
@@ -608,7 +616,7 @@ class ReaderViewModel @JvmOverloads constructor(
         readerChapter.requestedPage = pageIndex
         chapterPageIndex = pageIndex
 
-        if (!incognitoMode && page.status !is Page.State.Error) {
+        if (persistProgress && !incognitoMode && page.status !is Page.State.Error) {
             readerChapter.chapter.last_page_read = pageIndex
 
             if (readerChapter.pages?.lastIndex == pageIndex) {

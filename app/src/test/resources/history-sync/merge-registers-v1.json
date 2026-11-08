@@ -1,0 +1,143 @@
+{
+  "format": "aidoku-mihon-history-merge-fixtures",
+  "version": 1,
+  "documents": [
+    {
+      "format": "aidoku-mihon-history",
+      "version": 1,
+      "deviceId": "00000000-0000-4000-8000-000000000001",
+      "records": [
+        {
+          "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f",
+          "identity": {
+            "source": "mangalib",
+            "manga": "/35577--example",
+            "chapter": "/35577--example/read/v1/c2?bid=42"
+          },
+          "metadata": {
+            "mangaTitle": "\ud800\udc00",
+            "chapterTitle": "Chapter 2"
+          },
+          "progress": {
+            "page": 9,
+            "totalPages": 20,
+            "modifiedAt": 300,
+            "deviceId": "00000000-0000-4000-8000-000000000001"
+          },
+          "completion": {
+            "read": true,
+            "modifiedAt": 100,
+            "deviceId": "00000000-0000-4000-8000-000000000001"
+          },
+          "history": {
+            "lastReadAt": 1000,
+            "modifiedAt": 100,
+            "deviceId": "00000000-0000-4000-8000-000000000001"
+          }
+        }
+      ]
+    },
+    {
+      "format": "aidoku-mihon-history",
+      "version": 1,
+      "deviceId": "00000000-0000-4000-8000-000000000002",
+      "records": [
+        {
+          "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f",
+          "identity": {
+            "source": "mangalib",
+            "manga": "/35577--example",
+            "chapter": "/35577--example/read/v1/c2?bid=42"
+          },
+          "metadata": {
+            "mangaTitle": "\ue000",
+            "mangaUrl": "https://mangalib.me/ru/manga/35577--example"
+          },
+          "progress": {
+            "page": 5,
+            "totalPages": 20,
+            "modifiedAt": 200,
+            "deviceId": "00000000-0000-4000-8000-000000000002"
+          },
+          "completion": {
+            "read": false,
+            "modifiedAt": 400,
+            "deviceId": "00000000-0000-4000-8000-000000000002"
+          },
+          "history": {
+            "lastReadAt": 1000,
+            "modifiedAt": 100,
+            "deviceId": "00000000-0000-4000-8000-000000000001"
+          }
+        }
+      ]
+    },
+    {
+      "format": "aidoku-mihon-history",
+      "version": 1,
+      "deviceId": "00000000-0000-4000-8000-000000000003",
+      "records": [
+        {
+          "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f",
+          "identity": {
+            "source": "mangalib",
+            "manga": "/35577--example",
+            "chapter": "/35577--example/read/v1/c2?bid=42"
+          },
+          "progress": {
+            "page": 5,
+            "totalPages": 20,
+            "modifiedAt": 200,
+            "deviceId": "00000000-0000-4000-8000-000000000002"
+          },
+          "completion": {
+            "read": true,
+            "modifiedAt": 100,
+            "deviceId": "00000000-0000-4000-8000-000000000001"
+          },
+          "history": {
+            "lastReadAt": null,
+            "modifiedAt": 500,
+            "deviceId": "00000000-0000-4000-8000-000000000003"
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "format": "aidoku-mihon-history",
+    "version": 1,
+    "deviceId": "00000000-0000-4000-8000-000000000001",
+    "records": [
+      {
+        "id": "e570e8b243124728e680e9e1919954ccf0fcac694598974f18d7957b50fc778f",
+        "identity": {
+          "source": "mangalib",
+          "manga": "/35577--example",
+          "chapter": "/35577--example/read/v1/c2?bid=42"
+        },
+        "metadata": {
+          "mangaTitle": "\ue000",
+          "mangaUrl": "https://mangalib.me/ru/manga/35577--example",
+          "chapterTitle": "Chapter 2"
+        },
+        "progress": {
+          "page": 9,
+          "totalPages": 20,
+          "modifiedAt": 300,
+          "deviceId": "00000000-0000-4000-8000-000000000001"
+        },
+        "completion": {
+          "read": false,
+          "modifiedAt": 400,
+          "deviceId": "00000000-0000-4000-8000-000000000002"
+        },
+        "history": {
+          "lastReadAt": null,
+          "modifiedAt": 500,
+          "deviceId": "00000000-0000-4000-8000-000000000003"
+        }
+      }
+    ]
+  }
+}

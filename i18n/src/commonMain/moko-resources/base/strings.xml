@@ -1118,13 +1118,13 @@
     <string name="reader_ai_progress_ready">Enhanced image is ready</string>
     <string name="reader_ai_progress_failed">AI processing failed</string>
     <string name="history_sync_title">Reading history sync</string>
-    <string name="history_sync_entry">Sync with Aidoku AI through Yandex Disk or HTTPS WebDAV</string>
-    <string name="history_sync_description">Use the same WebDAV account on both phones. Reading positions, read/unread changes, and history deletions sync without a PC. Each installation keeps its own cloud replica. Only exact website identities match; unmatched entries remain in the cloud. Library titles, bookmarks, downloads, and reading duration are not synced.</string>
+    <string name="history_sync_entry">Sync with Aidoku AI through Koofr or HTTPS WebDAV</string>
+    <string name="history_sync_description">Use the same Koofr or HTTPS WebDAV account on both phones. Sync runs when the app opens, checks the cloud every 10 seconds while open, and sends saved reading changes after about 1.5 seconds. Android schedules background retries when possible. Reading positions, read/unread changes, and history deletions sync without a PC. Each installation keeps its own cloud replica. Only exact website identities match; unmatched entries remain in the cloud. Library titles, bookmarks, downloads, and reading duration are not synced.</string>
     <string name="history_sync_account">Cloud account</string>
     <string name="history_sync_server">HTTPS WebDAV root URL</string>
     <string name="history_sync_login">WebDAV login</string>
     <string name="history_sync_password">App password</string>
-    <string name="history_sync_password_hint">For Yandex, create an app password for WebDAV. Leave blank to keep the saved password for this account. Credentials stay in Android Keystore protected storage and are excluded from backups.</string>
+    <string name="history_sync_password_hint">For Koofr, generate an app password for WebDAV in account settings. Other providers may also require an app password. Leave blank to keep the saved password for this account. Credentials stay in Android Keystore protected storage and are excluded from backups.</string>
     <string name="history_sync_enable">Enable history sync</string>
     <string name="history_sync_now">Sync now</string>
     <string name="history_sync_idle">Waiting to sync</string>

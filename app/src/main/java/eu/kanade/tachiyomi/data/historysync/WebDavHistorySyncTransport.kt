@@ -20,11 +20,19 @@ import kotlin.coroutines.coroutineContext
 
 class WebDavHistorySyncTransport(
     private val credentials: HistorySyncCredentials,
-    private val client: OkHttpClient = defaultClient(),
+    client: OkHttpClient = defaultClient(),
 ) : HistorySyncTransport {
+    private val client = client.newBuilder().cookieJar(CookieJar.NO_COOKIES)
+        .followRedirects(false).followSslRedirects(false).build()
     private val root = validateRoot(credentials.root)
     private val folder = root.newBuilder().addPathSegment(FOLDER).addPathSegment("").build()
-    private val authorization = Credentials.basic(credentials.username, credentials.password, Charsets.UTF_8)
+    private val authorization = credentials.run {
+        require(
+            username.isNotBlank() && ':' !in username && username.none(Char::isISOControl) &&
+                password.isNotEmpty() && password.none(Char::isISOControl),
+        ) { "Enter a valid WebDAV login and app password" }
+        Credentials.basic(username, password, Charsets.UTF_8)
+    }
 
     override suspend fun pull(): List<HistorySyncDocument> {
         request(folder, "MKCOL", ByteArray(0), "application/octet-stream").use {
@@ -132,6 +140,8 @@ class WebDavHistorySyncTransport(
             val names = linkedSetOf<String>()
             var hasRoot = false
             var responseDepth: Int? = null
+            var responseHrefs = mutableListOf<String>()
+            var responseStatuses = mutableListOf<String>()
             var event = parser.eventType
             while (event != XmlPullParser.END_DOCUMENT) {
                 require(event != XmlPullParser.DOCDECL) { "WebDAV XML must not contain a DTD" }
@@ -145,12 +155,29 @@ class WebDavHistorySyncTransport(
                     parser.name == "response"
                 ) {
                     responseDepth = parser.depth
+                    responseHrefs = mutableListOf()
+                    responseStatuses = mutableListOf()
                 }
                 if (event == XmlPullParser.START_TAG && parser.depth == 3 && responseDepth == 2 &&
                     parser.namespace == "DAV:" && parser.name == "href"
                 ) {
-                    val raw = parser.nextText()
-                    val url = folder.resolve(raw)
+                    responseHrefs += parser.nextText().trim()
+                }
+                if (event == XmlPullParser.START_TAG && responseDepth == 2 &&
+                    parser.depth in 3..4 && parser.namespace == "DAV:" && parser.name == "status"
+                ) {
+                    responseStatuses += parser.nextText().trim()
+                }
+                if (event == XmlPullParser.END_TAG && parser.depth == responseDepth) {
+                    require(responseHrefs.size == 1 && responseHrefs.single().isNotEmpty()) {
+                        "Incomplete WebDAV response"
+                    }
+                    require(responseStatuses.all { status ->
+                        val parts = status.split(Regex("[ \\t]+"))
+                        parts.size >= 2 && Regex("HTTP/[0-9]+(?:\\.[0-9]+)?").matches(parts[0]) &&
+                            parts[1].length == 3 && parts[1].toIntOrNull()?.let { it in 200..299 } == true
+                    }) { "WebDAV returned a partial listing" }
+                    val url = folder.resolve(responseHrefs.single())
                     if (url != null && sameOrigin(folder, url) && url.username.isEmpty() && url.password.isEmpty() &&
                         url.query == null && url.fragment == null &&
                         url.pathSegments.size == folder.pathSegments.size &&
@@ -159,8 +186,8 @@ class WebDavHistorySyncTransport(
                         val name = url.pathSegments.last()
                         if (filename.matches(name) && url.encodedPath.endsWith("/$name")) names += name
                     }
+                    responseDepth = null
                 }
-                if (event == XmlPullParser.END_TAG && parser.depth == responseDepth) responseDepth = null
                 event = parser.nextToken()
             }
             require(hasRoot) { "Invalid WebDAV multistatus response" }

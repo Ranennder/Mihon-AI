@@ -29,6 +29,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.collectAsState
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.text.DateFormat
@@ -43,6 +44,7 @@ object SettingsHistorySyncScreen : SearchableSettings {
     override fun getPreferences(): List<Preference> {
         val manager = remember { Injekt.get<HistorySyncManager>() }
         val status by manager.status.collectAsState()
+        val enabled by manager.preferences.enabled.collectAsState()
         return listOf(
             Preference.PreferenceItem.InfoPreference(stringResource(MR.strings.history_sync_description)),
             Preference.PreferenceItem.CustomPreference(title = stringResource(MR.strings.history_sync_account)) {
@@ -58,7 +60,7 @@ object SettingsHistorySyncScreen : SearchableSettings {
             ),
             Preference.PreferenceItem.TextPreference(
                 title = stringResource(MR.strings.history_sync_now),
-                enabled = status.phase != HistorySyncManager.Phase.SYNCING,
+                enabled = enabled && status.phase != HistorySyncManager.Phase.SYNCING,
                 onClick = manager::requestSync,
             ),
             Preference.PreferenceItem.InfoPreference(
@@ -82,7 +84,7 @@ object SettingsHistorySyncScreen : SearchableSettings {
     @Composable
     private fun CredentialsForm(manager: HistorySyncManager) {
         val scope = rememberCoroutineScope()
-        var root by remember { mutableStateOf("https://webdav.yandex.ru/") }
+        var root by remember { mutableStateOf("https://app.koofr.net/dav/Koofr/") }
         var username by remember { mutableStateOf("") }
         var password by remember { mutableStateOf("") }
         var existing by remember { mutableStateOf<HistorySyncCredentials?>(null) }

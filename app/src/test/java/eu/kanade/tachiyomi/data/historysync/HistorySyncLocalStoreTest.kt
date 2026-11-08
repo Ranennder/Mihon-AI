@@ -205,6 +205,32 @@ class HistorySyncLocalStoreTest {
     }
 
     @Test
+    fun `duplicate native identities retain actions until a single chapter can own them`() = runBlocking {
+        prepare(read = true, page = 4, date = 1000)
+        driver.execute(
+            null,
+            """
+            INSERT INTO chapters(_id,manga_id,url,name,read,bookmark,last_page_read,
+                                 chapter_number,source_order,date_fetch,date_upload)
+            VALUES(2,1,'/chapter/1','Duplicate',1,0,4,1,0,0,0)
+            """.trimIndent(),
+            0,
+        ).await()
+        ChapterRepositoryImpl(database).update(
+            ChapterUpdate(1, read = false, lastPageRead = 0, syncProgressPage = 0),
+        )
+        val pending = database.historySyncQueries.getPending().awaitAsList().single()
+        assertTrue(store.reconcile().document.records.isEmpty())
+        assertEquals(listOf(pending), database.historySyncQueries.getPending().awaitAsList())
+        driver.execute(null, "DELETE FROM chapters WHERE _id = 2", 0).await()
+        val restored = store.reconcile().document.records.single()
+        assertFalse(restored.completion.read)
+        assertEquals(0L, restored.progress.page)
+        assertEquals(pending.event_clock, restored.completion.modifiedAt)
+        assertEquals(0L, database.historySyncQueries.getPendingCount().awaitAsOne())
+    }
+
+    @Test
     fun `account switch retains old pending actions without exporting its unmatched cloud records`() = runBlocking {
         prepare()
         val foreignIdentity = HistorySyncIdentity("other-site", "/other-manga", "/other-chapter")
@@ -233,6 +259,24 @@ class HistorySyncLocalStoreTest {
         assertEquals(0L, database.historySyncQueries.getPendingCount().awaitAsOne())
         store.selectAccount("first-account")
         assertEquals(20L, store.reconcile().document.records.single().progress.page)
+    }
+
+    @Test
+    fun `account aliases can merge different enrollments from the same installation`() = runBlocking {
+        prepare(page = 1, date = 1000)
+        val first = store.reconcile().document
+        ChapterRepositoryImpl(database).update(ChapterUpdate(1, lastPageRead = 4, syncProgressPage = 5))
+        val pending = database.historySyncQueries.getPending().awaitAsList().single()
+        store.selectAccount("same-folder-alias")
+        val second = store.reconcile().document
+        assertNotEquals(first.deviceId, second.deviceId)
+        assertNotEquals(first.records.single().progress.deviceId, second.records.single().progress.deviceId)
+        assertEquals(1000L, first.records.single().progress.modifiedAt)
+        assertEquals(1000L, second.records.single().progress.modifiedAt)
+        val combined = store.reconcile(listOf(first), apply = true).document
+        assertEquals(HistorySyncProtocol.merge(second.deviceId, first, second), combined)
+        store.selectAccount("fixture-account")
+        assertEquals(listOf(pending), database.historySyncQueries.getPending().awaitAsList())
     }
 
     @Test
