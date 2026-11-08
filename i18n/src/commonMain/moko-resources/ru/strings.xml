@@ -955,8 +955,8 @@
     <string name="reader_ai_remote_chapter_mode_classic_summary">Сначала загружается вся глава, затем начинается AI-обработка.</string>
     <string name="reader_ai_remote_chapter_mode_parallel_summary">Следующие страницы загружаются, пока AI обрабатывает уже загруженные.</string>
     <string name="history_sync_title">Синхронизация истории чтения</string>
-    <string name="history_sync_entry">Синхронизация с Aidoku AI через Koofr или HTTPS WebDAV</string>
-    <string name="history_sync_description">Укажите один аккаунт Koofr или HTTPS WebDAV на обоих телефонах. Синхронизация запускается при открытии приложения, проверяет облако каждые 10 секунд, пока оно открыто, и отправляет сохранённые изменения чтения примерно через 1,5 секунды. Android также планирует повторные попытки в фоне, когда это возможно. Позиции чтения, отметки прочитано и не прочитано, удаление истории синхронизируются без компьютера. Каждая установка хранит свою облачную копию. Сопоставляются только точные адреса источников; несопоставленные записи остаются в облаке. Библиотека, закладки, загрузки и время чтения не синхронизируются.</string>
+    <string name="history_sync_entry">Синхронизация с Aidoku AI через Google Drive, Koofr или HTTPS WebDAV</string>
+    <string name="history_sync_description">Укажите один аккаунт Google Drive, Koofr или HTTPS WebDAV на обоих телефонах. Google Drive хранит историю в закрытой папке приложения и запрашивает доступ только к этим данным. Синхронизация запускается при открытии приложения, проверяет облако каждые 10 секунд, пока оно открыто, и отправляет сохранённые изменения чтения примерно через 1,5 секунды. Android также планирует повторные попытки в фоне, когда это возможно. Позиции чтения, отметки прочитано и не прочитано, удаление истории синхронизируются без компьютера. Каждая установка хранит свою облачную копию. Сопоставляются только точные адреса источников; несопоставленные записи остаются в облаке. Библиотека, закладки, загрузки и время чтения не синхронизируются.</string>
     <string name="history_sync_account">Облачный аккаунт</string>
     <string name="history_sync_server">Корневой HTTPS-адрес WebDAV</string>
     <string name="history_sync_login">Логин WebDAV</string>
@@ -967,9 +967,20 @@
     <string name="history_sync_idle">Ожидание синхронизации</string>
     <string name="history_sync_working">Синхронизация истории чтения…</string>
     <string name="history_sync_success">Последняя синхронизация: %1$s. Сопоставлено: %2$d; не сопоставлено: %3$d.</string>
-    <string name="history_sync_failed">Не удалось синхронизировать. Проверьте сеть, HTTPS-адрес WebDAV, логин, пароль приложения и свободное место в облаке. Локальные изменения сохранены и будут отправлены повторно.</string>
-    <string name="history_sync_needs_account">Сначала сохраните аккаунт WebDAV.</string>
+    <string name="history_sync_failed">Не удалось синхронизировать. Проверьте сеть, облачный аккаунт и свободное место в облаке. Локальные изменения сохранены и будут отправлены повторно.</string>
+    <string name="history_sync_needs_account">Сначала войдите через Google или сохраните аккаунт WebDAV.</string>
     <string name="history_sync_disabled">Синхронизация выключена. Локальная история и ожидающие изменения сохранены.</string>
     <string name="history_sync_save_failed">Не удалось сохранить аккаунт. Проверьте HTTPS-адрес, укажите логин и пароль приложения.</string>
     <string name="history_sync_saved">Аккаунт сохранён в защищённом хранилище.</string>
+    <string name="history_sync_google_title">Google Drive</string>
+    <string name="history_sync_google_scope">Доступ только к скрытым данным истории приложения в Drive. Другие файлы недоступны.</string>
+    <string name="history_sync_google_privacy">Конфиденциальность синхронизации с Google Drive</string>
+    <string name="history_sync_google_sign_in">Войти через Google</string>
+    <string name="history_sync_google_connected">Подключён: %1$s</string>
+    <string name="history_sync_google_disconnect">Отключить на этом устройстве</string>
+    <string name="history_sync_google_unconfigured">В этой сборке вход через Google ещё не настроен. Можно использовать WebDAV.</string>
+    <string name="history_sync_google_unavailable">Для входа через Google нужны сервисы Google Play на устройстве. Можно использовать WebDAV.</string>
+    <string name="history_sync_google_failed">Не удалось подключить Google Drive. Прежний аккаунт и сохранённые изменения чтения не потеряны. Попробуйте войти снова.</string>
+    <string name="history_sync_google_reconnect">Войдите через Google снова, чтобы продолжить синхронизацию. Изменения чтения сохранены.</string>
+    <string name="history_sync_webdav_title">Koofr / HTTPS WebDAV</string>
 </resources>

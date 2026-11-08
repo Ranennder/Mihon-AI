@@ -428,6 +428,80 @@ class HistorySyncManagerTest {
         assertEquals(1, fixture.transport.pulls)
     }
 
+    @Test
+    fun `switching from WebDAV to Google cancels an old pull before selecting the new journal`() = runTest {
+        val fixture = fixture()
+        val oldPull = CompletableDeferred<Unit>()
+        fixture.transport.onPull = {
+            oldPull.complete(Unit)
+            CompletableDeferred<List<HistorySyncDocument>>().await()
+        }
+        fixture.manager.foreground()
+        runCurrent()
+        oldPull.await()
+        fixture.transport.onPull = { emptyList() }
+        val google = googleAccount()
+        fixture.manager.saveCredentials(google)
+        runCurrent()
+        assertEquals(google, fixture.account)
+        assertEquals(HistorySyncProvider.GOOGLE_DRIVE, fixture.requestedAccounts.last().provider)
+        assertEquals(1, fixture.transport.maximumActive)
+        assertEquals(1, fixture.transport.pushes.size)
+        assertEquals(HistorySyncManager.Phase.SUCCESS, fixture.manager.status.value.phase)
+    }
+
+    @Test
+    fun `Google journal follows project and permission ID while email changes preserve the journal`() = runTest {
+        val fixture = fixture(enabled = false)
+        val google = googleAccount()
+        fixture.manager.saveCredentials(google)
+        val original = fixture.selectedAccounts.last()
+        fixture.manager.saveCredentials(google.copy(googleEmail = "renamed@example.com"))
+        assertEquals(original, fixture.selectedAccounts.last())
+        fixture.manager.saveCredentials(google.copy(googlePermissionId = "222222"))
+        assertFalse(original == fixture.selectedAccounts.last())
+        fixture.manager.saveCredentials(google.copy(googleProjectNumber = "333333"))
+        assertFalse(original == fixture.selectedAccounts.last())
+        assertEquals(3, fixture.selectedAccounts.distinct().size)
+    }
+
+    @Test
+    fun `Google consent requirement preserves account and requests reconnection without work retry`() = runTest {
+        val fixture = fixture()
+        fixture.account = googleAccount()
+        fixture.transport.onPull = { throw GoogleDriveReconnectRequired() }
+        assertTrue(fixture.manager.syncNow())
+        assertEquals(googleAccount(), fixture.account)
+        assertEquals(HistorySyncManager.Phase.NEEDS_GOOGLE_RECONNECT, fixture.manager.status.value.phase)
+        assertTrue(fixture.transport.pushes.isEmpty())
+        coVerify(exactly = 0) { fixture.store.reconcile(any(), true) }
+    }
+
+    @Test
+    fun `disconnect clears only local credentials stops timers and retains the current journal`() = runTest {
+        val fixture = fixture()
+        fixture.account = googleAccount()
+        fixture.manager.foreground()
+        runCurrent()
+        val pulls = fixture.transport.pulls
+        val selected = fixture.selectedAccounts.toList()
+        fixture.manager.disconnect()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(null, fixture.account)
+        assertEquals(pulls, fixture.transport.pulls)
+        assertEquals(selected, fixture.selectedAccounts)
+        assertEquals(HistorySyncManager.Phase.DISABLED, fixture.manager.status.value.phase)
+        assertEquals(listOf(true, false), fixture.configurations)
+    }
+
+    private fun googleAccount(): HistorySyncCredentials = HistorySyncCredentials(
+        provider = HistorySyncProvider.GOOGLE_DRIVE,
+        googleProjectNumber = "123456",
+        googlePermissionId = "987654",
+        googleEmail = "reader@example.com",
+    )
+
     private suspend fun TestScope.fixture(enabled: Boolean = true): Fixture = Fixture(this, enabled).also {
         Database.Schema.create(it.driver).await()
     }
@@ -443,6 +517,7 @@ class HistorySyncManagerTest {
         val pending = MutableSharedFlow<Long>(extraBufferCapacity = 64)
         val configurations = mutableListOf<Boolean>()
         val requestedAccounts = mutableListOf<HistorySyncCredentials>()
+        val selectedAccounts = mutableListOf<String>()
         var enqueued = 0
         var account: HistorySyncCredentials? = HistorySyncCredentials(
             "https://example.com/dav/",
@@ -467,7 +542,7 @@ class HistorySyncManagerTest {
         )
         val store = mockk<HistorySyncLocalStore> {
             coEvery { initialize() } returns Unit
-            coEvery { selectAccount(any()) } returns Unit
+            coEvery { selectAccount(any()) } answers { selectedAccounts += firstArg<String>() }
             coEvery { reconcile(any(), any()) } answers { HistorySyncLocalStore.Result(document, 2, 3) }
         }
         private val enabled = MutableStateFlow(initiallyEnabled)
@@ -482,6 +557,7 @@ class HistorySyncManagerTest {
         private val credentials = mockk<HistorySyncCredentialStore> {
             every { load() } answers { account }
             every { save(any()) } answers { account = firstArg() }
+            every { clear() } answers { account = null }
         }
         val manager = HistorySyncManager(
             database,

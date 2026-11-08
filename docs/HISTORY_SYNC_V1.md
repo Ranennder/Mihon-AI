@@ -1,7 +1,8 @@
 # Mihon AI / Aidoku AI history sync v1
 
 This is live, bidirectional history synchronization, separate from full backups.
-The transport is HTTPS WebDAV (Koofr preset for new connections). No PC is involved.
+The transports are Google Drive appDataFolder and HTTPS WebDAV
+(Koofr preset for new WebDAV connections). No PC is involved.
 Both apps must be updated; stock Mihon/Aidoku do not implement this protocol.
 
 ## Document
@@ -84,6 +85,47 @@ Otherwise use an exact verified provider chapter key. If no portable identity
 is available, use a platform/source-scoped local identity; retain remote records
 unapplied and show their count rather than guess by title or chapter number.
 Only apply a record when its identity maps to exactly one local chapter.
+
+## Google Drive replicas
+
+Both platform clients belong to the same Google Cloud project and request only
+`https://www.googleapis.com/auth/drive.appdata`. Use native platform authorization;
+no client secret belongs in the apps. Resolve the connected user with Drive
+`about.get?fields=user(permissionId,emailAddress,displayName)`. Journal identity is
+`google-drive:<projectNumber>:<permissionId>`, hashed for local filenames. Email
+and display name are labels, not account keys. A cancelled login must leave the
+previous connection intact. A silent authorization requiring interaction reports
+reconnection in settings; foreground polling must not open consent screens.
+
+Each device writes a direct child of `appDataFolder` named
+`aidoku-mihon-history-v1-device-<lowercaseUUID>.json`, with these appProperties:
+
+```json
+{"historySyncFormat":"aidoku-mihon-history-v1","historySyncDeviceId":"<lowercaseUUID>"}
+```
+
+List with `spaces=appDataFolder`, `trashed=false`, and the exact format property;
+paginate completely before accepting data. Reject incomplete searches, duplicate
+file IDs or device writers, invalid filenames/properties and mismatched document
+writers. Limits are 64 replicas, 8 MiB each and 32 MiB aggregate; bound listing
+responses and downloads too. Invalid or incomplete pulls abort before applying
+or uploading. Pending local changes remain available for a retry.
+
+Before upload, resolve the current own replica again. PATCH that file with
+`uploadType=media`, or create it with `uploadType=multipart`, the exact filename
+and properties, and `parents:["appDataFolder"]`. Duplicate own files are errors;
+never overwrite a different device. A disappeared update target fails this
+operation and is reconsidered at the next complete sync. Skip an unchanged
+upload only when the current successful pull contained an identical own replica;
+recreate missing replicas. The JSON document and merge rules are unchanged.
+
+Send bearer tokens only to the fixed Google API endpoints, with cookies and
+redirects disabled. On HTTP 401 invalidate/refresh and retry once. Serialize
+token refresh and fence stale results against disconnect/account replacement.
+Local sign-out stops scheduled work and clears local credentials, without
+revoking the project grant on the other phone or deleting cloud history.
+Switching between Google and WebDAV changes the account namespace and must not
+reuse the previous provider's pending journal. Credentials remain device-local.
 
 ## WebDAV replicas
 

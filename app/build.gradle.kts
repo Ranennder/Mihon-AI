@@ -1,3 +1,4 @@
+import groovy.json.JsonSlurper
 import mihon.gradle.Config
 import mihon.gradle.getBuildTime
 import mihon.gradle.getLatestCommitCount
@@ -56,7 +57,13 @@ val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
 val upstreamAppVersionName = "0.20.4"
-val mihonAiVersionName = "0.1.34"
+val mihonAiVersionName = "0.1.35"
+
+// Public native OAuth registration, separate from upstream Firebase settings.
+val googleDriveOAuth = JsonSlurper().parse(rootProject.file("google-drive-oauth.json")) as Map<*, *>
+fun googleDriveConfig(key: String): String = (googleDriveOAuth[key] as? String).orEmpty().also {
+    require(it.matches(Regex("[A-Za-z0-9._-]*"))) { "Invalid public Google Drive OAuth configuration: $key" }
+}
 
 if (Config.includeTelemetry) {
     pluginManager.apply {
@@ -102,6 +109,9 @@ android {
         buildConfigField("String", "BUILD_TIME", "\"${getBuildTime(useLatestCommitTime = false)}\"")
         buildConfigField("boolean", "TELEMETRY_INCLUDED", "${Config.includeTelemetry}")
         buildConfigField("boolean", "UPDATER_ENABLED", "${Config.enableUpdater}")
+        buildConfigField("String", "GOOGLE_DRIVE_PROJECT_NUMBER", "\"${googleDriveConfig("projectNumber")}\"")
+        buildConfigField("String", "GOOGLE_DRIVE_PROJECT_ID", "\"${googleDriveConfig("projectId")}\"")
+        buildConfigField("String", "GOOGLE_DRIVE_ANDROID_CLIENT_ID", "\"${googleDriveConfig("androidClientId")}\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -336,6 +346,7 @@ dependencies {
 
     // UI libraries
     implementation(libs.material)
+    implementation(libs.google.auth)
     implementation(libs.flexibleAdapter)
     implementation(libs.photoView)
     implementation(libs.directionalViewPager) {

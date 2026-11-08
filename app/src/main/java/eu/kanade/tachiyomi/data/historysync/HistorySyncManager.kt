@@ -55,10 +55,18 @@ class HistorySyncManager internal constructor(
             pendingChanges = database.historySyncQueries.getPendingCount().subscribeToOne(),
             configureWork = { HistorySyncJob.configure(context, it) },
             enqueueWork = { HistorySyncJob.enqueue(context) },
+            transportFactory = { account ->
+                when (account.provider) {
+                    HistorySyncProvider.WEBDAV -> WebDavHistorySyncTransport(account)
+                    HistorySyncProvider.GOOGLE_DRIVE -> GoogleDriveHistorySyncTransport(
+                        GoogleDriveAuthorization(context).tokensFor(account),
+                    )
+                }
+            },
         ),
     )
 
-    enum class Phase { IDLE, SYNCING, SUCCESS, FAILED, NEEDS_CREDENTIALS, DISABLED }
+    enum class Phase { IDLE, SYNCING, SUCCESS, FAILED, NEEDS_CREDENTIALS, NEEDS_GOOGLE_RECONNECT, DISABLED }
 
     data class Status(
         val phase: Phase = Phase.IDLE,
@@ -188,12 +196,23 @@ class HistorySyncManager internal constructor(
     suspend fun readCredentials(): HistorySyncCredentials? = withContext(runtime.dispatcher) { credentials.load() }
 
     suspend fun saveCredentials(value: HistorySyncCredentials) = withContext(runtime.dispatcher) {
-        val root = WebDavHistorySyncTransport.validateRoot(value.root).toString()
-        require(
-            value.username.isNotBlank() && value.username.none { it == ':' || it.isISOControl() } &&
-                value.password.isNotEmpty() && value.password.none { it.isISOControl() },
-        ) {
-            "Enter your WebDAV login and app password"
+        val normalized = when (value.provider) {
+            HistorySyncProvider.WEBDAV -> {
+                val root = WebDavHistorySyncTransport.validateRoot(value.root).toString()
+                require(
+                    value.username.isNotBlank() && value.username.none { it == ':' || it.isISOControl() } &&
+                        value.password.isNotEmpty() && value.password.none { it.isISOControl() },
+                ) { "Enter your WebDAV login and app password" }
+                value.copy(root = root)
+            }
+            HistorySyncProvider.GOOGLE_DRIVE -> {
+                require(
+                    value.googleProjectNumber.matches(Regex("[0-9]{1,32}")) &&
+                        value.googlePermissionId.matches(Regex("[0-9]{1,128}")) && value.googleEmail.isNotBlank() &&
+                        value.googleEmail.none(Char::isISOControl),
+                ) { "Invalid Google account identity" }
+                value.copy(root = "", username = "", password = "")
+            }
         }
         credentialChanges.withLock {
             // A queued sync must not start another old-account pull while the
@@ -208,14 +227,35 @@ class HistorySyncManager internal constructor(
                     // Native history writers share this transaction lock: actions
                     // cannot be tagged with the old account after credentials save.
                     database.transaction {
-                        credentials.save(value.copy(root = root))
-                        store.selectAccount(accountKey(root, value.username))
+                        credentials.save(normalized)
+                        store.selectAccount(accountKey(normalized))
                     }
                 }
                 mutableStatus.value = Status(phase = if (preferences.enabled.get()) Phase.IDLE else Phase.DISABLED)
             } finally {
                 synchronized(this@HistorySyncManager) { changingAccount = false }
                 requestSync()
+            }
+        }
+    }
+
+    /** Disconnect only this installation; revoking Google's shared project grant
+     * would also disconnect the user's other phone. Cloud replicas are retained. */
+    suspend fun disconnect() = withContext(runtime.dispatcher) {
+        credentialChanges.withLock {
+            synchronized(this@HistorySyncManager) {
+                changingAccount = true
+                running?.cancel()
+            }
+            try {
+                mutex.withLock {
+                    preferences.enabled.set(false)
+                    credentials.clear()
+                    mutableStatus.value = Status(phase = Phase.DISABLED)
+                }
+                updateEnabled()
+            } finally {
+                synchronized(this@HistorySyncManager) { changingAccount = false }
             }
         }
     }
@@ -240,7 +280,7 @@ class HistorySyncManager internal constructor(
                     return@withLock true
                 }
                 store.initialize()
-                store.selectAccount(accountKey(account.root, account.username))
+                store.selectAccount(accountKey(account))
                 store.reconcile()
                 currentCoroutineContext().ensureActive()
                 val transport = runtime.transportFactory(account)
@@ -262,6 +302,9 @@ class HistorySyncManager internal constructor(
                 true
             } catch (error: CancellationException) {
                 throw error
+            } catch (_: GoogleDriveReconnectRequired) {
+                mutableStatus.value = mutableStatus.value.copy(phase = Phase.NEEDS_GOOGLE_RECONNECT)
+                true
             } catch (_: Exception) {
                 mutableStatus.value = mutableStatus.value.copy(phase = Phase.FAILED)
                 false
@@ -276,8 +319,15 @@ class HistorySyncManager internal constructor(
         }
     }
 
-    private fun accountKey(root: String, username: String): String = MessageDigest.getInstance("SHA-256")
-        .digest("${WebDavHistorySyncTransport.validateRoot(root)}\n$username".toByteArray(Charsets.UTF_8))
+    private fun accountKey(account: HistorySyncCredentials): String = MessageDigest.getInstance("SHA-256")
+        .digest(
+            when (account.provider) {
+                HistorySyncProvider.WEBDAV ->
+                    "${WebDavHistorySyncTransport.validateRoot(account.root)}\n${account.username}"
+                HistorySyncProvider.GOOGLE_DRIVE ->
+                    "google-drive:${account.googleProjectNumber}:${account.googlePermissionId}"
+            }.toByteArray(Charsets.UTF_8),
+        )
         .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private companion object {

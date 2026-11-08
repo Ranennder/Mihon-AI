@@ -1118,8 +1118,8 @@
     <string name="reader_ai_progress_ready">Enhanced image is ready</string>
     <string name="reader_ai_progress_failed">AI processing failed</string>
     <string name="history_sync_title">Reading history sync</string>
-    <string name="history_sync_entry">Sync with Aidoku AI through Koofr or HTTPS WebDAV</string>
-    <string name="history_sync_description">Use the same Koofr or HTTPS WebDAV account on both phones. Sync runs when the app opens, checks the cloud every 10 seconds while open, and sends saved reading changes after about 1.5 seconds. Android schedules background retries when possible. Reading positions, read/unread changes, and history deletions sync without a PC. Each installation keeps its own cloud replica. Only exact website identities match; unmatched entries remain in the cloud. Library titles, bookmarks, downloads, and reading duration are not synced.</string>
+    <string name="history_sync_entry">Sync with Aidoku AI through Google Drive, Koofr, or HTTPS WebDAV</string>
+    <string name="history_sync_description">Use the same Google Drive, Koofr, or HTTPS WebDAV account on both phones. Google Drive keeps history in private app storage and asks only for access to this data. Sync runs when the app opens, checks the cloud every 10 seconds while open, and sends saved reading changes after about 1.5 seconds. Android schedules background retries when possible. Reading positions, read/unread changes, and history deletions sync without a PC. Each installation keeps its own cloud replica. Only exact website identities match; unmatched entries remain in the cloud. Library titles, bookmarks, downloads, and reading duration are not synced.</string>
     <string name="history_sync_account">Cloud account</string>
     <string name="history_sync_server">HTTPS WebDAV root URL</string>
     <string name="history_sync_login">WebDAV login</string>
@@ -1130,9 +1130,20 @@
     <string name="history_sync_idle">Waiting to sync</string>
     <string name="history_sync_working">Syncing reading history…</string>
     <string name="history_sync_success">Last sync: %1$s. Matched: %2$d; unmatched: %3$d.</string>
-    <string name="history_sync_failed">Sync failed. Check the connection, HTTPS WebDAV URL, login, app password, and free cloud space. Local changes are saved and will be retried.</string>
-    <string name="history_sync_needs_account">Save a WebDAV account first.</string>
+    <string name="history_sync_failed">Sync failed. Check the connection, cloud account, and free cloud space. Local changes are saved and will be retried.</string>
+    <string name="history_sync_needs_account">Sign in with Google or save a WebDAV account first.</string>
     <string name="history_sync_disabled">Sync is disabled. Local history and pending changes are preserved.</string>
     <string name="history_sync_save_failed">Could not save the account. Check the HTTPS URL and enter a login and app password.</string>
     <string name="history_sync_saved">Account saved securely.</string>
+    <string name="history_sync_google_title">Google Drive</string>
+    <string name="history_sync_google_scope">Only the app’s hidden Drive history data is accessed. Other files are not accessed.</string>
+    <string name="history_sync_google_privacy">Google Drive sync privacy</string>
+    <string name="history_sync_google_sign_in">Sign in with Google</string>
+    <string name="history_sync_google_connected">Connected: %1$s</string>
+    <string name="history_sync_google_disconnect">Disconnect on this device</string>
+    <string name="history_sync_google_unconfigured">Google sign-in is not configured in this build. You can use WebDAV.</string>
+    <string name="history_sync_google_unavailable">Google sign-in requires Google Play services on this device. You can use WebDAV.</string>
+    <string name="history_sync_google_failed">Could not connect to Google Drive. Your previous account and saved reading changes are preserved. Try signing in again.</string>
+    <string name="history_sync_google_reconnect">Sign in with Google again to resume sync. Saved reading changes are preserved.</string>
+    <string name="history_sync_webdav_title">Koofr / HTTPS WebDAV</string>
 </resources>

@@ -15,7 +15,19 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 @Serializable
-data class HistorySyncCredentials(val root: String, val username: String, val password: String)
+enum class HistorySyncProvider { WEBDAV, GOOGLE_DRIVE }
+
+@Serializable
+data class HistorySyncCredentials(
+    val root: String = "",
+    val username: String = "",
+    val password: String = "",
+    val provider: HistorySyncProvider = HistorySyncProvider.WEBDAV,
+    val googleProjectNumber: String = "",
+    val googlePermissionId: String = "",
+    val googleEmail: String = "",
+    val googleDisplayName: String = "",
+)
 
 /** Only encrypted bytes live in noBackupFilesDir; the AES key never leaves the
  * Android Keystore. This store is never included in Mihon's native backup. */
