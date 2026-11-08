@@ -205,6 +205,18 @@ class HistorySyncLocalStoreTest {
     }
 
     @Test
+    fun `live history refreshes preserve duration until native pause accounts the session once`() = runBlocking {
+        prepare()
+        val repository = HistoryRepositoryImpl(database)
+        repeat(3) { index -> repository.upsertHistory(HistoryUpdate(1, Date(2000L + index), 0)) }
+        assertEquals(1234L, database.historyQueries.getReadDuration().awaitAsOne())
+        assertEquals(2002L, store.reconcile().document.records.single().history.lastReadAt)
+        repository.upsertHistory(HistoryUpdate(1, Date(3000), 22))
+        assertEquals(1256L, database.historyQueries.getReadDuration().awaitAsOne())
+        assertEquals(3000L, store.reconcile().document.records.single().history.lastReadAt)
+    }
+
+    @Test
     fun `duplicate native identities retain actions until a single chapter can own them`() = runBlocking {
         prepare(read = true, page = 4, date = 1000)
         driver.execute(

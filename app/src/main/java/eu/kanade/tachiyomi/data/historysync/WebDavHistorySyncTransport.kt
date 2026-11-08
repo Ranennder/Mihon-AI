@@ -121,11 +121,17 @@ class WebDavHistorySyncTransport(
             return if (url.encodedPath.endsWith('/')) url else url.newBuilder().addPathSegment("").build()
         }
 
-        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            .cookieJar(CookieJar.NO_COOKIES)
-            .followRedirects(false).followSslRedirects(false)
-            .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS)
-            .build()
+        // Foreground polling creates a transport per attempt. Reuse connections
+        // and the dispatcher instead of leaving a new pool idle every ten seconds.
+        private val sharedClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .cookieJar(CookieJar.NO_COOKIES)
+                .followRedirects(false).followSslRedirects(false)
+                .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS)
+                .build()
+        }
+
+        fun defaultClient(): OkHttpClient = sharedClient
 
         fun replicaNames(xml: ByteArray, folder: HttpUrl): List<String> {
             require(xml.size <= MAX_XML_BYTES)

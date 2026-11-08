@@ -5,7 +5,9 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import okhttp3.ConnectionPool
 import okhttp3.Credentials
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -28,6 +30,9 @@ class WebDavHistorySyncTransportTest {
     private val folder = "https://dav.example/account/root/aidoku-mihon-history-v1/".toHttpUrl()
     private val document = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, device, emptyList())
 
+    private fun testClient() = WebDavHistorySyncTransport.defaultClient().newBuilder()
+        .dispatcher(Dispatcher()).connectionPool(ConnectionPool()).build()
+
     private fun response(request: Request, code: Int, text: String): Response = Response.Builder()
         .request(request).protocol(Protocol.HTTP_1_1).message("fixture").code(code)
         .body(text.toResponseBody("application/json".toMediaType())).build()
@@ -35,7 +40,7 @@ class WebDavHistorySyncTransportTest {
     @Test
     fun `folder listing cannot send credentials to foreign or nested hrefs`() = runBlocking {
         val seen = Collections.synchronizedList(mutableListOf<Request>())
-        val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor(
+        val client = testClient().newBuilder().addInterceptor(
             Interceptor { chain ->
                 val request = chain.request()
                 seen += request
@@ -78,7 +83,7 @@ class WebDavHistorySyncTransportTest {
     @Test
     fun `redirect is not followed and its response body cannot leak into status`() = runBlocking {
         val seen = mutableListOf<Request>()
-        val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+        val client = testClient().newBuilder().addInterceptor { chain ->
             seen += chain.request()
             response(chain.request(), 302, "secret-app-password https://evil.example/private").newBuilder()
                 .header("Location", "https://evil.example/").build()
@@ -94,7 +99,7 @@ class WebDavHistorySyncTransportTest {
     @Test
     fun `invalid Basic credentials are rejected before any request`() {
         val seen = mutableListOf<Request>()
-        val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+        val client = testClient().newBuilder().addInterceptor { chain ->
             seen += chain.request()
             response(chain.request(), 204, "")
         }.build()
@@ -113,7 +118,7 @@ class WebDavHistorySyncTransportTest {
     fun `invalid filename writer mismatch aborts pull without any PUT`() = runBlocking {
         val methods = mutableListOf<String>()
         val other = document.copy(deviceId = "00000000-0000-4000-8000-000000000002")
-        val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+        val client = testClient().newBuilder().addInterceptor { chain ->
             val request = chain.request()
             methods += request.method
             when (request.method) {
@@ -167,7 +172,7 @@ class WebDavHistorySyncTransportTest {
         )
         for (partial in responses) {
             val methods = mutableListOf<String>()
-            val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+            val client = testClient().newBuilder().addInterceptor { chain ->
                 val request = chain.request()
                 methods += request.method
                 if (request.method == "MKCOL") {
@@ -197,7 +202,7 @@ class WebDavHistorySyncTransportTest {
     @Test
     fun `canceling a sync cancels its underlying HTTP call`() = runBlocking {
         val started = CompletableDeferred<okhttp3.Call>()
-        val client = WebDavHistorySyncTransport.defaultClient().newBuilder().addInterceptor { chain ->
+        val client = testClient().newBuilder().addInterceptor { chain ->
             val call = chain.call()
             started.complete(call)
             val deadline = System.nanoTime() + 5_000_000_000

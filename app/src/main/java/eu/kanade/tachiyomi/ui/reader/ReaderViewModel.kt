@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.ui.reader
 
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
 import androidx.annotation.IntRange
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.SavedStateHandle
@@ -634,6 +635,12 @@ class ReaderViewModel @JvmOverloads constructor(
                     syncTotalPages = readerChapter.pages?.size?.toLong(),
                 ),
             )
+            val chapterId = readerChapter.chapter.id!!
+            if (progressTracker.shouldPersistHistory(chapterId, SystemClock.elapsedRealtime())) {
+                // Refresh the visible history while reading. The native timer
+                // still accounts the full duration on pause or chapter switch.
+                upsertHistory.await(HistoryUpdate(chapterId, Date(), 0))
+            }
         }
     }
 

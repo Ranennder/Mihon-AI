@@ -56,4 +56,33 @@ class ReaderProgressTrackerTest {
         assertFalse(tracker.shouldPersist(chapterId = 1, pageIndex = 0, pageCount = 1))
         assertTrue(tracker.shouldPersist(chapterId = 2, pageIndex = 0, pageCount = 1))
     }
+
+    @Test
+    fun `live history is immediate on first real move and limited to once per second`() {
+        val tracker = ReaderProgressTracker(restoredFromState = false)
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 5_000))
+        assertFalse(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 5_000))
+        assertFalse(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 5_999))
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 6_000))
+    }
+
+    @Test
+    fun `live history interval is isolated per chapter`() {
+        val tracker = ReaderProgressTracker(restoredFromState = false)
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 5_000))
+        assertTrue(tracker.shouldPersistHistory(chapterId = 2, nowMillis = 5_500))
+        assertFalse(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 5_999))
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 6_000))
+        assertFalse(tracker.shouldPersistHistory(chapterId = 2, nowMillis = 6_499))
+        assertTrue(tracker.shouldPersistHistory(chapterId = 2, nowMillis = 6_500))
+    }
+
+    @Test
+    fun `live history gate recovers from an elapsed clock reset`() {
+        val tracker = ReaderProgressTracker(restoredFromState = false)
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 5_000))
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 0))
+        assertFalse(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 999))
+        assertTrue(tracker.shouldPersistHistory(chapterId = 1, nowMillis = 1_000))
+    }
 }
