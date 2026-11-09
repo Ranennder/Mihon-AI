@@ -79,6 +79,23 @@ routes to `/SLUG`; normalize chapter `/ru/SLUG/read/...` to `/SLUG/read/...` and
 ignore only `ui`/`page` query parameters. Preserve `bid` and other branch fields.
 Source families MangaLib and SlashLib remain distinct.
 
+For the verified GroupLe hosts `a.zazaza.me` and `20.allhen.online`, Mihon AI
+0.1.36 and Aidoku AI 0.9.19 exclude the reader access parameter `d` (the current
+user's `user_hash`) and the exact reader flag `mtr=true` from identities and URL
+metadata. This narrow rule covers a single-segment manga path and its exact
+`/<manga>/vol<volume>/<chapter>` routes; it does not alias other hosts. Preserve
+every other query key, value and order, including translation/branch fields.
+Malformed or duplicate reader parameters and unsupported credential-bearing
+routes abort synchronization without discarding pending local changes.
+
+Migrate validated legacy records before merging: rebuild the sanitized identity
+hash and merge aliases using their ORIGINAL independent register stamps, checking
+all original equal-stamp conflicts before an obsolete alias can be hidden. Keep
+progress, explicit unread/reset and history-deletion tombstones. Replace the local
+account journal atomically and rewrite only this device's replica; never delete
+another device's cloud file. Both clients require the paired update, because an
+older client can publish the obsolete credential-bearing identities again.
+
 URL-based identity is permitted only when that URL is UNIQUE within the manga's
 chapters. Several Senkuro chapters share one overview URL: never merge them.
 Otherwise use an exact verified provider chapter key. If no portable identity

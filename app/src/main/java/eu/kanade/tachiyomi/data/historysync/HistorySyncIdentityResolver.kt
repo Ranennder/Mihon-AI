@@ -65,7 +65,8 @@ object HistorySyncIdentityResolver {
             }
             query = parts.joinToString("&").takeIf(String::isNotEmpty)
         }
-        WebsiteIdentity(source, path + (query?.let { "?$it" } ?: ""))
+        val route = path + query?.let { "?$it" }.orEmpty()
+        WebsiteIdentity(source, HistorySyncSourcePolicy.canonicalPath(source, route, manga))
     }.getOrNull()
 
     fun resolve(

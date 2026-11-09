@@ -1,6 +1,6 @@
 # Google Drive history sync privacy
 
-Effective date: 8 November 2026. Applies to the optional Google Drive history
+Effective date: 10 November 2026. Applies to the optional Google Drive history
 sync in **Mihon AI** and **Aidoku AI**, maintained by
 [Ranennder](https://github.com/Ranennder).
 
@@ -30,6 +30,12 @@ Only reading records with matching source/title/chapter identities are applied.
 Incognito reading is excluded. Image files, passwords, OAuth tokens, categories,
 extensions and AI settings are not included in these history files.
 
+On iOS, you can explicitly import titles represented in the received history.
+The app resolves their original URLs through installed sources, requests title
+details and chapter lists from those sites, adds missing library entries and
+applies matching reading records. Existing library entries are retained. This
+does not transfer images or a complete list of unread favorites from Android.
+
 This data is used only to provide the history synchronization you enable. It is
 not sold, used for advertising, or used to train AI models. The AI image
 enhancement feature and optional WebDAV connection are separate from Google
@@ -49,6 +55,14 @@ published source archives, or uploaded history files. The apps retain a local
 history journal and pending edits so temporary network failures do not discard
 your reading state. History journals and Drive replicas are not separately
 end-to-end encrypted by this feature.
+
+Aidoku AI also keeps a bounded local sync/import diagnostics log. It contains
+stages, counters, source identifiers, optional title names and classified error
+codes. Passwords, OAuth tokens, private URLs and raw server responses are not
+recorded in this log. It is excluded from device backups and is not automatically
+uploaded. You can filter, clear, copy or share it yourself in settings. A shared
+copy can reveal title names; review it before posting it publicly. The general
+application log is separate and is also exported only by your action.
 
 ## Control and deletion
 

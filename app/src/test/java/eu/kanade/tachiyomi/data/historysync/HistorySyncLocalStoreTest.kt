@@ -3,12 +3,14 @@ package eu.kanade.tachiyomi.data.historysync
 import app.cash.sqldelight.async.coroutines.awaitAsList
 import app.cash.sqldelight.async.coroutines.awaitAsOne
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import eu.kanade.tachiyomi.source.online.HttpSource
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -289,6 +291,111 @@ class HistorySyncLocalStoreTest {
         assertEquals(HistorySyncProtocol.merge(second.deviceId, first, second), combined)
         store.selectAccount("fixture-account")
         assertEquals(listOf(pending), database.historySyncQueries.getPending().awaitAsList())
+    }
+
+    @Test
+    fun `GroupLe capture exports clean identities and metadata from native credential URLs`() = runBlocking {
+        prepareGroupLe()
+        val record = store.reconcile().document.records.single()
+        assertEquals(HistorySyncIdentity("a.zazaza.me", "/title", "/title/vol1/2"), record.identity)
+        assertEquals("https://a.zazaza.me/title/vol1/2", record.metadata.chapterUrl)
+        assertFalse(
+            HistorySyncProtocol.encode(store.reconcile().document).toString(Charsets.UTF_8).contains("fixture_token"),
+        )
+    }
+
+    @Test
+    fun `source metadata enriches existing exact identities without rereading or restamping`() = runBlocking {
+        prepareGroupLe()
+        val initial = store.reconcile().document.records.single()
+        val missingLabels = initial.copy(metadata = HistorySyncMetadata())
+        database.historySyncQueries.putRecord(initial.id, HistorySyncProtocol.json.encodeToString(missingLabels))
+        val clock = database.historySyncQueries.getMeta().awaitAsOne().logical_clock
+        val result = store.reconcile().document.records.single()
+        assertEquals(initial, result)
+        assertEquals("https://a.zazaza.me/title", result.metadata.mangaUrl)
+        assertEquals("https://a.zazaza.me/title/vol1/2", result.metadata.chapterUrl)
+        assertEquals(clock, database.historySyncQueries.getMeta().awaitAsOne().logical_clock)
+        assertEquals(0L, database.historySyncQueries.getPendingCount().awaitAsOne())
+        assertEquals(500L, database.historyQueries.getHistoryByMangaId(1).awaitAsList().single().last_read?.time)
+        assertEquals(1234L, database.historyQueries.getReadDuration().awaitAsOne())
+    }
+
+    @Test
+    fun `journal migration removes old IDs atomically while pending reset and history deletion win`() = runBlocking {
+        prepareGroupLe()
+        val legacy = groupLeRemote()
+        val old = legacy.records.single()
+        database.historySyncQueries.putRecord(old.id, HistorySyncProtocol.json.encodeToString(old))
+        database.historySyncQueries.observeClock(2000)
+        store.selectAccount("other-account")
+        database.historySyncQueries.putRecord(old.id, HistorySyncProtocol.json.encodeToString(old))
+        store.selectAccount("fixture-account")
+        ChapterRepositoryImpl(database).update(ChapterUpdate(1, read = false, lastPageRead = 0, syncProgressPage = 0))
+        HistoryRepositoryImpl(database).resetHistoryByMangaId(1)
+        val pending = database.historySyncQueries.getPending().awaitAsList()
+        val result = store.reconcile(listOf(legacy), apply = true)
+        val record = result.document.records.single()
+        assertNotEquals(old.id, record.id)
+        assertEquals(0L, record.progress.page)
+        assertFalse(record.completion.read)
+        assertEquals(null, record.history.lastReadAt)
+        assertEquals(pending.maxOf { it.event_clock }, record.history.modifiedAt)
+        assertEquals(1, result.applied)
+        assertEquals(0, result.unmatched)
+        assertEquals(listOf(record.id), database.historySyncQueries.getRecords().awaitAsList().map { it.id })
+        assertEquals(0L, database.historySyncQueries.getPendingCount().awaitAsOne())
+        assertEquals(1234L, database.historyQueries.getReadDuration().awaitAsOne())
+        assertFalse(HistorySyncProtocol.encode(result.document).toString(Charsets.UTF_8).contains("fixture_token"))
+        store.selectAccount("other-account")
+        assertEquals(listOf(old.id), database.historySyncQueries.getRecords().awaitAsList().map { it.id })
+    }
+
+    @Test
+    fun `invalid legacy credential migration preserves journal pending actions and native state`() = runBlocking {
+        prepareGroupLe()
+        val old = groupLeRemote("d=fixture_token&d=ambiguous").records.single()
+        database.historySyncQueries.putRecord(old.id, HistorySyncProtocol.json.encodeToString(old))
+        ChapterRepositoryImpl(database).update(ChapterUpdate(1, read = false, lastPageRead = 0, syncProgressPage = 0))
+        val pending = database.historySyncQueries.getPending().awaitAsList()
+        assertThrows(IllegalArgumentException::class.java) { runBlocking { store.reconcile(apply = true) } }
+        assertEquals(listOf(old.id), database.historySyncQueries.getRecords().awaitAsList().map { it.id })
+        assertEquals(pending, database.historySyncQueries.getPending().awaitAsList())
+        assertFalse(database.chaptersQueries.getChapterById(1).awaitAsOne().read)
+        assertEquals(0L, database.chaptersQueries.getChapterById(1).awaitAsOne().last_page_read)
+    }
+
+    private suspend fun prepareGroupLe() {
+        prepare(read = true, page = 6, date = 500)
+        driver.execute(null, "UPDATE mangas SET url = '/title' WHERE _id = 1", 0).await()
+        driver.execute(
+            null,
+            "UPDATE chapters SET url = '/title/vol1/2?d=fixture_token&mtr=true' WHERE _id = 1",
+            0,
+        ).await()
+        val source = mockk<HttpSource>()
+        every { source.baseUrl } returns "https://a.zazaza.me"
+        every { source.getMangaUrl(any()) } returns "https://a.zazaza.me/title"
+        every { source.getChapterUrl(any()) } returns "https://a.zazaza.me/title/vol1/2?d=fixture_token&mtr=true"
+        every { sourceManager.get(123) } returns source
+    }
+
+    private fun groupLeRemote(query: String = "d=fixture_token&mtr=true"): HistorySyncDocument {
+        val identity = HistorySyncIdentity("a.zazaza.me", "/title", "/title/vol1/2?$query")
+        val record = HistorySyncRecord(
+            identity.recordId(),
+            identity,
+            HistorySyncMetadata(
+                "Example",
+                "Chapter 1",
+                "https://a.zazaza.me/title",
+                "https://a.zazaza.me${identity.chapter}",
+            ),
+            HistorySyncProgress(8, 10, 2000, remoteDevice),
+            HistorySyncCompletion(true, 2000, remoteDevice),
+            HistorySyncHistory(2000, 2000, remoteDevice),
+        )
+        return HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, remoteDevice, listOf(record))
     }
 
     @Test

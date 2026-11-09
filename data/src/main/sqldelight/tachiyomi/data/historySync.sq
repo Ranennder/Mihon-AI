@@ -74,6 +74,9 @@ DELETE FROM history_sync_outbox WHERE _id = :id AND account_key = (SELECT active
 getRecords:
 SELECT * FROM history_sync_records WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY id;
 
+clearRecords:
+DELETE FROM history_sync_records WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
 putRecord:
 INSERT INTO history_sync_records(account_key, id, json)
 SELECT active_account, :id, :json FROM history_sync_meta WHERE slot = 1

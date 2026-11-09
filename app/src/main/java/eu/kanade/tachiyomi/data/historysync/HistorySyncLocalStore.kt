@@ -81,11 +81,20 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
             val identityCounts = resolved.values.filter { it.chapter.id in nativeIds }
                 .groupingBy { it.identity.recordId() }.eachCount()
             val unique = resolved.filterValues { (identityCounts[it.identity.recordId()] ?: 0) <= 1 }
-            val records = snapshot.records.associateByTo(sortedMapOf()) { it.id }
+            val stored = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, replicaDevice, snapshot.records)
+            val normalized = HistorySyncSourcePolicy.normalizeDocuments(listOf(stored) + remote)
+            val records = normalized.first().records.associateByTo(sortedMapOf()) { it.id }
             for (item in unique.values) {
                 val chapter = item.chapter
-                if (!chapter.read && chapter.lastPage <= 0 && (chapter.lastRead ?: 0) <= 0) continue
-                records.putIfAbsent(item.identity.recordId(), seed(item, replicaDevice))
+                val id = item.identity.recordId()
+                val current = records[id]
+                if (current != null) {
+                    // Missing source URLs/titles can become available without a
+                    // new read action. Enrich labels without reseeding registers.
+                    records[id] = HistorySyncProtocol.mergeRecord(current, current.copy(metadata = item.metadata))
+                } else if (chapter.read || chapter.lastPage > 0 || (chapter.lastRead ?: 0) > 0) {
+                    records[id] = seed(item, replicaDevice)
+                }
             }
             for (event in snapshot.pending) {
                 require(event.event_clock in 0..HistorySyncProtocol.MAX_TIME) {
@@ -111,7 +120,7 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                 records[id] = HistorySyncProtocol.mergeRecord(current, changed)
             }
             val local = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, replicaDevice, records.values.toList())
-            val merged = HistorySyncProtocol.merge(replicaDevice, local, *remote.toTypedArray())
+            val merged = HistorySyncProtocol.merge(replicaDevice, local, *normalized.drop(1).toTypedArray())
             // Check the serialized limit before committing or applying anything.
             HistorySyncProtocol.encode(merged)
             val index = resolved.values.filter { it.chapter.id in nativeIds }
@@ -123,6 +132,9 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                 val current = readSnapshot()
                 if (current != snapshot) return@transactionWithResult false
                 database.historySyncQueries.observeClock(HistorySyncProtocol.maxClock(merged.records))
+                // Alias migration replaces the active journal atomically, so an old
+                // credential-bearing record ID cannot survive the next upload.
+                database.historySyncQueries.clearRecords()
                 for (record in merged.records) {
                     currentCoroutineContext().ensureActive()
                     database.historySyncQueries.putRecord(record.id, HistorySyncProtocol.json.encodeToString(record))
@@ -237,10 +249,12 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                 website.base,
                 counts[key] == 1,
             )
+            val metadata = HistorySyncMetadata(chapter.mangaTitle, chapter.chapterTitle, website.manga, website.url)
+            val normalized = HistorySyncSourcePolicy.normalize(identity, metadata)
             chapter.id to Resolved(
                 chapter,
-                identity,
-                HistorySyncMetadata(chapter.mangaTitle, chapter.chapterTitle, website.manga, website.url),
+                normalized.first,
+                normalized.second,
             )
         }
     }
