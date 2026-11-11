@@ -50,7 +50,7 @@ With v0.1.28, `Chapter Stream` has a separate `Chapter processing` choice:
 
 Update both the Android app and companion. The new choice is shown only for `Chapter Stream`; ordinary `Chapter` phone uploads retain their existing first-page/four-page batches. Parallel mode keeps the existing one-GPU-process limit. It overlaps network transfers and processing; it does not keep the model resident between batches.
 
-### Per-model output width (Companion 0.1.33)
+### Per-model output width (Companion 0.1.37)
 
 The phone stores separate output width settings for Fast and Detailed. Both
 default to Auto: Fast uses the device's physical short-side width in pixels,
@@ -76,16 +76,21 @@ and finished chapter page GET responses carry the header. Clients requesting a
 positive width require that echo, so an older companion cannot silently return
 native output under a custom-width cache entry. Update the companion and phone
 app together. Width is included in batching, active-job reuse and phone caches.
+Companion 0.1.37 also returns `X-Reader-AI-Input-Policy: native-input-v2` for
+width-controlled acceptance and result responses. Mihon AI 0.1.37 requires both
+the width echo and this policy before caching a custom-width result, so an older
+companion cannot repopulate the refreshed cache with the old pre-resized input.
+The native-scale setting remains compatible with earlier companions.
 
-For an explicit width, the companion proportionally resizes the source to
-approximately `width / native model scale`, runs one native AI pass, then rounds
-the result to the exact requested width and original aspect ratio. For example,
-Fast processes a 720-pixel source at an input width of 1024 before its 2x pass to
-produce 2048 pixels. This also reduces inference work when the requested width
-is smaller. The model choice still determines the learned processing: resizing
-does not create arbitrary additional learned detail. Each page gets one AI pass,
-apart from safety retries. Source crops prepared by the phone remain the source
-for this sizing.
+For an explicit width, the companion preserves the original source pixels for
+the native AI pass and resizes the processed result to the exact requested width
+and original aspect ratio. For example, Fast processes an 800-pixel source at
+800 pixels, produces its native 1600-pixel result, then sizes that result to
+1440 pixels. It no longer shrinks the source to 720 pixels before processing.
+A 720-pixel source requested at 2048 is likewise processed at its original width;
+the native result is then resized to 2048. The model choice determines the learned
+processing; enlarging the final result does not add another learned AI pass.
+Source crops prepared by the phone remain the source for this sizing.
 
 Prepared inference inputs and final rounding use lossless PNG internally. Final
 Fast JPEGs retain quality 100 and 4:4:4 chroma. Very tall pages use overlapping
@@ -94,6 +99,12 @@ fall back to PNG. Chapter sizing/encoding runs on the bounded CPU delivery worke
 and keeps validated early-page delivery. Logs record the original, inference and
 final dimensions for explicit widths; fixture tests verify geometry and protocol
 behavior, without measuring physical GPU quality or performance.
+
+Update both the companion and Android app to 0.1.37. The Android update gives
+remote results a new cache identity so earlier processed images are regenerated.
+Original-page downloads and local GPU cache entries keep their existing identities. Existing iPhone clients can
+use the corrected companion for newly processed requests; old cached results
+must be cleared or regenerated separately.
 
 ### Uploaded chapter batches (Companion 0.1.32)
 

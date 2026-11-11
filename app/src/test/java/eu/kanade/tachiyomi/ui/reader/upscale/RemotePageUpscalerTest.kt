@@ -33,6 +33,7 @@ class RemotePageUpscalerTest {
         jobId = "direct-job",
         clientId = "phone",
         workScope = 1L,
+        targetWidth = 0,
     )
 
     @BeforeEach
@@ -113,10 +114,17 @@ class RemotePageUpscalerTest {
     @Test
     fun `custom widths reject old companions and mismatched acknowledgements`() {
         for (route in listOf("image", "archive", "direct", "https")) {
-            for (acknowledgedWidth in listOf(null, "2048", "invalid")) {
+            for ((acknowledgedWidth, inputPolicy) in listOf(
+                null to "native-input-v2",
+                "2048" to "native-input-v2",
+                "invalid" to "native-input-v2",
+                "1733" to null,
+                "1733" to "legacy",
+            )) {
                 val remote = remoteWithHandler(ReaderPreferences(InMemoryPreferenceStore()) { 1320 }) { request ->
                     response(request, 200, "unused").newBuilder().apply {
                         acknowledgedWidth?.let { header("X-Reader-AI-Target-Width", it) }
+                        inputPolicy?.let { header("X-Reader-AI-Input-Policy", it) }
                     }.build()
                 }
                 submitProcessingRequest(
@@ -130,24 +138,85 @@ class RemotePageUpscalerTest {
     }
 
     @Test
-    fun `native output supports legacy companions and custom width requires exact acknowledgement`() {
+    fun `native output supports legacy companions and custom width requires both acknowledgements`() {
         val remote = remoteWithResponse(400, "unused")
         val method = RemotePageUpscaler::class.java.declaredMethods.single { it.name == "acceptsTargetWidth" }
             .apply { isAccessible = true }
-        val native = ReaderPreferences.RemoteAiConfig(ReaderPreferences.RemoteAiModel.DETAILED, 0)
-        val custom = native.copy(targetWidth = 1733)
+        val request = Request.Builder().url("https://companion.example").build()
+        val legacy = response(request, 200, "image")
+        val confirmed = legacy.newBuilder()
+            .header("X-Reader-AI-Target-Width", "1733")
+            .header("X-Reader-AI-Input-Policy", "native-input-v2")
+            .build()
 
-        assertEquals(true, method.invoke(remote, null, native))
-        assertEquals(true, method.invoke(remote, "1733", custom))
-        assertEquals(false, method.invoke(remote, null, custom))
-        assertEquals(false, method.invoke(remote, "2048", custom))
+        assertEquals(true, method.invoke(remote, legacy, 0))
+        assertEquals(true, method.invoke(remote, confirmed, 1733))
+        assertEquals(false, method.invoke(remote, legacy, 1733))
+        assertEquals(false, method.invoke(remote, confirmed, 2048))
+    }
+
+    @Test
+    fun `only the corrected companion can return a cacheable custom-width image`() {
+        var inputPolicy: String? = null
+        val remote = remoteWithHandler(ReaderPreferences(InMemoryPreferenceStore()) { 1320 }) { request ->
+            response(request, 200, "corrected image").newBuilder()
+                .header("X-Reader-AI-Target-Width", "1733")
+                .apply { inputPolicy?.let { header("X-Reader-AI-Input-Policy", it) } }
+                .build()
+        }
+        val config = ReaderPreferences.RemoteAiConfig(ReaderPreferences.RemoteAiModel.FAST, 1733)
+        for (policy in listOf(null, "legacy", "native-input-v2")) {
+            inputPolicy = policy
+            val attempt = submitProcessingRequest(remote, "image", config)!!
+            val getter = attempt.javaClass.getDeclaredMethod("getBytes").apply { isAccessible = true }
+            val bytes = getter.invoke(attempt) as ByteArray?
+            if (policy == "native-input-v2") {
+                assertEquals("corrected image", bytes?.decodeToString())
+            } else {
+                assertEquals(null, bytes)
+                assertTrue(remote.consumeLastErrorMessage()?.contains("Update the PC companion") == true)
+            }
+        }
+    }
+
+    @Test
+    fun `chapter pending images and streams require the captured width and processing policy`() {
+        val captured = job.copy(targetWidth = 1733)
+        for (policy in listOf(null, "legacy", "native-input-v2")) {
+            for (code in listOf(200, 202)) {
+                val remote = remoteWithHandler(ReaderPreferences(InMemoryPreferenceStore()) { 1320 }) { request ->
+                    response(request, code, "untrusted image").newBuilder()
+                        .header("X-Reader-AI-Target-Width", if (policy == "native-input-v2") "2048" else "1733")
+                        .apply { policy?.let { header("X-Reader-AI-Input-Policy", it) } }
+                        .build()
+                }
+                val page = remote.fetchChapterPage(captured, 0) as RemotePageUpscaler.ChapterPageFetchResult.Failed
+                assertFalse(page.retryable)
+                assertTrue(page.message.contains("Update the PC companion"))
+                var published = false
+                val stream = remote.streamChapterPages(captured, setOf(0)) { _, _ -> published = true }
+                    as RemotePageUpscaler.ChapterStreamFetchResult.Failed
+                assertFalse(stream.retryable)
+                assertFalse(published)
+            }
+        }
+        val remote = remoteWithHandler(ReaderPreferences(InMemoryPreferenceStore()) { 1320 }) { request ->
+            response(request, 200, "corrected chapter image").newBuilder()
+                .header("X-Reader-AI-Target-Width", "1733")
+                .header("X-Reader-AI-Input-Policy", "native-input-v2")
+                .build()
+        }
+        val ready = remote.fetchChapterPage(captured, 0) as RemotePageUpscaler.ChapterPageFetchResult.Ready
+        assertEquals("corrected chapter image", ready.bytes.decodeToString())
+        val legacy = remoteWithResponse(200, "native image")
+        assertTrue(legacy.fetchChapterPage(job, 0) is RemotePageUpscaler.ChapterPageFetchResult.Ready)
     }
 
     private fun submitProcessingRequest(
         remote: RemotePageUpscaler,
         route: String,
         config: ReaderPreferences.RemoteAiConfig,
-    ) {
+    ): Any? {
         val baseUrl = if (route == "https") "https://companion.example" else "http://companion.example"
         val resolution = RemoteAiServerDiscovery.Resolution(baseUrl, false)
         val progress: (Int) -> Unit = {}
@@ -173,7 +242,7 @@ class RemotePageUpscalerTest {
                 arguments = arrayOf(baseUrl, image, null, 1L, imageProgress, config)
             }
         }
-        RemotePageUpscaler::class.java.declaredMethods.single { it.name == methodName }
+        return RemotePageUpscaler::class.java.declaredMethods.single { it.name == methodName }
             .apply { isAccessible = true }.invoke(remote, *arguments)
     }
 

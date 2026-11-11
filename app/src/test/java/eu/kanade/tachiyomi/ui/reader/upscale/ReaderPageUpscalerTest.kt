@@ -112,18 +112,58 @@ class ReaderPageUpscalerTest {
         val original = upscaler.processPage(page).readUtf8()
         preferences.setRemoteAiTargetWidth(ReaderPreferences.RemoteAiModel.FAST, 1733)
         assertFalse(upscaler.hasCachedPage(page))
-        assertEquals("fast-w1733", upscaler.processPage(page).readUtf8())
+        assertEquals("fast-native-input-v2-w1733", upscaler.processPage(page).readUtf8())
         preferences.remoteAiModel.set(ReaderPreferences.RemoteAiModel.DETAILED)
         assertFalse(upscaler.hasCachedPage(page))
-        assertEquals("detailed-native4-w3960", upscaler.processPage(page).readUtf8())
+        assertEquals("detailed-native4-native-input-v2-w3960", upscaler.processPage(page).readUtf8())
         preferences.setRemoteAiTargetWidth(ReaderPreferences.RemoteAiModel.DETAILED, 1733)
         assertFalse(upscaler.hasCachedPage(page))
-        assertEquals("detailed-native4-w1733", upscaler.processPage(page).readUtf8())
+        assertEquals("detailed-native4-native-input-v2-w1733", upscaler.processPage(page).readUtf8())
         preferences.remoteAiModel.set(ReaderPreferences.RemoteAiModel.FAST)
         preferences.setRemoteAiTargetWidth(ReaderPreferences.RemoteAiModel.FAST, -1)
         assertEquals(original, upscaler.processPage(page).readUtf8())
         verify(exactly = 4) { remote.upscaleDirectPage(any(), any(), any(), any()) }
         verify(atLeast = 1) { remote.invalidateRemoteWorkScope() }
+    }
+
+    @Test
+    fun `legacy remote images are regenerated without deleting originals or local AI caches`() = runBlocking {
+        val chapterCache = File(cacheDir, "reader_ai_cache_v12/2/1").apply { mkdirs() }
+        val localCache = File(chapterCache, "gpu-000-base.jpg").apply { writeText("local GPU result") }
+        val original = File(cacheDir, "original-page.jpg").apply { writeText("original source bytes") }
+        page.stream = {
+            sourceReads++
+            original.inputStream()
+        }
+        val legacyCaches = ReaderPreferences.RemoteAiModel.entries.associateWith { model ->
+            File(chapterCache, "remote-${model.cacheKey}-w1440-000-base.jpg").apply {
+                writeText("legacy pre-reduced input")
+            }
+        }
+        every { remote.upscaleDirectPage(any(), any(), any(), any()) } answers {
+            val config = arg<ReaderPreferences.RemoteAiConfig>(3)
+            assertEquals(1440, config.targetWidth)
+            "${config.model.name} original-size inference".toByteArray()
+        }
+
+        for (model in ReaderPreferences.RemoteAiModel.entries) {
+            preferences.remoteAiModel.set(model)
+            preferences.setRemoteAiTargetWidth(model, 1440)
+            assertFalse(upscaler.hasCachedPage(page))
+            val expected = "${model.name} original-size inference"
+            assertEquals(expected, upscaler.processPage(page).readUtf8())
+            assertTrue(upscaler.hasCachedPage(page))
+            assertEquals(expected, upscaler.processPage(page).readUtf8())
+            assertEquals("legacy pre-reduced input", legacyCaches.getValue(model).readText())
+        }
+
+        assertEquals(0, sourceReads)
+        assertEquals("original source bytes", original.readText())
+        verify(exactly = 2) { remote.upscaleDirectPage(any(), any(), any(), any()) }
+        verify(exactly = 0) { remote.upscaleSource(any(), any(), any(), any()) }
+        preferences.aiBackendMode.set(ReaderPreferences.AiBackendMode.GPU)
+        assertTrue(upscaler.hasCachedPage(page))
+        assertEquals("local GPU result", localCache.readText())
     }
 
     @Test

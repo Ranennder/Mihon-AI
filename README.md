@@ -24,6 +24,7 @@ Mihon AI is an Android reader built around AI-upscaled pages for manga, manhwa, 
 - `Remote PC` mode with a standalone Windows companion `.exe`.
 - Local network auto-discovery when the server URL is left empty.
 - `Fast` and `Detailed` remote upscale models.
+- Separate output widths for each remote model, with original page pixels preserved until AI processing completes. In 0.1.37, an 800-pixel page requested at Fast 1440 is processed at its original width before the result is resized to 1440 pixels.
 - On-device `GPU` mode for local and offline usage.
 - Reader caching and prefetch to keep AI pages ready ahead of you.
 - Separate Mihon AI app versioning.

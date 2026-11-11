@@ -13,13 +13,32 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from PIL import Image, ImageDraw, JpegImagePlugin
+from PIL import Image, ImageChops, ImageDraw, ImageStat, JpegImagePlugin
 
 import reader_ai_companion as companion
 
 
 def png(size, color=(45, 110, 180)):
     with Image.new("RGB", size, color) as image:
+        with BytesIO() as buffer:
+            image.save(buffer, "PNG")
+            return buffer.getvalue()
+
+
+def thin_text_png(size):
+    """Font-independent one-pixel strokes and gaps that preprocessing must retain."""
+    with Image.new("RGB", size, "white") as image:
+        draw = ImageDraw.Draw(image)
+        for x in range(8, size[0] - 8, 2):
+            draw.line((x, 8, x, 39), fill="black", width=1)
+        for y in range(56, size[1] - 14, 23):
+            for x in range(8, size[0] - 10, 13):
+                # The stems, crossbar and diagonal resemble small Cyrillic
+                # letter parts without depending on an installed system font.
+                draw.line((x, y, x, y + 13), fill="black", width=1)
+                draw.line((x + 5, y, x + 5, y + 13), fill="black", width=1)
+                draw.line((x, y + 7, x + 5, y + 7), fill="black", width=1)
+                draw.line((x + 7, y + 13, x + 10, y), fill="black", width=1)
         with BytesIO() as buffer:
             image.save(buffer, "PNG")
             return buffer.getvalue()
@@ -45,6 +64,7 @@ class TargetWidthTests(unittest.TestCase):
         self.opener = build_opener(ProxyHandler({}))
         self.source = png((128, 75))
         self.calls = []
+        self.native_inputs = []
         self.failure = None
         self.logs = self.patch(companion, "_emit_log_line")
         self.patch(companion, "_run_logged_subprocess", side_effect=self.native_model)
@@ -72,6 +92,8 @@ class TargetWidthTests(unittest.TestCase):
         for path in inputs:
             with Image.open(path) as image:
                 sizes.append(image.size)
+                with image.convert("RGB") as rgb:
+                    self.native_inputs.append((image.size, rgb.tobytes()))
         self.calls.append({"sizes": sizes, "scale": scale, "directory": source.is_dir(), "format": output_format})
         failure, self.failure = self.failure, None
         if failure == "safe":
@@ -119,6 +141,8 @@ class TargetWidthTests(unittest.TestCase):
             expected_width = 0 if width == "missing" else width
             self.assertEqual(accepted["target_width"], expected_width)
             self.assertEqual(response.headers["X-Reader-AI-Target-Width"], str(expected_width))
+            if expected_width:
+                self.assertEqual(response.headers["X-Reader-AI-Input-Policy"], "native-input-v2")
         job = self.server._chapter_jobs[accepted["job_id"]]
         results = []
         for index in range(count):
@@ -142,11 +166,32 @@ class TargetWidthTests(unittest.TestCase):
             self.assertEqual(image.size, size)
             self.assertNotEqual(image.getpixel((image.width // 2, image.height - 1)), (0, 0, 0))
         self.assertEqual(headers["X-Reader-AI-Target-Width"], str(width))
+        if width:
+            self.assertEqual(headers["X-Reader-AI-Input-Policy"], "native-input-v2")
+
+    def assert_original_native_inputs(self, sources):
+        expected = []
+        for source in sources:
+            with Image.open(BytesIO(source)) as image, image.convert("RGB") as rgb:
+                expected.append((image.size, rgb.tobytes()))
+        self.assertEqual(self.native_inputs, expected)
+
+    def reference_width_output(self, source, scale, width):
+        # The reference never calls the production geometry/preparation helpers:
+        # one native pixel-preserving pass, then one final proportional resize.
+        with Image.open(BytesIO(source)) as image:
+            height = max(1, (image.height * width + image.width // 2) // image.width)
+            with image.resize((image.width * scale, image.height * scale), Image.Resampling.NEAREST) as native:
+                return native.resize((width, height), Image.Resampling.LANCZOS)
 
     def test_chapter_page_keeps_width_echo_if_job_expires_after_bytes_are_read(self):
         expected = self.submit("zip", 129, companion.FAST_MODEL_NAME, count=1)[0][0]
         job = next(iter(self.server._chapter_jobs.values()))
         self.assertTrue(job.completed.wait(2))
+        with self.http(f"/api/upscale-chapter/{job.job_id}/stream") as response:
+            self.assertEqual(response.headers["X-Reader-AI-Target-Width"], "129")
+            self.assertEqual(response.headers["X-Reader-AI-Input-Policy"], "native-input-v2")
+            self.assertIn(expected, response.read())
         get_page = self.server.get_chapter_page
 
         def get_then_expire(job_id, page_index):
@@ -177,18 +222,135 @@ class TargetWidthTests(unittest.TestCase):
                             self.assert_size(result, size, expected_width)
                         self.assertEqual(len(self.calls), 1)
                         self.assertEqual(self.calls[0]["scale"], scale)
-                        inference_width = (width + scale - 1) // scale if expected_width else 128
-                        self.assertTrue(all(size[0] == inference_width for size in self.calls[0]["sizes"]))
+                        self.assertTrue(all(size == (128, 75) for size in self.calls[0]["sizes"]))
 
     def test_fast_720_source_reaches_exact_2048_with_one_native_pass(self):
         self.source = png((720, 315))
         result = self.submit("single", 2048, companion.FAST_MODEL_NAME, output="jpg")[0]
         self.assert_size(result, (2048, 896), 2048)
-        self.assertEqual(self.calls, [{"sizes": [(1024, 448)], "scale": 2, "directory": False, "format": "png"}])
+        self.assertEqual(self.calls, [{"sizes": [(720, 315)], "scale": 2, "directory": False, "format": "png"}])
         with Image.open(BytesIO(result[0])) as image:
             self.assertEqual(JpegImagePlugin.get_sampling(image), 0)
-        self.assertTrue(any("source=720x315, inference=1024x448 x2, output=2048x896" in str(call)
+        self.assertTrue(any("source=720x315, inference=720x315 x2, output=2048x896" in str(call)
                             for call in self.logs.call_args_list))
+
+    def test_thin_text_reaches_model_unchanged_before_exact_width_on_every_endpoint(self):
+        for size, width in (((800, 96), 1440), ((720, 95), 2048)):
+            self.source = thin_text_png(size)
+            for model, scale in ((companion.FAST_MODEL_NAME, 2), ("realesrgan-x4plus-anime", 4)):
+                with self.reference_width_output(self.source, scale, width) as reference:
+                    for route in ("single", "zip", "direct"):
+                        with self.subTest(source=size, width=width, model=model, route=route):
+                            self.calls.clear()
+                            self.native_inputs.clear()
+                            body, headers = self.submit(route, width, model, count=1)[0]
+                            self.assert_original_native_inputs([self.source])
+                            self.assertEqual(len(self.calls), 1)
+                            self.assertEqual(self.calls[0]["scale"], scale)
+                            self.assertEqual(self.calls[0]["format"], "png")
+                            self.assert_size((body, headers), reference.size, width)
+                            with Image.open(BytesIO(body)) as actual:
+                                with ImageChops.difference(actual, reference) as difference:
+                                    self.assertIsNone(difference.getbbox())
+                                if size == (800, 96) and scale == 2:
+                                    # Pre-shrinking 800 to 720 reduces this to
+                                    # about 56; native-first keeps about 105.
+                                    with actual.crop((14, 14, 1426, 70)) as strokes:
+                                        self.assertGreater(ImageStat.Stat(strokes).stddev[0], 90)
+
+    def test_directory_batch_preserves_each_original_text_image(self):
+        sources = [thin_text_png(size) for size in ((800, 96), (720, 95))]
+        for model, scale in ((companion.FAST_MODEL_NAME, 2), ("realesrgan-x4plus-anime", 4)):
+            with self.subTest(model=model):
+                self.calls.clear()
+                self.native_inputs.clear()
+                requests = [companion.PendingUpscaleRequest(
+                    request_id=str(index), body=source, input_format="png", requested_output_format="png",
+                    model_name=model, native_scale=scale, preferred_output_format="png",
+                    batch_size=4, is_chunked=False, target_width=1440,
+                ) for index, source in enumerate(sources)]
+                workspace = self.root / f"text-batch-{scale}"
+                workspace.mkdir()
+                results = companion._run_subprocess_batch(self.config, workspace, requests, None)
+                self.assert_original_native_inputs(sources)
+                self.assertEqual(len(self.calls), 1)
+                self.assertTrue(self.calls[0]["directory"])
+                for request in requests:
+                    with self.reference_width_output(request.body, scale, 1440) as reference, \
+                            Image.open(BytesIO(results[request.request_id].bytes)) as actual, \
+                            ImageChops.difference(actual, reference) as difference:
+                        self.assertIsNone(difference.getbbox())
+
+    def test_native_area_limit_uses_bounded_target_canvas_and_preserves_chunk_phase(self):
+        create_image = Image.new
+        # Cover global vertical-first downsampling and horizontal-first
+        # upsampling. The whole native canvas exceeds the forced GPU budget.
+        for source_size, width, final_size, native_limit in (
+            ((128, 2001), 64, (64, 1001), 64 * 1024),
+            ((800, 200), 2048, (2048, 512), 512 * 1024),
+        ):
+            with self.subTest(source=source_size, width=width):
+                self.source = thin_text_png(source_size)
+                self.calls.clear()
+                self.native_inputs.clear()
+                allocations = []
+
+                def bounded_canvas(mode, size, *args, **kwargs):
+                    allocations.append(size)
+                    if size != final_size:
+                        self.assertLessEqual(size[0] * size[1], native_limit)
+                    return create_image(mode, size, *args, **kwargs)
+
+                with patch.object(companion, "MAX_NATIVE_OUTPUT_PIXELS", native_limit), \
+                        patch.object(Image, "new", side_effect=bounded_canvas):
+                    body, headers = self.submit("single", width, companion.FAST_MODEL_NAME)[0]
+                self.assert_size((body, headers), final_size, width)
+                self.assertIn(final_size, allocations)
+                self.assertNotIn((source_size[0] * 2, source_size[1] * 2), allocations)
+                self.assertGreater(len(self.calls), 2)
+                for call in self.calls:
+                    self.assertFalse(call["directory"])
+                    self.assertEqual(call["format"], "png")
+                    for input_width, input_height in call["sizes"]:
+                        self.assertEqual(input_width, source_size[0])
+                        self.assertLessEqual(input_width * input_height * call["scale"] ** 2, native_limit)
+                with self.reference_width_output(self.source, 2, width) as reference, \
+                        Image.open(BytesIO(body)) as actual, ImageChops.difference(actual, reference) as difference:
+                    # Tiny rounding differences are allowed; local per-strip
+                    # phases or missing overlap would corrupt seam rows.
+                    self.assertLess(ImageStat.Stat(difference).mean[0], 0.1)
+                    self.assertLessEqual(difference.getextrema()[0][1], 1)
+
+    def test_cancelled_custom_width_chunk_never_returns_or_encodes_final_page(self):
+        self.source = thin_text_png((128, 1201))
+        request = companion.PendingUpscaleRequest(
+            request_id="cancelled-width-chunks", body=self.source, input_format="png", requested_output_format="png",
+            model_name=companion.FAST_MODEL_NAME, native_scale=2, preferred_output_format="png",
+            batch_size=1, is_chunked=False, target_width=64,
+        )
+        workspace = self.root / "cancelled-width-chunks"
+        workspace.mkdir()
+
+        def cancel_after_native(**kwargs):
+            result = self.native_model(**kwargs)
+            request.cancel_event.set()
+            return result
+
+        encoded_sizes = []
+        encode_image = companion._encode_pil_image
+
+        def record_encoded_size(image, *args, **kwargs):
+            encoded_sizes.append(image.size)
+            return encode_image(image, *args, **kwargs)
+
+        with patch.object(companion, "MAX_NATIVE_OUTPUT_PIXELS", 64 * 1024), \
+                patch.object(companion, "_run_logged_subprocess", side_effect=cancel_after_native), \
+                patch.object(companion, "_encode_pil_image", side_effect=record_encoded_size):
+            with self.assertRaisesRegex(RuntimeError, "canceled"):
+                companion._process_single_request_in_workspace(self.config, workspace, request, None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(request.cancel_event.is_set())
+        self.assertNotIn((64, 601), encoded_sizes)
 
     def test_cmyk_jpeg_is_converted_before_lossless_preparation_on_every_endpoint(self):
         with Image.new("CMYK", (80, 120), (35, 120, 200, 10)) as source:
@@ -199,7 +361,7 @@ class TargetWidthTests(unittest.TestCase):
             self.assertEqual(decoded.mode, "CMYK")
             with decoded.convert("RGB") as rgb:
                 expected_color = rgb.getpixel((40, 60))
-        # Equal working dimensions must also normalize an unsupported mode,
+        # Original dimensions must still normalize an unsupported mode,
         # rather than bypassing preparation and forwarding CMYK to inference.
         prepared, extension = companion._prepare_width_input(self.source, "jpg", 2, 160, "fixture-cmyk")
         self.assertEqual(extension, "png")
@@ -224,11 +386,16 @@ class TargetWidthTests(unittest.TestCase):
                     self.assert_size(result, (129, 76), 129)
 
     def test_custom_width_page_is_delivered_before_directory_process_exits(self):
+        started = threading.Event()
+        allow_write = threading.Event()
         finish = threading.Event()
         written = threading.Event()
         self.addCleanup(finish.set)
+        self.addCleanup(allow_write.set)
 
         def running_model(**kwargs):
+            started.set()
+            self.assertTrue(allow_write.wait(4))
             result = self.native_model(**kwargs)
             written.set()
             self.assertTrue(finish.wait(4))
@@ -237,6 +404,14 @@ class TargetWidthTests(unittest.TestCase):
         with patch.object(companion, "_run_logged_subprocess", side_effect=running_model):
             with self.http("/api/upscale-chapter", self.archive(), 129, output="jpg") as response:
                 accepted = json.load(response)
+                self.assertEqual(response.headers["X-Reader-AI-Input-Policy"], "native-input-v2")
+            self.assertTrue(started.wait(2))
+            with self.http(f"/api/upscale-chapter/{accepted['job_id']}/page/0") as response:
+                self.assertEqual(response.status, 202)
+                self.assertEqual(response.headers["X-Reader-AI-Target-Width"], "129")
+                self.assertEqual(response.headers["X-Reader-AI-Input-Policy"], "native-input-v2")
+                self.assertEqual(json.load(response)["target_width"], 129)
+            allow_write.set()
             self.assertTrue(written.wait(2))
             job = self.server._chapter_jobs[accepted["job_id"]]
             deadline = time.monotonic() + 3
@@ -321,7 +496,7 @@ class TargetWidthTests(unittest.TestCase):
         workspace.mkdir()
         results = companion._run_subprocess_batch(self.config, workspace, requests, None)
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0]["sizes"], [(129, 76), (129, 52)])
+        self.assertEqual(self.calls[0]["sizes"], [(128, 75), (200, 81)])
         for request, expected in zip(requests, ((257, 151), (257, 104))):
             with Image.open(BytesIO(results[request.request_id].bytes)) as image:
                 self.assertEqual(image.size, expected)
@@ -342,9 +517,22 @@ class TargetWidthTests(unittest.TestCase):
         self.failure = "safe"
         result = self.submit("single", 257, "realesrgan-x4plus-anime")[0]
         self.assert_size(result, (257, 151), 257)
-        self.assertEqual([call["sizes"] for call in self.calls], [[(65, 38)], [(65, 38)]])
+        self.assertEqual([call["sizes"] for call in self.calls], [[(128, 75)], [(128, 75)]])
 
     def test_extreme_geometry_fails_before_resize_inference_or_scope_supersession(self):
+        # Exercise source and final-area boundaries using metadata only, so the
+        # exact limit and one-pixel excess need no enormous image allocations.
+        with patch.object(companion, "MAX_TARGET_OUTPUT_PIXELS", 4096):
+            inference, final = companion._width_geometry(companion.ImageSize(4096, 1), 2, 64)
+            self.assertEqual((inference.width, inference.height), (4096, 1))
+            self.assertEqual((final.width, final.height), (64, 1))
+            with self.assertRaisesRegex(ValueError, "pixel limit"):
+                companion._width_geometry(companion.ImageSize(4097, 1), 2, 64)
+            _, final = companion._width_geometry(companion.ImageSize(32, 32), 4, 64)
+            self.assertEqual(final.width * final.height, 4096)
+        with patch.object(companion, "MAX_TARGET_OUTPUT_PIXELS", 4095):
+            with self.assertRaisesRegex(ValueError, "pixel limit"):
+                companion._width_geometry(companion.ImageSize(32, 32), 4, 64)
         self.source = png((720, 12000))
         self.server.sync_client_scope("phone", 7)
         with patch.object(Image.Image, "resize") as resize:
@@ -400,8 +588,11 @@ class TargetWidthTests(unittest.TestCase):
                     result = self.submit(route, 64, model, output="jpg", count=1)[0]
                     self.assert_size(result, (64, 68000), 64)
                     self.assertEqual(result[1]["Content-Type"], "image/png")
-                    self.assertGreater(len(self.calls), 1)
-                    self.assertTrue(all(not call["directory"] for call in self.calls))
+                    if model == companion.FAST_MODEL_NAME:
+                        self.assertEqual(len(self.calls), 1)
+                    else:
+                        self.assertGreater(len(self.calls), 1)
+                        self.assertTrue(all(not call["directory"] for call in self.calls))
                     self.assertTrue(all(call["format"] == "png" for call in self.calls))
 
     def test_odd_width_height_uses_source_aspect_and_preserves_chunk_seams(self):
@@ -410,7 +601,7 @@ class TargetWidthTests(unittest.TestCase):
             self.source = companion._encode_pil_image(image, "png")
         # Force the long-page path with a tiny threshold, using the actual
         # chunk compositor and PIL pixels rather than a mocked resize result.
-        with patch.object(companion, "MAX_SINGLE_OUTPUT_DIMENSION", 100), \
+        with patch.object(companion, "MAX_SINGLE_OUTPUT_DIMENSION", 1024), \
                 patch.object(companion, "MAX_CHUNK_OUTPUT_DIMENSION", 64):
             result = self.submit("single", 257, "realesrgan-x4plus-anime")[0]
         self.assert_size(result, (257, 4250), 257)

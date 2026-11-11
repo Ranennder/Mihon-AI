@@ -314,7 +314,9 @@ class ReaderPreferences(
             require(targetWidth == 0 || targetWidth in AI_TARGET_WIDTH_MIN..AI_TARGET_WIDTH_MAX)
         }
 
-        val cacheKey: String get() = "${model.cacheKey}-w$targetWidth"
+        // Keep original-size inference results separate from legacy outputs
+        // generated after reducing the input to targetWidth / model scale.
+        val cacheKey: String get() = "${model.cacheKey}-native-input-v2-w$targetWidth"
     }
 
     enum class RemoteAiChapterMode(

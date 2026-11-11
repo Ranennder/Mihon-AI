@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.37
+
+- Preserve original page pixels before AI inference when an output width is selected. Resize the model result to the requested width after processing, keeping the original aspect ratio.
+- Fix text detail loss caused by reducing an 800-pixel page to 720 pixels before Fast processing at an output width of 1440 pixels.
+- Refresh width-controlled remote AI cache entries so older processed pages are regenerated after updating.
+- Keep separate Fast and Detailed model settings, exact output widths, chapter processing and bounded handling of long pages.
+
+Update both Mihon AI and the Windows Companion. Automated tests cover processing geometry and cache behavior; visual quality on the physical phones and GPU throughput are not measured by these tests.
+
 ## v0.1.33
 
 - Add independent output-width settings for Fast and Detailed in the reader and global reader settings.

@@ -15,6 +15,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okio.BufferedSink
 import okio.BufferedSource
 import org.json.JSONArray
@@ -327,7 +328,7 @@ class RemotePageUpscaler(
                         response.body.string().ifBlank { "Direct chapter request returned HTTP ${response.code}" }
                     return@use ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
                 }
-                if (!acceptsTargetWidth(response.header("X-Reader-AI-Target-Width"), config)) {
+                if (!acceptsTargetWidth(response, config.targetWidth)) {
                     return@use ChapterJobAttempt.failure(UpscaleFailureKind.CONFIGURATION)
                 }
                 val jobId = JSONObject(response.body.string()).optString("job_id").trim()
@@ -335,7 +336,9 @@ class RemotePageUpscaler(
                     lastErrorMessage = "Direct chapter response did not include a job id"
                     ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
                 } else {
-                    ChapterJobAttempt.success(StartedChapterJob(resolution.baseUrl, jobId, clientId, scopeId))
+                    ChapterJobAttempt.success(
+                        StartedChapterJob(resolution.baseUrl, jobId, clientId, scopeId, config.targetWidth),
+                    )
                 }
             }
         }.onFailure {
@@ -372,6 +375,9 @@ class RemotePageUpscaler(
 
         return runCatching {
             client.newCall(requestBuilder.get().build()).execute().use { response ->
+                if (response.isSuccessful && !acceptsTargetWidth(response, job.targetWidth)) {
+                    return@use ChapterPageFetchResult.Failed(message = INPUT_POLICY_ERROR, retryable = false)
+                }
                 when {
                     response.code == 202 -> {
                         val payload = JSONObject(response.body.string().ifBlank { "{}" })
@@ -488,6 +494,9 @@ class RemotePageUpscaler(
                     }
                 }
 
+                if (!acceptsTargetWidth(response, job.targetWidth)) {
+                    return@use ChapterStreamFetchResult.Failed(message = INPUT_POLICY_ERROR, retryable = false)
+                }
                 readChapterPageStream(
                     responseSource = response.body.source(),
                     pageIndexes = pageIndexes,
@@ -713,7 +722,7 @@ class RemotePageUpscaler(
                     return@use ChapterJobAttempt.failure(UpscaleFailureKind.SERVER)
                 }
 
-                if (!acceptsTargetWidth(response.header("X-Reader-AI-Target-Width"), config)) {
+                if (!acceptsTargetWidth(response, config.targetWidth)) {
                     return@use ChapterJobAttempt.failure(UpscaleFailureKind.CONFIGURATION)
                 }
                 val payload = response.body.string()
@@ -731,6 +740,7 @@ class RemotePageUpscaler(
                         jobId = jobId,
                         clientId = clientId,
                         workScope = scopeId,
+                        targetWidth = config.targetWidth,
                     ),
                 )
             }
@@ -838,7 +848,7 @@ class RemotePageUpscaler(
                     return@use UpscaleAttempt.failure(UpscaleFailureKind.SERVER)
                 }
 
-                if (!acceptsTargetWidth(response.header("X-Reader-AI-Target-Width"), config)) {
+                if (!acceptsTargetWidth(response, config.targetWidth)) {
                     return@use UpscaleAttempt.failure(UpscaleFailureKind.CONFIGURATION)
                 }
                 val responseBody = response.body
@@ -888,9 +898,12 @@ class RemotePageUpscaler(
         return scopeId.takeIf { config == readerPreferences.remoteAiConfig() && it == workScope.get() }
     }
 
-    private fun acceptsTargetWidth(header: String?, config: ReaderPreferences.RemoteAiConfig): Boolean {
-        if (config.targetWidth == 0 || header?.toIntOrNull() == config.targetWidth) return true
-        lastErrorMessage = "The PC companion did not confirm the requested output width. Update the PC companion."
+    private fun acceptsTargetWidth(response: Response, targetWidth: Int): Boolean {
+        if (targetWidth == 0) return true
+        val matchesWidth = response.header("X-Reader-AI-Target-Width")?.toIntOrNull() == targetWidth
+        val matchesInputPolicy = response.header(HEADER_INPUT_POLICY) == REQUIRED_INPUT_POLICY
+        if (matchesWidth && matchesInputPolicy) return true
+        lastErrorMessage = INPUT_POLICY_ERROR
         return false
     }
 
@@ -1090,6 +1103,7 @@ class RemotePageUpscaler(
         val jobId: String,
         val clientId: String,
         val workScope: Long,
+        val targetWidth: Int,
     )
 
     sealed interface ChapterPageFetchResult {
@@ -1187,6 +1201,10 @@ class RemotePageUpscaler(
         private const val HEADER_TRACE_ID = "X-Reader-AI-Trace-Id"
         private const val HEADER_WORK_SCOPE = "X-Reader-AI-Work-Scope"
         private const val HEADER_JOB_STATE = "X-Reader-AI-Job-State"
+        private const val HEADER_INPUT_POLICY = "X-Reader-AI-Input-Policy"
+        private const val REQUIRED_INPUT_POLICY = "native-input-v2"
+        private const val INPUT_POLICY_ERROR =
+            "The PC companion did not confirm the requested width and original-size AI input. Update the PC companion."
 
         private fun encodeHeaderText(value: String): String {
             return URLEncoder.encode(value, StandardCharsets.UTF_8.name())

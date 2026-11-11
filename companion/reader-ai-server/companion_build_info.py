@@ -1,1 +1,1 @@
-RELEASE_TAG = "v0.1.36"
+RELEASE_TAG = "v0.1.37"

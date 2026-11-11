@@ -72,6 +72,8 @@ SUPPORTED_BATCH_SIZES = (1, 4)
 MIN_TARGET_WIDTH = 64
 MAX_TARGET_WIDTH = 16384
 MAX_TARGET_OUTPUT_PIXELS = 128 * 1024 * 1024
+MAX_NATIVE_OUTPUT_PIXELS = MAX_TARGET_OUTPUT_PIXELS
+NATIVE_INPUT_POLICY = "native-input-v2"
 JPEG_MAX_DIMENSION = 65535
 JPEG_OUTPUT_FORMATS = {"jpg", "jpeg"}
 PNG_OUTPUT_FORMAT = "png"
@@ -1876,7 +1878,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
         if processed_image is None:
             stage, percent = self.server.get_chapter_page_progress(job_id, int(page_index_text))
-            self._send_json(HTTPStatus.ACCEPTED, {"stage": stage, "percent": percent})
+            self._send_json(HTTPStatus.ACCEPTED, {"stage": stage, "percent": percent, "target_width": target_width})
             return
 
         self.server.note_chapter_page_ready(job_id, int(page_index_text))
@@ -1889,6 +1891,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
 
         try:
             page_indexes = self.server.get_chapter_page_indexes(job_id)
+            with self.server._chapter_jobs_lock:
+                target_width = self.server._chapter_jobs[job_id].target_width
         except KeyError:
             self._send_text(HTTPStatus.NOT_FOUND, "Chapter job not found")
             return
@@ -1898,6 +1902,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/x-reader-ai-chapter-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
+        self.send_header("X-Reader-AI-Target-Width", str(target_width))
+        self.send_header("X-Reader-AI-Input-Policy", NATIVE_INPUT_POLICY)
         self.end_headers()
 
         remaining_page_indexes = set(page_indexes)
@@ -2445,6 +2451,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         if target_width is not None:
             self.send_header("X-Reader-AI-Target-Width", str(target_width))
+            self.send_header("X-Reader-AI-Input-Policy", NATIVE_INPUT_POLICY)
         self.end_headers()
         self.wfile.write(body)
 
@@ -2460,6 +2467,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         if type(payload.get("target_width")) is int:
             self.send_header("X-Reader-AI-Target-Width", str(payload["target_width"]))
+            self.send_header("X-Reader-AI-Input-Policy", NATIVE_INPUT_POLICY)
         self.end_headers()
         self.wfile.write(body)
 
@@ -2515,8 +2523,22 @@ def _process_single_request_in_workspace(
         body, input_format = _prepare_width_input(
             request.body, request.input_format, request.native_scale, request.target_width, request.request_id,
         )
-        # Run exactly one native model pass at the requested working width.
-        # Keep the inference pixels lossless until the exact final rounding.
+        # Preserve every original pixel before inference. Width is an output
+        # setting: shrinking to target/native beforehand erases thin lettering.
+        # Oversized native intermediates are composed in final-size strips.
+        if _requires_chunked_upscale(body, request.native_scale, request.native_scale, request.target_width):
+            result = _run_chunked_subprocess(
+                config=config, request_id=request.request_id, workspace=workspace,
+                body=body, requested_output_format=PNG_OUTPUT_FORMAT,
+                model_name=request.model_name, native_scale=request.native_scale,
+                target_scale=request.native_scale, target_width=request.target_width,
+                display_label=request.page_display_label, client_id=request.client_id,
+                cancel_event=request.cancel_event, process_registry=process_registry,
+            )
+            return _finish_width_output(
+                result, model_name=request.model_name, requested_output_format=request.requested_output_format,
+                source_body=request.body, target_width=request.target_width, cancel_event=request.cancel_event,
+            )
         inference_request = replace(
             request, body=body, input_format=input_format, target_width=0,
             requested_output_format=PNG_OUTPUT_FORMAT, preferred_output_format=PNG_OUTPUT_FORMAT,
@@ -3151,11 +3173,9 @@ def _requires_chunked_upscale(body: bytes, native_scale: int, target_scale: int,
         return False
 
     if target_width:
-        inference_size, final_size = _width_geometry(image_size, native_scale, target_width)
-        return max(
-            inference_size.width * native_scale, inference_size.height * native_scale,
-            final_size.width, final_size.height,
-        ) > MAX_SINGLE_OUTPUT_DIMENSION
+        inference_size, _ = _width_geometry(image_size, native_scale, target_width)
+        return (max(inference_size.width, inference_size.height) * native_scale > MAX_SINGLE_OUTPUT_DIMENSION
+                or inference_size.width * inference_size.height * native_scale * native_scale > MAX_NATIVE_OUTPUT_PIXELS)
 
     native_output_width = image_size.width * native_scale
     native_output_height = image_size.height * native_scale
@@ -3270,7 +3290,15 @@ def _run_chunked_subprocess(
     client_id: str | None = None,
     cancel_event: threading.Event | None = None,
     process_registry: ReaderAiServer | None = None,
+    target_width: int = 0,
 ) -> ProcessedImage:
+    if target_width:
+        return _run_width_chunks(
+            config=config, request_id=request_id, workspace=workspace, body=body,
+            model_name=model_name, native_scale=native_scale, target_width=target_width,
+            display_label=display_label, client_id=client_id, cancel_event=cancel_event,
+            process_registry=process_registry,
+        )
     binary = Path(config.binary)
     model_dir = Path(config.model_dir)
     final_output_format = _select_output_format(body, requested_output_format, target_scale)
@@ -3356,6 +3384,123 @@ def _run_chunked_subprocess(
         source_image.close()
 
 
+def _run_width_chunks(
+    config: Config, request_id: str, workspace: Path, body: bytes,
+    model_name: str, native_scale: int, target_width: int,
+    display_label: str | None, client_id: str | None,
+    cancel_event: threading.Event | None, process_registry: ReaderAiServer | None,
+) -> ProcessedImage:
+    """Keep original model pixels while allocating only the final-size canvas.
+
+    Each output stripe uses the same global sampling phase as a whole-page
+    resize. Model context and Lanczos support overlap the stripes, so resizing
+    independently rounded crops cannot introduce seams or stretch the page.
+    """
+    source_image = None
+    final_image = None
+    try:
+        with Image.open(BytesIO(body)) as decoded:
+            _, final = _width_geometry(ImageSize(*decoded.size), native_scale, target_width)
+            source_image = decoded.convert("RGB")
+        source_width, source_height = source_image.size
+        native_width = source_width * native_scale
+        if native_width > MAX_SINGLE_OUTPUT_DIMENSION:
+            raise ValueError("Source is too wide for full-resolution native inference")
+        available_height = min(
+            MAX_SINGLE_OUTPUT_DIMENSION // native_scale,
+            MAX_NATIVE_OUTPUT_PIXELS // (native_width * native_scale),
+        )
+        # The filter's support grows when downsampling. Include it in source
+        # pixels in addition to the neural model's context.
+        overlap = CHUNK_OVERLAP_INPUT_PIXELS + (3 * source_height + final.height - 1) // final.height
+        if source_height <= available_height:
+            core_height = source_height
+            overlap = 0
+        else:
+            core_height = min(max(512, MAX_CHUNK_OUTPUT_DIMENSION // native_scale), available_height - 2 * overlap)
+            if core_height < 1:
+                raise ValueError("Native inference and resize overlap exceed the pixel limit for this source")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Remote AI work was canceled")
+        final_image = Image.new("RGB", (final.width, final.height))
+        for core_top in range(0, source_height, core_height):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Remote AI work was canceled")
+            core_bottom = min(source_height, core_top + core_height)
+            output_top = (core_top * final.height + source_height // 2) // source_height
+            output_bottom = (core_bottom * final.height + source_height // 2) // source_height
+            if output_bottom <= output_top:
+                continue
+            chunk_top = max(0, core_top - overlap)
+            chunk_bottom = min(source_height, core_bottom + overlap)
+            with source_image.crop((0, chunk_top, source_width, chunk_bottom)) as chunk:
+                chunk_body = _encode_pil_image(chunk, PNG_OUTPUT_FORMAT)
+            chunk_request = dict(
+                request_id=f"{request_id}/chunk-{core_top // core_height + 1}",
+                workspace=workspace, binary=Path(config.binary), model_dir=Path(config.model_dir),
+                body=chunk_body, input_format=PNG_OUTPUT_FORMAT, output_format=PNG_OUTPUT_FORMAT,
+                model_name=model_name, scale=native_scale, display_label=display_label,
+                client_id=client_id, cancel_event=cancel_event, process_registry=process_registry,
+            )
+            try:
+                processed = _run_subprocess_once(config=config, **chunk_request)
+            except RuntimeError as error:
+                if not _should_retry_with_safe_vulkan_settings(str(error)):
+                    raise
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Remote AI work was canceled") from error
+                processed = _run_subprocess_once(config=_build_safe_vulkan_retry_config(config), **chunk_request)
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Remote AI work was canceled")
+            expected_size = (native_width, (chunk_bottom - chunk_top) * native_scale)
+            with Image.open(BytesIO(processed.bytes)) as enhanced:
+                if enhanced.size != expected_size:
+                    raise RuntimeError("Native model returned incorrect chunk dimensions")
+                sampling_box = (
+                    0.0,
+                    max(0.0, (output_top * source_height / final.height - chunk_top) * native_scale),
+                    float(native_width),
+                    min(float(enhanced.height), (output_bottom * source_height / final.height - chunk_top) * native_scale),
+                )
+                stripe_height = output_bottom - output_top
+                if _width_resize_vertical_first((native_width, source_height * native_scale),
+                                                (final.width, final.height)):
+                    with enhanced.resize((native_width, stripe_height), Image.Resampling.LANCZOS,
+                                         box=sampling_box) as vertical:
+                        with vertical.resize((final.width, stripe_height), Image.Resampling.LANCZOS) as stripe:
+                            final_image.paste(stripe, (0, output_top))
+                else:
+                    with enhanced.resize((final.width, enhanced.height), Image.Resampling.LANCZOS) as horizontal:
+                        box = (0.0, sampling_box[1], float(final.width), sampling_box[3])
+                        with horizontal.resize((final.width, stripe_height), Image.Resampling.LANCZOS, box=box) as stripe:
+                            final_image.paste(stripe, (0, output_top))
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Remote AI work was canceled")
+        return ProcessedImage(_encode_pil_image(final_image, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT)
+    finally:
+        if final_image is not None:
+            final_image.close()
+        if source_image is not None:
+            source_image.close()
+
+
+def _width_resize_vertical_first(source: tuple[int, int], target: tuple[int, int]) -> bool:
+    # Choose from the whole page, as Pillow's whole-image Lanczos does. Letting
+    # each short strip choose its own order changes 8-bit rounding across tiles.
+    height_reduction = source[1] - target[1]
+    return height_reduction > 0 and height_reduction > 2 * (source[0] - target[0])
+
+
+def _resize_width_image(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    # Explicit one-axis passes keep normal pages and memory-bounded strips on
+    # the same sampling/rounding path, independent of Pillow's local heuristic.
+    if _width_resize_vertical_first(image.size, size):
+        with image.resize((image.width, size[1]), Image.Resampling.LANCZOS) as vertical:
+            return vertical.resize(size, Image.Resampling.LANCZOS)
+    with image.resize((size[0], image.height), Image.Resampling.LANCZOS) as horizontal:
+        return horizontal.resize(size, Image.Resampling.LANCZOS)
+
+
 def _inference_output_format(model_name: str, output_format: str) -> str:
     # NCNN's Windows JPEG encoder defaults to 4:2:0 chroma subsampling even at
     # quality 100. Preserve the model's pixels before the final 4:4:4 encoding.
@@ -3383,15 +3528,14 @@ def _width_geometry(source: ImageSize, native_scale: int, target_width: int) -> 
         raise ValueError("Source image dimensions must be positive")
     if source.width * source.height > MAX_TARGET_OUTPUT_PIXELS:
         raise ValueError(f"Source image exceeds the {MAX_TARGET_OUTPUT_PIXELS} pixel limit for custom width processing")
-    inference_width = (target_width + native_scale - 1) // native_scale
-    # Round both heights from the original aspect ratio, so inference rounding
-    # cannot accumulate into a visibly stretched long page.
+    if source.width * native_scale > MAX_SINGLE_OUTPUT_DIMENSION:
+        raise ValueError("Source is too wide for full-resolution native inference")
+    # Width is applied after inference, never by throwing away source pixels.
     def height_at(width: int) -> int:
         return max(1, (source.height * width + source.width // 2) // source.width)
-    inference = ImageSize(inference_width, height_at(inference_width))
+    inference = source
     final = ImageSize(target_width, height_at(target_width))
-    if max(inference.width * inference.height * native_scale * native_scale,
-           final.width * final.height) > MAX_TARGET_OUTPUT_PIXELS:
+    if final.width * final.height > MAX_TARGET_OUTPUT_PIXELS:
         raise ValueError(
             f"Target width {target_width} produces an image exceeding the "
             f"{MAX_TARGET_OUTPUT_PIXELS} pixel limit; choose a smaller width for this page"
@@ -3423,14 +3567,10 @@ def _prepare_width_input(
         png_modes = {"1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16", "I;16B"}
         if image.size == (inference.width, inference.height) and image.mode in png_modes:
             return body, input_format
-        with image.resize((inference.width, inference.height), Image.Resampling.LANCZOS) as resized:
-            if resized.mode in png_modes:
-                return _encode_pil_image(resized, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
-            # JPEG sources can be CMYK; PNG cannot store that color mode.
-            # Preserve alpha for other unsupported modes that contain it.
-            mode = "RGBA" if any(band.upper() == "A" for band in resized.getbands()) else "RGB"
-            with resized.convert(mode) as converted:
-                return _encode_pil_image(converted, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
+        # JPEG sources can be CMYK; normalize only the mode, not dimensions.
+        mode = "RGBA" if any(band.upper() == "A" for band in image.getbands()) else "RGB"
+        with image.convert(mode) as converted:
+            return _encode_pil_image(converted, PNG_OUTPUT_FORMAT), PNG_OUTPUT_FORMAT
 
 
 def _finish_width_output(
@@ -3455,7 +3595,7 @@ def _finish_width_output(
         if image.size == (final.width, final.height):
             encoded = _encode_pil_image(image, output_format, model_name)
         else:
-            with image.resize((final.width, final.height), Image.Resampling.LANCZOS) as resized:
+            with _resize_width_image(image, (final.width, final.height)) as resized:
                 encoded = _encode_pil_image(resized, output_format, model_name)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("Remote AI work was canceled")

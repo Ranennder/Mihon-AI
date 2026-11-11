@@ -57,7 +57,7 @@ val appVersionCodeBase = 7668
 val appBuildNumber = getLatestCommitCount()
 val appBuildNumberCode = appVersionCodeBase + appBuildNumber.toInt()
 val upstreamAppVersionName = "0.20.4"
-val mihonAiVersionName = "0.1.36"
+val mihonAiVersionName = "0.1.37"
 
 // Public native OAuth registration, separate from upstream Firebase settings.
 val googleDriveOAuth = JsonSlurper().parse(rootProject.file("google-drive-oauth.json")) as Map<*, *>
