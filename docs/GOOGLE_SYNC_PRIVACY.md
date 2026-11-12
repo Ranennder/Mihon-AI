@@ -1,6 +1,6 @@
-# Google Drive history sync privacy
+# Google Drive history sync and library restore privacy
 
-Effective date: 10 November 2026. Applies to the optional Google Drive history
+Effective date: 12 November 2026. Applies to the optional Google Drive history
 sync in **Mihon AI** and **Aidoku AI**, maintained by
 [Ranennder](https://github.com/Ranennder).
 
@@ -27,16 +27,32 @@ identifiers, optional title and chapter names and URLs, page positions and page
 counts, read/unread state, last-read dates, and timestamps used to resolve edits
 between devices. A replica may contain history merged from your other devices.
 Only reading records with matching source/title/chapter identities are applied.
-Incognito reading is excluded. Image files, passwords, OAuth tokens, categories,
+An Android replica also includes a separate complete snapshot of its actual
+library favorites: title/source identities, names, original website URLs,
+optional library-add dates and a revision timestamp. It includes unread
+favorites and titles without chapters. Unresolved sources remain represented.
+Incognito reading events are excluded; explicitly favorited titles belong to
+the library snapshot regardless of whether they have reading history.
+Image files, passwords, OAuth tokens, categories,
 extensions and AI settings are not included in these history files.
 
 On iOS, you can explicitly import titles represented in the received history.
 The app resolves their original URLs through installed sources, requests title
-details and chapter lists from those sites, adds missing library entries and
-applies matching reading records. Existing library entries are retained. This
-does not transfer images or a complete list of unread favorites from Android.
+details and chapter lists from those sites and applies matching reading records.
+This history restoration does not add every read title to the library.
 
-This data is used only to provide the history synchronization you enable. It is
+Separately, you can explicitly restore the iPhone library from a selected Android
+snapshot in the same cloud account, without a manual backup file. The app shows
+the selected source and confirms replacement, resolves missing favorites through
+installed sources, saves a local recovery backup and changes library membership
+only when all favorites resolve. Current iPhone library entries absent from the
+selected favorites leave the library; their chapter data and history remain.
+An empty snapshot needs separate confirmation. This is a one-time operation;
+subsequent history synchronization does not automatically remove iPhone-only
+favorites. No image files are transferred through Google Drive by this feature.
+
+This data is used only to provide the history synchronization and library restore
+you enable. It is
 not sold, used for advertising, or used to train AI models. The AI image
 enhancement feature and optional WebDAV connection are separate from Google
 history sync.

@@ -1,0 +1,38 @@
+{
+  "format": "aidoku-mihon-history",
+  "version": 1,
+  "deviceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "records": [],
+  "librarySnapshot": {
+    "format": "aidoku-mihon-library",
+    "version": 1,
+    "deviceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "modifiedAt": 2000,
+    "entries": [
+      {
+        "id": "ab177a84069dbd5f04692518be150fb9c1fc70912b2f8ed1ed56ccd3eb227a34",
+        "source": "local:android:-999",
+        "manga": "/manga/unavailable",
+        "metadata": {
+          "mangaTitle": "Источник недоступен",
+          "chapterTitle": null,
+          "mangaUrl": null,
+          "chapterUrl": null
+        },
+        "dateAdded": null
+      },
+      {
+        "id": "d7923877dccd0b3a0bb344e4cbb5a954eff1b78ae748f103fffbde8032eeb9bd",
+        "source": "mangabuff",
+        "manga": "/manga/unread",
+        "metadata": {
+          "mangaTitle": "Непрочитанный тайтл",
+          "chapterTitle": null,
+          "mangaUrl": "https://mangabuff.ru/manga/unread",
+          "chapterUrl": null
+        },
+        "dateAdded": 123000
+      }
+    ]
+  }
+}

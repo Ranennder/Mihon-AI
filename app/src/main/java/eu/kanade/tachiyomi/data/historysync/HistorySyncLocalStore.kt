@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.data.historysync
 
 import app.cash.sqldelight.async.coroutines.awaitAsList
 import app.cash.sqldelight.async.coroutines.awaitAsOne
+import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
@@ -13,12 +14,17 @@ import kotlinx.serialization.encodeToString
 import tachiyomi.data.Database
 import tachiyomi.data.History_sync_outbox
 import tachiyomi.domain.source.service.SourceManager
+import java.net.URI
 import java.util.Date
 import java.util.UUID
 
 /** Local actions and their stamps enter the SQL outbox in the native write
  * transaction. Network work never runs while a database transaction is held. */
-class HistorySyncLocalStore(private val database: Database, private val sourceManager: SourceManager) {
+class HistorySyncLocalStore(
+    private val database: Database,
+    private val sourceManager: SourceManager,
+    private val now: () -> Long = System::currentTimeMillis,
+) {
     data class Result(val document: HistorySyncDocument, val applied: Int, val unmatched: Int)
 
     private data class LocalChapter(
@@ -41,6 +47,16 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
         val chapters: List<LocalChapter>,
         val pending: List<History_sync_outbox>,
         val records: List<HistorySyncRecord>,
+        val favorites: List<LocalFavorite>,
+        val librarySnapshot: HistorySyncLibrarySnapshot?,
+    )
+
+    private data class LocalFavorite(
+        val id: Long,
+        val source: Long,
+        val url: String,
+        val title: String,
+        val dateAdded: Long,
     )
 
     private data class Resolved(
@@ -120,7 +136,12 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
                 records[id] = HistorySyncProtocol.mergeRecord(current, changed)
             }
             val local = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, replicaDevice, records.values.toList())
-            val merged = HistorySyncProtocol.merge(replicaDevice, local, *normalized.drop(1).toTypedArray())
+            val history = HistorySyncProtocol.merge(replicaDevice, local, *normalized.drop(1).toTypedArray())
+            // A full native favorites list is independent of chapter records.
+            // Never copy another installation's list under this writer's name.
+            val library =
+                librarySnapshot(snapshot, replicaDevice, remote, HistorySyncProtocol.maxClock(history.records))
+            val merged = history.copy(librarySnapshot = library)
             // Check the serialized limit before committing or applying anything.
             HistorySyncProtocol.encode(merged)
             val index = resolved.values.filter { it.chapter.id in nativeIds }
@@ -131,7 +152,10 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
             val committed = database.transactionWithResult {
                 val current = readSnapshot()
                 if (current != snapshot) return@transactionWithResult false
-                database.historySyncQueries.observeClock(HistorySyncProtocol.maxClock(merged.records))
+                database.historySyncQueries.observeClock(
+                    maxOf(HistorySyncProtocol.maxClock(merged.records), library.modifiedAt),
+                )
+                database.historySyncQueries.putLibrarySnapshot(HistorySyncProtocol.json.encodeToString(library))
                 // Alias migration replaces the active journal atomically, so an old
                 // credential-bearing record ID cannot survive the next upload.
                 database.historySyncQueries.clearRecords()
@@ -190,7 +214,89 @@ class HistorySyncLocalStore(private val database: Database, private val sourceMa
         val records = database.historySyncQueries.getRecords().awaitAsList().map {
             HistorySyncProtocol.json.decodeFromString<HistorySyncRecord>(it.json)
         }
-        Snapshot(meta.device_id, meta.logical_clock, meta.active_account, chapters, pending, records)
+        val favorites = database.historySyncQueries.getLocalFavorites { id, source, url, title, added ->
+            LocalFavorite(id, source, url, title, added)
+        }.awaitAsList()
+        val library = database.historySyncQueries.getLibrarySnapshot().awaitAsOneOrNull()?.let {
+            HistorySyncProtocol.json.decodeFromString<HistorySyncLibrarySnapshot>(it)
+        }
+        Snapshot(
+            meta.device_id,
+            meta.logical_clock,
+            meta.active_account,
+            chapters,
+            pending,
+            records,
+            favorites,
+            library,
+        )
+    }
+
+    private suspend fun librarySnapshot(
+        snapshot: Snapshot,
+        writer: String,
+        remote: List<HistorySyncDocument>,
+        observedHistory: Long,
+    ): HistorySyncLibrarySnapshot {
+        val previous = HistorySyncLibraryProtocol.latestOwn(
+            writer,
+            listOfNotNull(snapshot.librarySnapshot) +
+                remote.filter { it.deviceId == writer }.mapNotNull { it.librarySnapshot },
+        )
+        val context = currentCoroutineContext()
+        val entries = HistorySyncLibraryProtocol.canonicalEntries(
+            snapshot.favorites.map {
+                context.ensureActive()
+                libraryEntry(it)
+            },
+        )
+        if (previous?.entries == entries) return previous
+        return HistorySyncLibrarySnapshot(
+            HistorySyncLibraryProtocol.FORMAT,
+            HistorySyncLibraryProtocol.VERSION,
+            writer,
+            HistorySyncProtocol.nextClock(now(), maxOf(snapshot.clock, observedHistory, previous?.modifiedAt ?: 0)),
+            entries,
+        )
+    }
+
+    private fun libraryEntry(favorite: LocalFavorite): HistorySyncLibraryEntry {
+        val provider = runCatching { sourceManager.get(favorite.source) as? HttpSource }.getOrNull()
+        val base = runCatching { provider?.baseUrl }.getOrNull()
+        val supplied = runCatching {
+            provider?.getMangaUrl(
+                SManga.create().apply {
+                    url = favorite.url
+                    title = favorite.title
+                },
+            )
+        }.getOrNull()
+        val websiteURL = runCatching {
+            supplied?.let { raw ->
+                val uri = URI(raw)
+                val absolute = if (uri.isAbsolute) uri else URI(requireNotNull(base)).resolve(uri)
+                val normalized = HistorySyncSourcePolicy.metadataURL(absolute.toASCIIString(), manga = true)
+                normalized?.takeIf(HistorySyncLibraryProtocol::safeWebsiteURL)
+            }
+        }.getOrNull()
+        val website = websiteURL?.let { HistorySyncIdentityResolver.website(it, base, manga = true) }
+        val source = website?.source ?: "local:android:${favorite.source}"
+        // An unresolved native route may contain provider access parameters.
+        // Keep a stable opaque placeholder without uploading that raw URL.
+        val manga = website?.path ?: "id:${favorite.id}"
+        return HistorySyncLibraryEntry(
+            HistorySyncLibraryProtocol.titleId(source, manga),
+            source,
+            manga,
+            HistorySyncMetadata(
+                mangaTitle = favorite.title.takeIf(String::isNotEmpty),
+                mangaUrl = websiteURL?.takeIf {
+                    website !=
+                        null
+                },
+            ),
+            favorite.dateAdded.takeIf { it in 1..HistorySyncProtocol.MAX_TIME },
+        )
     }
 
     private fun resolve(chapters: List<LocalChapter>, pending: List<History_sync_outbox>): Map<Long, Resolved> {

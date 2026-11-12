@@ -1,0 +1,4 @@
+CREATE TABLE history_sync_library_snapshots (
+    account_key TEXT NOT NULL PRIMARY KEY,
+    json TEXT NOT NULL
+);

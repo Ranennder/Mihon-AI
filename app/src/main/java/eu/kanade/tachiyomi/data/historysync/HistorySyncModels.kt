@@ -1,17 +1,24 @@
 package eu.kanade.tachiyomi.data.historysync
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 import java.security.MessageDigest
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class HistorySyncDocument(
     val format: String,
     val version: Int,
     val deviceId: String,
     val records: List<HistorySyncRecord>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val librarySnapshot: HistorySyncLibrarySnapshot? = null,
 )
 
 @Serializable
@@ -69,7 +76,11 @@ object HistorySyncProtocol {
         // Java's default decoder replaces malformed UTF-8; a protocol identity
         // must not silently change before its SHA-256 is verified.
         val text = Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString()
-        return json.decodeFromString<HistorySyncDocument>(text).also(::validate)
+        val objectValue = json.parseToJsonElement(text)
+        require(objectValue is JsonObject && objectValue["librarySnapshot"] != JsonNull) {
+            "An absent library snapshot is unknown; explicit null is invalid"
+        }
+        return json.decodeFromJsonElement<HistorySyncDocument>(objectValue).also(::validate)
     }
 
     fun encode(document: HistorySyncDocument): ByteArray {
@@ -82,6 +93,7 @@ object HistorySyncProtocol {
     fun validate(document: HistorySyncDocument) {
         require(document.format == FORMAT && document.version == VERSION) { "Unsupported history sync format" }
         require(isDeviceId(document.deviceId)) { "Invalid sync device ID" }
+        document.librarySnapshot?.let { HistorySyncLibraryProtocol.validate(it, document.deviceId) }
         require(document.records.size <= MAX_RECORDS) { "Too many history records" }
         val seen = HashSet<String>()
         document.records.forEach { record ->
@@ -169,7 +181,7 @@ object HistorySyncProtocol {
         return if (order >= 0) left else right
     }
 
-    private fun minimum(left: String?, right: String?): String? {
+    internal fun minimum(left: String?, right: String?): String? {
         val a = left?.takeIf(String::isNotEmpty) ?: return right?.takeIf(String::isNotEmpty)
         val b = right?.takeIf(String::isNotEmpty) ?: return a
         val aa = a.toByteArray(Charsets.UTF_8)
@@ -185,7 +197,7 @@ object HistorySyncProtocol {
         require(time in 0..MAX_TIME && isDeviceId(device)) { "Invalid history stamp" }
     }
 
-    private fun validateIdentityComponent(value: String) {
+    internal fun validateIdentityComponent(value: String) {
         validateUnicode(value)
         require(
             value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size <= 4096 &&
@@ -195,7 +207,7 @@ object HistorySyncProtocol {
         }
     }
 
-    private fun validateUnicode(value: String) {
+    internal fun validateUnicode(value: String) {
         var index = 0
         while (index < value.length) {
             val character = value[index++]

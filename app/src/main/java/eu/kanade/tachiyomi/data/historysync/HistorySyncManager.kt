@@ -293,7 +293,8 @@ class HistorySyncManager internal constructor(
                 // A cache of an earlier upload would miss a deleted cloud file.
                 val uploaded = replicas.any { replica ->
                     replica.deviceId == result.document.deviceId &&
-                        replica.records.associateBy { it.id } == result.document.records.associateBy { it.id }
+                        replica.records.associateBy { it.id } == result.document.records.associateBy { it.id } &&
+                        replica.librarySnapshot == result.document.librarySnapshot
                 }
                 if (!uploaded) transport.push(result.document)
                 currentCoroutineContext().ensureActive()

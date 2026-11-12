@@ -38,6 +38,52 @@ never be guessed from the position. `lastReadAt: null` is a history deletion
 tombstone, independent of completion and position. Reading duration is not
 synchronized in v1; preserve local session counters.
 
+## Optional Android library snapshot
+
+Starting with Mihon AI 0.1.38, an Android writer may include `librarySnapshot`
+alongside the existing chapter `records`. The outer document remains version 1.
+Older clients can ignore this optional field. Absence means unknown; an explicit
+`null` is invalid, and a valid snapshot with `entries: []` means an empty library.
+No chapter or reading event is invented for an unread favorite.
+
+The snapshot has `format: "aidoku-mihon-library"`, `version: 1`, `deviceId`,
+`modifiedAt` and `entries`. Its writer must match the outer document's UUID.
+Each entry contains `id`, `source`, `manga`, required `metadata`, and optional
+nullable `dateAdded` in Unix milliseconds. Its ID is lowercase SHA-256 of
+`source + "\n" + manga`. Title metadata uses the existing metadata object, with
+only `mangaTitle` and `mangaUrl`: chapter fields must be absent or null. A supplied
+title must be nonempty and at most 16 KiB of UTF-8; a supplied URL must be a safe
+absolute HTTP(S) URL without credentials or a fragment, at most 16 KiB, and agree
+with the portable title identity. Unresolved local source identities remain in
+the complete set, with a missing URL, rather than silently disappearing.
+
+Android captures all actual favorites, including unread titles and titles with
+no cached chapters. It advances an account-scoped logical stamp only when the
+canonical payload changes, and ignores `favorite_modified_at`: that native field
+also changes on unrelated SQL updates. Canonically duplicate native favorites
+may collapse into one true membership. There are at most 20,000 entries and the
+entire document still has the existing 8 MiB limit. Invalid, oversized or stale
+captures must not partially commit local synchronization state.
+
+This is a snapshot authored by one Android installation, not a chapter register
+or a bidirectional membership register. Android attaches only its freshly
+captured own snapshot after chapter merging. iOS validates and consumes it from
+the original pulled document, before committing downloaded history, and never
+re-exports it under an iPhone's writer ID. Account-scoped sidecars compare only
+revisions of the same author; several Android installations are selected
+explicitly, never elected by wall-clock time. Equal-stamp different payloads
+are errors. A missing author does not mean an empty library.
+
+Aidoku's explicit cloud-library restore fetches missing title metadata through
+installed native sources, including actual chapter lists when available.
+Only after every favorite is unambiguously resolved does one transaction make
+the local library match the selected complete snapshot. It first saves a local
+recovery backup. It changes only library membership; manga/chapter objects,
+history, read marks, sessions, downloads and trackers remain. Account, revision,
+operation and local-inventory fences prevent late or stale work from pruning
+the library. Regular history pulls do not continuously remove later iPhone
+favorites. The shared fixture is `history-sync-fixtures/library-snapshot-v1.json`.
+
 ## Merge and local changes
 
 Merge records by id, then merge progress/completion/history INDEPENDENTLY.

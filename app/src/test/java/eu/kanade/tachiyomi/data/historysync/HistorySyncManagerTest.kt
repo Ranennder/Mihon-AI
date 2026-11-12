@@ -39,6 +39,32 @@ class HistorySyncManagerTest {
     fun close() = drivers.forEach { it.close() }
 
     @Test
+    fun `favorite-only changes upload even when all chapter records are already present`() = runTest {
+        val fixture = fixture()
+        fun snapshot(manga: String, time: Long): HistorySyncLibrarySnapshot {
+            val source = "mangabuff"
+            return HistorySyncLibrarySnapshot(
+                HistorySyncLibraryProtocol.FORMAT,
+                1,
+                fixture.document.deviceId,
+                time,
+                listOf(HistorySyncLibraryEntry(HistorySyncLibraryProtocol.titleId(source, manga), source, manga)),
+            )
+        }
+        fixture.transport.replicas = listOf(fixture.document)
+        var document = fixture.document.copy(librarySnapshot = snapshot("/first", 1))
+        coEvery { fixture.store.reconcile(any(), any()) } answers { HistorySyncLocalStore.Result(document, 2, 3) }
+        fixture.manager.syncNow()
+        assertEquals(listOf(document), fixture.transport.pushes)
+        document = document.copy(librarySnapshot = snapshot("/second", 2))
+        fixture.manager.syncNow()
+        assertEquals(2, fixture.transport.pushes.size)
+        assertEquals(document, fixture.transport.pushes.last())
+        fixture.manager.syncNow()
+        assertEquals(2, fixture.transport.pushes.size)
+    }
+
+    @Test
     fun `opening syncs immediately and idle foreground pulls every ten seconds`() = runTest {
         val fixture = fixture()
         fixture.manager.foreground()

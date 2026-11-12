@@ -18,6 +18,8 @@ Android manga, manhwa, and webtoon reader focused on higher-quality AI-upscaled 
 
 Mihon AI is an Android reader built around AI-upscaled pages for manga, manhwa, and webtoons.
 
+Version **[0.1.38](https://github.com/Ranennder/Mihon-AI/releases/tag/v0.1.38)** adds a complete current favorites snapshot for one-time Aidoku AI library restoration through the connected cloud account. Unread favorites are included. Reading history remains separate from the library; a backup file and PC are not needed for this transfer.
+
 ## Features
 
 - Reader top-bar `AI` toggle for instant on/off switching.
@@ -30,7 +32,7 @@ Mihon AI is an Android reader built around AI-upscaled pages for manga, manhwa, 
 - Separate Mihon AI app versioning.
 - Cloud reading-history sync with Aidoku AI on iPhone: immediate on opening,
   every 10 seconds while active, with offline changes retained. A PC is not
-  needed for history. [Настройка двух телефонов через бесплатный Koofr](docs/HISTORY_SYNC.md).
+  needed for history. Android also shares its complete favorites list for a separate one-time iPhone library restore. Favorites are not continuously merged between the apps. [Настройка Google Drive или HTTPS WebDAV](docs/HISTORY_SYNC.md).
 
 ## Download
 

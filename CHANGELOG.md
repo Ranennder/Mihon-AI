@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.38
+
+- Publish the complete current Android favorites list separately from chapter history, including unread titles with no chapters or reading records.
+- Let Aidoku AI restore the library once through the existing Google Drive or HTTPS WebDAV account, without selecting a backup file or using a PC. Favorites are not continuously merged between the apps.
+- Keep account-scoped library revisions stable until the actual title list or its metadata changes. Preserve unresolved favorites and validate complete snapshots before saving or uploading them.
+- Keep reading positions, completion and reading dates independent of library membership. A title in reading history is not automatically a favorite.
+- Retain the original-pixel AI processing pipeline from 0.1.37, separate Fast and Detailed width settings and the existing Companion processing behavior.
+
+The hidden Google Drive app data now contains reading history and the complete favorites list. Other Drive files are not accessed; OAuth registration and permissions are unchanged. The favorites snapshot does not transfer downloads, chapter bookmarks or reading duration.
+
 ## v0.1.37
 
 - Preserve original page pixels before AI inference when an output width is selected. Resize the model result to the requested width after processing, keeping the original aspect ratio.

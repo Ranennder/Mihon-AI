@@ -288,7 +288,9 @@ class HistorySyncLocalStoreTest {
         assertEquals(1000L, first.records.single().progress.modifiedAt)
         assertEquals(1000L, second.records.single().progress.modifiedAt)
         val combined = store.reconcile(listOf(first), apply = true).document
-        assertEquals(HistorySyncProtocol.merge(second.deviceId, first, second), combined)
+        assertEquals(HistorySyncProtocol.merge(second.deviceId, first, second), combined.copy(librarySnapshot = null))
+        assertEquals(combined.deviceId, combined.librarySnapshot?.deviceId)
+        assertEquals(second.librarySnapshot, combined.librarySnapshot)
         store.selectAccount("fixture-account")
         assertEquals(listOf(pending), database.historySyncQueries.getPending().awaitAsList())
     }
