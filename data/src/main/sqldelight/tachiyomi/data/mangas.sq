@@ -64,6 +64,61 @@ BEGIN
     );
 END;
 
+CREATE TRIGGER history_sync_library_update AFTER UPDATE OF favorite ON mangas
+WHEN NEW.favorite != OLD.favorite AND NEW.is_syncing = 0 AND NEW.source = OLD.source AND NEW.url = OLD.url
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, NEW._id, NEW.source, NEW.url, NEW.title, NEW.date_added, NEW.favorite, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+END;
+
+CREATE TRIGGER history_sync_library_route AFTER UPDATE OF source,url ON mangas
+WHEN (NEW.source != OLD.source OR NEW.url != OLD.url) AND NEW.is_syncing = 0
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND OLD.favorite = 1;
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, OLD._id, OLD.source, OLD.url, OLD.title, OLD.date_added, 0, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND OLD.favorite = 1;
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND NEW.favorite = 1;
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, NEW._id, NEW.source, NEW.url, NEW.title, NEW.date_added, 1, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND NEW.favorite = 1;
+END;
+
+CREATE TRIGGER history_sync_library_insert AFTER INSERT ON mangas
+WHEN NEW.favorite = 1 AND NEW.is_syncing = 0
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, NEW._id, NEW.source, NEW.url, NEW.title, NEW.date_added, 1, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+END;
+
+CREATE TRIGGER history_sync_library_delete AFTER DELETE ON mangas
+WHEN OLD.favorite = 1 AND OLD.is_syncing = 0
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, OLD._id, OLD.source, OLD.url, OLD.title, OLD.date_added, 0, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+END;
+
 getMangaById:
 SELECT *
 FROM mangas
