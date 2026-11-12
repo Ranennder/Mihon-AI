@@ -18,6 +18,7 @@ import tachiyomi.data.Database
 import tachiyomi.data.History_sync_library_outbox
 import tachiyomi.domain.source.service.SourceManager
 import java.net.URI
+import java.util.UUID
 
 /** The SQL outbox captures native intent in the same transaction as favorite.
  * Resolution and network requests happen outside the optimistic commit. */
@@ -48,6 +49,7 @@ internal class HistorySyncLibraryStateStore(
 
     data class Snapshot(
         val account: String,
+        val writer: String,
         val clock: Long,
         val seeded: Boolean,
         val native: List<Native>,
@@ -65,12 +67,15 @@ internal class HistorySyncLibraryStateStore(
 
     suspend fun readSnapshot(): Snapshot {
         val meta = database.historySyncLibraryQueries.getMeta().awaitAsOneOrNull()
-        val account = database.historySyncQueries.getMeta().awaitAsOne().active_account
+        val global = database.historySyncQueries.getMeta().awaitAsOne()
+        val account = global.active_account
+        val writer = UUID.nameUUIDFromBytes("${global.device_id}\n$account".toByteArray(Charsets.UTF_8)).toString()
         val native = database.historySyncLibraryQueries.getLocalMangas { id, source, url, title, added, favorite ->
             Native(id, source, url, title, added, favorite)
         }.awaitAsList()
         return Snapshot(
             account,
+            writer,
             meta?.logical_clock ?: 0,
             meta?.seeded ?: false,
             native,
@@ -91,7 +96,7 @@ internal class HistorySyncLibraryStateStore(
     fun plan(snapshot: Snapshot, writer: String, remote: List<HistorySyncDocument>): Plan {
         val bindings = snapshot.bindings.toMutableMap()
         val entries = snapshot.native.associate { native ->
-            native.id to entry(native, bindings[native.id]).also {
+            native.id to entry(native, bindings[native.id], writer).also {
                 bindings[native.id] = Binding(native.source, native.url, it)
             }
         }
@@ -144,6 +149,7 @@ internal class HistorySyncLibraryStateStore(
                     event.included,
                 ),
                 snapshot.bindings[event.manga_id],
+                writer,
             ).also {
                 if (event.manga_id !in entries) bindings[event.manga_id] = Binding(event.source_id, event.manga_url, it)
             }
@@ -162,7 +168,7 @@ internal class HistorySyncLibraryStateStore(
             val previous = snapshot.bindings[native.id] ?: continue
             val current = entries.getValue(native.id)
             if (previous.source != native.source || previous.url != native.url ||
-                !previous.entry.source.startsWith("local:android:") || current.source.startsWith("local:") ||
+                !previous.entry.source.startsWith("local:android:$writer:") || current.source.startsWith("local:") ||
                 previous.entry.id == current.id
             ) {
                 continue
@@ -269,7 +275,7 @@ internal class HistorySyncLibraryStateStore(
         database.historySyncLibraryQueries.finishApplying(native.id)
     }
 
-    private fun entry(native: Native, previous: Binding?): HistorySyncLibraryEntry {
+    private fun entry(native: Native, previous: Binding?, writer: String): HistorySyncLibraryEntry {
         val provider = runCatching { sources.get(native.source) as? HttpSource }.getOrNull()
         val supplied = runCatching {
             provider?.getMangaUrl(
@@ -291,7 +297,7 @@ internal class HistorySyncLibraryStateStore(
         if (identity == null && previous != null && previous.source == native.source && previous.url == native.url) {
             return previous.entry
         }
-        val source = identity?.source ?: "local:android:${native.source}"
+        val source = identity?.source ?: "local:android:$writer:${native.source}"
         val manga = identity?.path ?: "id:${native.id}"
         return HistorySyncLibraryEntry(
             HistorySyncLibraryProtocol.titleId(source, manga),
@@ -311,7 +317,9 @@ internal class HistorySyncLibraryStateStore(
 
     private suspend fun materializeLocked(limit: Int): Int {
         val snapshot = database.transactionWithResult { readSnapshot() }
-        val mapped = snapshot.native.map { native -> entry(native, snapshot.bindings[native.id]).id }.toSet()
+        val mapped = snapshot.native.map { native ->
+            entry(native, snapshot.bindings[native.id], snapshot.writer).id
+        }.toSet()
         val unpublished = snapshot.pending.map { event ->
             entry(
                 Native(
@@ -323,6 +331,7 @@ internal class HistorySyncLibraryStateStore(
                     event.included,
                 ),
                 snapshot.bindings[event.manga_id],
+                snapshot.writer,
             ).id
         }.toSet()
         val pending = snapshot.records.filter {
@@ -370,7 +379,7 @@ internal class HistorySyncLibraryStateStore(
                 }
                 // Verify again inside the commit; a duplicate native title must
                 // never be inserted because another import finished meanwhile.
-                if (current.native.any { entry(it, current.bindings[it.id]).id == record.id }) {
+                if (current.native.any { entry(it, current.bindings[it.id], current.writer).id == record.id }) {
                     return@transactionWithResult false
                 }
                 val manga = fetched.manga

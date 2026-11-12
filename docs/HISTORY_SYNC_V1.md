@@ -154,6 +154,16 @@ Native backup restoration and factory reset are maintenance operations rather
 than mass membership decisions; recovery reconciles the local library with the
 account's shared state. Categories, trackers and app settings are not shared.
 
+Opaque local identities do not authorize lookup on another installation. New
+Android shared-state placeholders include the installation UUID so a reused
+database row ID cannot match a previous phone's placeholder. A private native
+binding is required before an owned opaque decision can become portable when a
+verified website URL becomes available. Promotion keeps the original membership
+stamp, so a newer portable peer removal still wins. Retiring the old placeholder
+uses a newer false stamp only for that opaque identity. Private ownership/alias
+data is not sent over the wire; a fresh installation must not reinterpret a
+downloaded retirement as a new decision about a portable title.
+
 ## Merge and local changes
 
 Merge records by id, then merge progress/completion/history INDEPENDENTLY.

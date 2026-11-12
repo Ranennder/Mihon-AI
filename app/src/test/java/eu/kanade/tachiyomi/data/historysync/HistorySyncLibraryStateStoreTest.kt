@@ -457,6 +457,36 @@ class HistorySyncLibraryStateStoreTest {
     }
 
     @Test
+    fun `foreign and unscoped opaque removals cannot overwrite a fresh devices reused native id`() = runBlocking {
+        every { sources.get(any<Long>()) } returns null
+        manga(favorite = true)
+        val foreign = listOf("local:android:$peer:123", "local:android:123").map { source ->
+            HistorySyncLibraryRecord(
+                HistorySyncLibraryProtocol.titleId(source, "id:1"),
+                source,
+                "id:1",
+                HistorySyncMetadata(mangaTitle = "Other installation title"),
+                membership = HistorySyncLibraryMembership(false, 5_000_000_000_000, peer),
+            )
+        }
+        val incoming = remote().copy(libraryState = HistorySyncLibraryStateProtocol.state(foreign))
+        val initial = store.reconcile(listOf(incoming), apply = true).document
+        val own = requireNotNull(initial.libraryState).records.single { it.membership.included }
+        assertEquals("local:android:${initial.deviceId}:123", own.source)
+        assertTrue(database.mangasQueries.getMangaById(1).awaitAsOne().favorite)
+        // The separately maintained 0.1.38 snapshot contract is unchanged.
+        assertEquals("local:android:123", requireNotNull(initial.librarySnapshot).entries.single().source)
+        every { sources.get(any<Long>()) } answers { if (firstArg<Long>() == 123L) provider else null }
+        val promoted = requireNotNull(store.reconcile(listOf(incoming), apply = true).document.libraryState)
+        val portable = promoted.records.single { it.source == "mangabuff" }
+        assertTrue(portable.membership.included)
+        assertEquals(own.membership, portable.membership)
+        assertTrue(database.mangasQueries.getMangaById(1).awaitAsOne().favorite)
+        assertEquals(foreign.toSet(), promoted.records.filter { it.id in foreign.map { value -> value.id } }.toSet())
+        assertEquals(4, promoted.records.size)
+    }
+
+    @Test
     fun `whole document size failure preserves native intent outbox and journal`() = runBlocking {
         manga()
         favorite(true)
