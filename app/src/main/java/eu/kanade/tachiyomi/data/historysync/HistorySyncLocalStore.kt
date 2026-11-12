@@ -139,8 +139,7 @@ class HistorySyncLocalStore(
             val history = HistorySyncProtocol.merge(replicaDevice, local, *normalized.drop(1).toTypedArray())
             // A full native favorites list is independent of chapter records.
             // Never copy another installation's list under this writer's name.
-            val library =
-                librarySnapshot(snapshot, replicaDevice, remote, HistorySyncProtocol.maxClock(history.records))
+            val library = librarySnapshot(snapshot, replicaDevice, remote)
             val merged = history.copy(librarySnapshot = library)
             // Check the serialized limit before committing or applying anything.
             HistorySyncProtocol.encode(merged)
@@ -152,9 +151,7 @@ class HistorySyncLocalStore(
             val committed = database.transactionWithResult {
                 val current = readSnapshot()
                 if (current != snapshot) return@transactionWithResult false
-                database.historySyncQueries.observeClock(
-                    maxOf(HistorySyncProtocol.maxClock(merged.records), library.modifiedAt),
-                )
+                database.historySyncQueries.observeClock(HistorySyncProtocol.maxClock(merged.records))
                 database.historySyncQueries.putLibrarySnapshot(HistorySyncProtocol.json.encodeToString(library))
                 // Alias migration replaces the active journal atomically, so an old
                 // credential-bearing record ID cannot survive the next upload.
@@ -236,7 +233,6 @@ class HistorySyncLocalStore(
         snapshot: Snapshot,
         writer: String,
         remote: List<HistorySyncDocument>,
-        observedHistory: Long,
     ): HistorySyncLibrarySnapshot {
         val previous = HistorySyncLibraryProtocol.latestOwn(
             writer,
@@ -255,7 +251,9 @@ class HistorySyncLocalStore(
             HistorySyncLibraryProtocol.FORMAT,
             HistorySyncLibraryProtocol.VERSION,
             writer,
-            HistorySyncProtocol.nextClock(now(), maxOf(snapshot.clock, observedHistory, previous?.modifiedAt ?: 0)),
+            // Library revisions have their own durable clock. A chapter clock
+            // must neither exhaust this channel nor be advanced by favorites.
+            HistorySyncProtocol.nextClock(now(), previous?.modifiedAt ?: 0),
             entries,
         )
     }

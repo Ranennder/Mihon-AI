@@ -110,10 +110,51 @@ class HistorySyncLibraryStoreTest {
         val restarted = HistorySyncLocalStore(database, sourceManager) { 20_000 }.reconcile().document
         assertEquals(first, next)
         assertEquals(first, restarted)
-        assertEquals(
-            first.librarySnapshot?.modifiedAt,
-            database.historySyncQueries.getMeta().awaitAsOne().logical_clock,
+        assertEquals(0L, database.historySyncQueries.getMeta().awaitAsOne().logical_clock)
+    }
+
+    @Test
+    fun `a peer chapter clock at its limit still applies while library revisions remain independent`() = runBlocking {
+        prepare()
+        manga(1, favorite = true)
+        driver.execute(
+            null,
+            """
+            INSERT INTO chapters(_id,manga_id,url,name,read,bookmark,last_page_read,chapter_number,source_order,date_fetch,date_upload)
+            VALUES(1,1,'/chapter/1','Chapter 1',0,0,0,1,0,0,0)
+            """.trimIndent(),
+            0,
+        ).await()
+        val peer = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        val identity = HistorySyncIdentity("mangabuff", "/manga/1", "/chapter/1")
+        val maximum = HistorySyncProtocol.MAX_TIME
+        val record = HistorySyncRecord(
+            identity.recordId(),
+            identity,
+            progress = HistorySyncProgress(5, 10, maximum, peer),
+            completion = HistorySyncCompletion(true, maximum, peer),
+            history = HistorySyncHistory(2_000, maximum, peer),
         )
+        val incoming = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, peer, listOf(record))
+        val first = store.reconcile(listOf(incoming), apply = true)
+        assertEquals(1, first.applied)
+        assertTrue(database.chaptersQueries.getChapterById(1).awaitAsOne().read)
+        assertEquals(4L, database.chaptersQueries.getChapterById(1).awaitAsOne().last_page_read)
+        assertEquals(2_000L, database.historyQueries.getHistoryByMangaId(1).awaitAsList().single().last_read?.time)
+        val firstLibrary = requireNotNull(first.document.librarySnapshot)
+        assertEquals(1_000L, firstLibrary.modifiedAt)
+        assertEquals(maximum, database.historySyncQueries.getMeta().awaitAsOne().logical_clock)
+        assertEquals(firstLibrary, store.reconcile().document.librarySnapshot)
+
+        manga(2, favorite = true)
+        val changed = store.reconcile().document
+        val changedLibrary = requireNotNull(changed.librarySnapshot)
+        assertEquals(1_001L, changedLibrary.modifiedAt)
+        assertEquals(2, changedLibrary.entries.size)
+        assertEquals(record.progress, changed.records.single().progress)
+        assertEquals(record.completion, changed.records.single().completion)
+        assertEquals(record.history, changed.records.single().history)
+        assertEquals(maximum, database.historySyncQueries.getMeta().awaitAsOne().logical_clock)
     }
 
     @Test
