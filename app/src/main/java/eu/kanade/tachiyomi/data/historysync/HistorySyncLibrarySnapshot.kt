@@ -42,41 +42,46 @@ object HistorySyncLibraryProtocol {
         require(snapshot.entries.size <= MAX_ENTRIES) { "Too many library entries" }
         val ids = HashSet<String>()
         snapshot.entries.forEach { entry ->
-            HistorySyncProtocol.validateIdentityComponent(entry.source)
-            HistorySyncProtocol.validateIdentityComponent(entry.manga)
-            if (!entry.source.startsWith("local:")) {
-                require(entry.manga.startsWith('/') && !entry.manga.startsWith("//")) {
-                    "Invalid portable library route"
-                }
+            require(ids.add(entry.id)) { "Duplicate library identity" }
+            validateEntry(entry)
+        }
+    }
+
+    internal fun validateEntry(entry: HistorySyncLibraryEntry) {
+        HistorySyncProtocol.validateIdentityComponent(entry.source)
+        HistorySyncProtocol.validateIdentityComponent(entry.manga)
+        if (!entry.source.startsWith("local:")) {
+            require(entry.manga.startsWith('/') && !entry.manga.startsWith("//")) {
+                "Invalid portable library route"
             }
-            require(entry.id == titleId(entry.source, entry.manga) && ids.add(entry.id)) {
-                "Invalid or duplicate library identity"
+        }
+        require(entry.id == titleId(entry.source, entry.manga)) {
+            "Invalid or duplicate library identity"
+        }
+        require(entry.dateAdded == null || entry.dateAdded in 0..HistorySyncProtocol.MAX_TIME) {
+            "Invalid library added date"
+        }
+        with(entry.metadata) {
+            listOfNotNull(
+                mangaTitle,
+                chapterTitle,
+                mangaUrl,
+                chapterUrl,
+            ).forEach(HistorySyncProtocol::validateUnicode)
+            require(chapterTitle == null && chapterUrl == null) {
+                "A library entry cannot contain chapter metadata"
             }
-            require(entry.dateAdded == null || entry.dateAdded in 0..HistorySyncProtocol.MAX_TIME) {
-                "Invalid library added date"
+            require(
+                mangaTitle == null ||
+                    (mangaTitle.isNotEmpty() && mangaTitle.toByteArray(Charsets.UTF_8).size <= 16_384),
+            ) {
+                "Library title exceeds its text limit"
             }
-            with(entry.metadata) {
-                listOfNotNull(
-                    mangaTitle,
-                    chapterTitle,
-                    mangaUrl,
-                    chapterUrl,
-                ).forEach(HistorySyncProtocol::validateUnicode)
-                require(chapterTitle == null && chapterUrl == null) {
-                    "A library entry cannot contain chapter metadata"
-                }
-                require(
-                    mangaTitle == null ||
-                        (mangaTitle.isNotEmpty() && mangaTitle.toByteArray(Charsets.UTF_8).size <= 16_384),
-                ) {
-                    "Library title exceeds its text limit"
-                }
-                require(mangaUrl == null || safeWebsiteURL(mangaUrl)) { "Unsafe library manga URL" }
-                if (mangaUrl != null && !entry.source.startsWith("local:")) {
-                    val website = HistorySyncIdentityResolver.website(mangaUrl, null, manga = true)
-                    require(website != null && website.source == entry.source && website.path == entry.manga) {
-                        "Library website URL conflicts with its identity"
-                    }
+            require(mangaUrl == null || safeWebsiteURL(mangaUrl)) { "Unsafe library manga URL" }
+            if (mangaUrl != null && !entry.source.startsWith("local:")) {
+                val website = HistorySyncIdentityResolver.website(mangaUrl, null, manga = true)
+                require(website != null && website.source == entry.source && website.path == entry.manga) {
+                    "Library website URL conflicts with its identity"
                 }
             }
         }

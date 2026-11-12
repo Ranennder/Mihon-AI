@@ -1,0 +1,57 @@
+{
+  "format": "aidoku-mihon-history",
+  "version": 1,
+  "deviceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "records": [],
+  "libraryState": {
+    "format": "aidoku-mihon-library-state",
+    "version": 1,
+    "records": [
+      {
+        "id": "20fcd53d3823f95cc7a4ece970d5fb7dad23d96c9e502876b169381edddb748c",
+        "source": "mangabuff",
+        "manga": "/manga/removed",
+        "metadata": {
+          "mangaTitle": "Removed on iPhone",
+          "mangaUrl": "https://mangabuff.ru/manga/removed"
+        },
+        "dateAdded": 1000,
+        "membership": {
+          "included": false,
+          "modifiedAt": 456000,
+          "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        }
+      },
+      {
+        "id": "67c3fadeea72a22a686be9d11ebf8847aeaf69f1f2a57bb103ed97dbb0c77c01",
+        "source": "mangalib",
+        "manga": "/123--ios-title",
+        "metadata": {
+          "mangaTitle": "Unread iPhone favorite",
+          "mangaUrl": "https://mangalib.me/ru/manga/123--ios-title"
+        },
+        "dateAdded": null,
+        "membership": {
+          "included": true,
+          "modifiedAt": 456001,
+          "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        }
+      },
+      {
+        "id": "d7923877dccd0b3a0bb344e4cbb5a954eff1b78ae748f103fffbde8032eeb9bd",
+        "source": "mangabuff",
+        "manga": "/manga/unread",
+        "metadata": {
+          "mangaTitle": "Unread Android favorite",
+          "mangaUrl": "https://mangabuff.ru/manga/unread"
+        },
+        "dateAdded": 123000,
+        "membership": {
+          "included": true,
+          "modifiedAt": 0,
+          "deviceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        }
+      }
+    ]
+  }
+}

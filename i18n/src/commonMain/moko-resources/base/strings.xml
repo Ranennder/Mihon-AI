@@ -1119,7 +1119,7 @@
     <string name="reader_ai_progress_failed">AI processing failed</string>
     <string name="history_sync_title">Reading history sync</string>
     <string name="history_sync_entry">Sync with Aidoku AI through Google Drive, Koofr, or HTTPS WebDAV</string>
-    <string name="history_sync_description">Use the same Google Drive, Koofr, or HTTPS WebDAV account on both phones. Sync runs when the app opens, checks the cloud every 10 seconds while open, and sends saved reading changes after about 1.5 seconds. Android schedules background retries when possible. Reading positions, read/unread changes, and history deletions sync without a PC. Android also shares its complete current favorites list, including unread titles, so Aidoku AI can restore the library once without a backup file. This library restore is a separate action; favorites are not continuously merged between the apps. Each installation keeps its own cloud replica. Only exact website identities match; unresolved entries are retained. Reading history does not make a title a favorite. Chapter bookmarks, downloads, and reading duration are not transferred.</string>
+    <string name="history_sync_description">Use the same Google Drive, Koofr, or HTTPS WebDAV account on both phones. Sync runs when the app opens, checks the cloud every 10 seconds while open, and sends saved changes after about 1.5 seconds. Android schedules background retries when possible. Library additions and removals synchronize in both directions, including unread titles. Reading positions, read/unread changes and history deletions remain separate from library membership. No backup file or PC is needed. Each installation keeps its own cloud replica. Only exact website identities match; unresolved additions retry automatically. Reading history does not make a title a favorite. Chapter bookmarks, downloads and reading duration stay local.</string>
     <string name="history_sync_account">Cloud account</string>
     <string name="history_sync_server">HTTPS WebDAV root URL</string>
     <string name="history_sync_login">WebDAV login</string>
@@ -1136,7 +1136,7 @@
     <string name="history_sync_save_failed">Could not save the account. Check the HTTPS URL and enter a login and app password.</string>
     <string name="history_sync_saved">Account saved securely.</string>
     <string name="history_sync_google_title">Google Drive</string>
-    <string name="history_sync_google_scope">The app’s hidden Drive data contains reading history and the complete favorites list, including unread titles, for a one-time iPhone library restore. Other Drive files are not accessed. Google permissions and sign-in setup are unchanged.</string>
+    <string name="history_sync_google_scope">The app’s hidden Drive data contains reading history and shared library membership, including unread titles and removals. Other Drive files are not accessed. Google permissions and sign-in setup are unchanged.</string>
     <string name="history_sync_google_privacy">Google Drive sync privacy</string>
     <string name="history_sync_google_sign_in">Sign in with Google</string>
     <string name="history_sync_google_connected">Connected: %1$s</string>
@@ -1146,4 +1146,6 @@
     <string name="history_sync_google_failed">Could not connect to Google Drive. Your previous account and saved reading changes are preserved. Try signing in again.</string>
     <string name="history_sync_google_reconnect">Sign in with Google again to resume sync. Saved reading changes are preserved.</string>
     <string name="history_sync_webdav_title">Koofr / HTTPS WebDAV</string>
+    <string name="history_sync_library_status">Shared library: applied %1$d; pending changes %2$d. Pending titles retry automatically. Check that their sources are installed and signed in.</string>
+    <string name="history_sync_library_clock">A remote library timestamp reached the protocol limit. Local library changes are retained; reading history continues syncing.</string>
 </resources>

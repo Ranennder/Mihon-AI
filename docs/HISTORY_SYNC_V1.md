@@ -1,6 +1,6 @@
 # Mihon AI / Aidoku AI history sync v1
 
-This is live, bidirectional history synchronization, separate from full backups.
+This is live, bidirectional history and library synchronization, separate from full backups.
 The transports are Google Drive appDataFolder and HTTPS WebDAV
 (Koofr preset for new WebDAV connections). No PC is involved.
 Both apps must be updated; stock Mihon/Aidoku do not implement this protocol.
@@ -74,7 +74,7 @@ revisions of the same author; several Android installations are selected
 explicitly, never elected by wall-clock time. Equal-stamp different payloads
 are errors. A missing author does not mean an empty library.
 
-Aidoku's explicit cloud-library restore fetches missing title metadata through
+The older explicit cloud-library restore fetches missing title metadata through
 installed native sources, including actual chapter lists when available.
 Only after every favorite is unambiguously resolved does one transaction make
 the local library match the selected complete snapshot. It first saves a local
@@ -82,7 +82,77 @@ recovery backup. It changes only library membership; manga/chapter objects,
 history, read marks, sessions, downloads and trackers remain. Account, revision,
 operation and local-inventory fences prevent late or stale work from pruning
 the library. Regular history pulls do not continuously remove later iPhone
-favorites. The shared fixture is `history-sync-fixtures/library-snapshot-v1.json`.
+favorites. This legacy one-time workflow is not the continuous membership protocol
+below. The shared fixture is `history-sync-fixtures/library-snapshot-v1.json`.
+
+## Shared library membership
+
+Mihon AI 0.1.39 and Aidoku AI 0.9.24 add optional `libraryState` to the same v1
+document. Both clients merge and forward it, including decisions written by a
+different installation. Absence means an older client with unknown capability;
+explicit null is invalid. A present state with no records is valid.
+
+```json
+"libraryState": {
+  "format": "aidoku-mihon-library-state",
+  "version": 1,
+  "records": [{
+    "id": "lowercase SHA256 of source + LF + manga",
+    "source": "mangabuff",
+    "manga": "/manga/123",
+    "metadata": {"mangaTitle": "Example", "mangaUrl": "https://mangabuff.ru/manga/123"},
+    "dateAdded": 1700000000000,
+    "membership": {
+      "included": false,
+      "modifiedAt": 1700000001000,
+      "deviceId": "00000000-0000-4000-8000-000000000002"
+    }
+  }]
+}
+```
+
+An entry uses the same strict title identity and required, title-only metadata
+as the Android snapshot. `membership` is a required independent LWW register,
+ordered by `(modifiedAt, deviceId)` using UTF-8 byte order. `included: false` is
+a durable removal tombstone. Absence from a replica is never a removal.
+Equal-stamp different membership values are errors, even if a newer register
+would otherwise hide those conflicting versions. Register timestamps and UUIDs
+use the existing safe integer/UUID rules. Descriptive metadata merges by the
+existing UTF-8 minimum rule; `dateAdded` keeps the earliest known positive date,
+and does not change a membership stamp. At most 50,000 membership records fit
+inside the existing 8 MiB whole-document limit. The shared cross-language fixture
+is `history-sync-fixtures/library-state-v1.json`.
+
+Membership clocks are account-scoped and independent of chapter clocks and
+snapshot revisions. Android enrolls its existing actual favorites at timestamp
+zero; unread favorites need no synthetic chapter records. Real subsequent
+add/remove decisions receive positive logical timestamps. Native SQL triggers
+record actual favorite changes in the same transaction, suppress remote echoes,
+and retain portable identity bindings after native row or extension removal.
+iOS captures explicit user saves with durable pending intents and a unique
+persistent-history transaction author proving SQL commit. Failed saves do not
+publish decisions; interrupted acknowledgements recover from those receipts.
+Persistent-history cleanup must retain unresolved receipts until recovery.
+
+On first iPhone enrollment, one available Android installation supplies the
+complete initial favorite set. Several installations require explicit origin
+selection. The iPhone's pre-upgrade library is not exported as new decisions:
+older history imports could have added read titles there by mistake. Real
+post-upgrade local decisions remain queued and participate in the merge. The
+initial native cleanup waits until all desired favorites resolve and a local
+recovery backup exists. That cleanup never invents removal tombstones for old
+iPhone-only entries. After enrollment, neither phone is the permanent master:
+each genuine add/remove is merged per title, and a failed addition cannot block
+other titles' updates or removals.
+
+Missing titles resolve only through exact verified source/website identities,
+never fuzzy name search. Installed sources fetch metadata and available chapter
+lists outside the cloud transport operation. Unsupported or temporarily limited
+sources remain pending with bounded retries; history exchange continues.
+Removing a favorite preserves manga/chapter data, reading history and downloads.
+Native backup restoration and factory reset are maintenance operations rather
+than mass membership decisions; recovery reconciles the local library with the
+account's shared state. Categories, trackers and app settings are not shared.
 
 ## Merge and local changes
 

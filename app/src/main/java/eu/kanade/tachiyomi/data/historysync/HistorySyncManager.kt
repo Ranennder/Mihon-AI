@@ -52,7 +52,7 @@ class HistorySyncManager internal constructor(
         HistorySyncRuntime(
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
             dispatcher = Dispatchers.IO,
-            pendingChanges = database.historySyncQueries.getPendingCount().subscribeToOne(),
+            pendingChanges = database.historySyncLibraryQueries.getPendingCount().subscribeToOne(),
             configureWork = { HistorySyncJob.configure(context, it) },
             enqueueWork = { HistorySyncJob.enqueue(context) },
             transportFactory = { account ->
@@ -73,6 +73,10 @@ class HistorySyncManager internal constructor(
         val lastSuccess: Long? = null,
         val applied: Int = 0,
         val unmatched: Int = 0,
+        val libraryApplied: Int = 0,
+        val libraryPending: Int = 0,
+        val libraryIssues: List<String> = emptyList(),
+        val libraryClockExhausted: Boolean = false,
     )
 
     private val scope get() = runtime.scope
@@ -92,6 +96,8 @@ class HistorySyncManager internal constructor(
     private var automaticEnabled: Boolean? = null
     private var foregroundPolling: Job? = null
     private var localChanges: Job? = null
+    private var libraryWork: Job? = null
+    private var libraryGeneration = 0L
 
     @Synchronized
     fun start() {
@@ -163,6 +169,8 @@ class HistorySyncManager internal constructor(
             localChanges?.cancel()
             localChanges = null
             running?.cancel()
+            libraryWork?.cancel()
+            libraryGeneration++
             while (requests.tryReceive().isSuccess) {
                 // Discard obsolete automatic requests.
             }
@@ -220,6 +228,8 @@ class HistorySyncManager internal constructor(
             synchronized(this@HistorySyncManager) {
                 changingAccount = true
                 running?.cancel()
+                libraryWork?.cancel()
+                libraryGeneration++
             }
             try {
                 mutex.withLock {
@@ -246,6 +256,8 @@ class HistorySyncManager internal constructor(
             synchronized(this@HistorySyncManager) {
                 changingAccount = true
                 running?.cancel()
+                libraryWork?.cancel()
+                libraryGeneration++
             }
             try {
                 mutex.withLock {
@@ -294,12 +306,22 @@ class HistorySyncManager internal constructor(
                 val uploaded = replicas.any { replica ->
                     replica.deviceId == result.document.deviceId &&
                         replica.records.associateBy { it.id } == result.document.records.associateBy { it.id } &&
-                        replica.librarySnapshot == result.document.librarySnapshot
+                        replica.librarySnapshot == result.document.librarySnapshot &&
+                        replica.libraryState == result.document.libraryState
                 }
                 if (!uploaded) transport.push(result.document)
                 currentCoroutineContext().ensureActive()
                 mutableStatus.value =
-                    Status(Phase.SUCCESS, runtime.now(), result.applied, result.unmatched)
+                    Status(
+                        Phase.SUCCESS,
+                        runtime.now(),
+                        result.applied,
+                        result.unmatched,
+                        result.libraryApplied,
+                        result.libraryPending,
+                        libraryClockExhausted = result.libraryClockExhausted,
+                    )
+                scheduleLibraryMaterialization(result.libraryPending)
                 true
             } catch (error: CancellationException) {
                 throw error
@@ -316,6 +338,32 @@ class HistorySyncManager internal constructor(
                         phase = if (preferences.enabled.get()) Phase.IDLE else Phase.DISABLED,
                     )
                 }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun scheduleLibraryMaterialization(pending: Int) {
+        if (pending == 0 || !preferences.enabled.get() || libraryWork?.isActive == true) return
+        val generation = libraryGeneration
+        libraryWork = scope.launch {
+            try {
+                val applied = store.materializeLibrary()
+                currentCoroutineContext().ensureActive()
+                synchronized(this@HistorySyncManager) {
+                    if (generation == libraryGeneration && preferences.enabled.get()) {
+                        if (applied > 0) requestSync()
+                        mutableStatus.value = mutableStatus.value.copy(
+                            libraryIssues = store.libraryIssues().map {
+                                "${it.title.take(256)} · ${it.source.take(128)}"
+                            },
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Preserve pending registers; the foreground timer resumes work.
             }
         }
     }

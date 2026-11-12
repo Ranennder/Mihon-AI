@@ -1,4 +1,4 @@
-# Google Drive history sync and library restore privacy
+# Google Drive history and shared library sync privacy
 
 Effective date: 12 November 2026. Applies to the optional Google Drive history
 sync in **Mihon AI** and **Aidoku AI**, maintained by
@@ -10,7 +10,7 @@ Connecting Google is optional. The apps request only
 `https://www.googleapis.com/auth/drive.appdata`: access to their own hidden
 application data in your Google Drive. This permission does not give the apps
 access to your other Drive files. Both apps use clients registered in the same
-Google Cloud project to exchange history between your devices.
+Google Cloud project to exchange history and library membership between your devices.
 
 Google handles account selection and consent. The apps do not receive your
 Google password. You can continue using the apps without connecting Google.
@@ -31,6 +31,10 @@ An Android replica also includes a separate complete snapshot of its actual
 library favorites: title/source identities, names, original website URLs,
 optional library-add dates and a revision timestamp. It includes unread
 favorites and titles without chapters. Unresolved sources remain represented.
+New clients also exchange a separate shared library state: a per-title
+included/removed decision, its timestamp and installation UUID. Removal
+tombstones are retained so an older replica does not restore a removed favorite.
+The shared state may include decisions merged from the other phone.
 Incognito reading events are excluded; explicitly favorited titles belong to
 the library snapshot regardless of whether they have reading history.
 Image files, passwords, OAuth tokens, categories,
@@ -41,17 +45,20 @@ The app resolves their original URLs through installed sources, requests title
 details and chapter lists from those sites and applies matching reading records.
 This history restoration does not add every read title to the library.
 
-Separately, you can explicitly restore the iPhone library from a selected Android
-snapshot in the same cloud account, without a manual backup file. The app shows
-the selected source and confirms replacement, resolves missing favorites through
-installed sources, saves a local recovery backup and changes library membership
-only when all favorites resolve. Current iPhone library entries absent from the
-selected favorites leave the library; their chapter data and history remain.
-An empty snapshot needs separate confirmation. This is a one-time operation;
-subsequent history synchronization does not automatically remove iPhone-only
-favorites. No image files are transferred through Google Drive by this feature.
+When automatic synchronization is enabled in both updated apps, the library is
+shared continuously. Adding or removing a title on either phone changes its
+membership on the other. Reading a title does not automatically favorite it.
+The first iPhone enrollment uses the actual Android library as its initial set;
+if several Android installations are available, you choose one. Older iPhone
+entries created by history import are not published as new favorites. Missing
+favorites resolve through installed sources, and the app saves a local recovery
+backup before initial cleanup. That cleanup waits for all desired favorites to
+resolve. Titles leaving the library keep their chapter data and history.
+Subsequent genuine decisions from both phones are merged per title. A native
+backup restore or local app reset does not publish mass library removals.
+No image files are transferred through Google Drive by this feature.
 
-This data is used only to provide the history synchronization and library restore
+This data is used only to provide the history and library synchronization
 you enable. It is
 not sold, used for advertising, or used to train AI models. The AI image
 enhancement feature and optional WebDAV connection are separate from Google
@@ -68,8 +75,9 @@ Local credentials are held in the platform's protected storage: iOS Keychain or
 Android's encrypted credential store and Google Play services. Native backups
 exclude these sync credentials. OAuth tokens are not embedded in releases,
 published source archives, or uploaded history files. The apps retain a local
-history journal and pending edits so temporary network failures do not discard
-your reading state. History journals and Drive replicas are not separately
+history journal, library membership journal, native-save receipts and pending
+edits so temporary network failures do not discard your reading state or library
+decisions. History journals and Drive replicas are not separately
 end-to-end encrypted by this feature.
 
 Aidoku AI also keeps a bounded local sync/import diagnostics log. It contains
@@ -82,9 +90,11 @@ application log is separate and is also exported only by your action.
 
 ## Control and deletion
 
-You can disable automatic sync in either app. Signing out disconnects that
+You can disable automatic history and library sync in either app. Signing out disconnects that
 device locally; it does not erase local reading history, delete cloud replicas,
-or revoke access on your other phone.
+or revoke access on your other phone. Removing a title from the shared library
+does not erase its reading history. Removal decisions remain in sync data until
+you erase that data as described below.
 
 To revoke the Google grant, remove the application's connection in
 [Google Account connections](https://myaccount.google.com/connections).

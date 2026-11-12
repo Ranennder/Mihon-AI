@@ -1,0 +1,151 @@
+import kotlin.Boolean;
+
+CREATE TABLE history_sync_library_meta (
+    account_key TEXT NOT NULL PRIMARY KEY,
+    logical_clock INTEGER NOT NULL DEFAULT 0,
+    seeded INTEGER AS Boolean NOT NULL DEFAULT 0
+);
+
+CREATE TABLE history_sync_library_records (
+    account_key TEXT NOT NULL,
+    id TEXT NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY(account_key, id)
+);
+
+-- Binding survives native deletion and extension removal, so a removal retains
+-- the exact portable identity that was previously published.
+CREATE TABLE history_sync_library_bindings (
+    account_key TEXT NOT NULL,
+    manga_id INTEGER NOT NULL,
+    source_id INTEGER NOT NULL,
+    manga_url TEXT NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY(account_key, manga_id)
+);
+
+CREATE TABLE history_sync_library_outbox (
+    _id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    account_key TEXT NOT NULL,
+    manga_id INTEGER NOT NULL,
+    source_id INTEGER NOT NULL,
+    manga_url TEXT NOT NULL,
+    manga_title TEXT NOT NULL,
+    date_added INTEGER NOT NULL,
+    included INTEGER AS Boolean NOT NULL,
+    event_clock INTEGER NOT NULL
+);
+
+CREATE TRIGGER history_sync_library_update AFTER UPDATE OF favorite ON mangas
+WHEN NEW.favorite != OLD.favorite AND NEW.is_syncing = 0 AND NEW.source = OLD.source AND NEW.url = OLD.url
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, NEW._id, NEW.source, NEW.url, NEW.title, NEW.date_added, NEW.favorite, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+END;
+
+CREATE TRIGGER history_sync_library_route AFTER UPDATE OF source,url ON mangas
+WHEN (NEW.source != OLD.source OR NEW.url != OLD.url) AND NEW.is_syncing = 0
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND OLD.favorite = 1;
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, OLD._id, OLD.source, OLD.url, OLD.title, OLD.date_added, 0, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND OLD.favorite = 1;
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND NEW.favorite = 1;
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, NEW._id, NEW.source, NEW.url, NEW.title, NEW.date_added, 1, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) AND NEW.favorite = 1;
+END;
+
+CREATE TRIGGER history_sync_library_insert AFTER INSERT ON mangas
+WHEN NEW.favorite = 1 AND NEW.is_syncing = 0
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, NEW._id, NEW.source, NEW.url, NEW.title, NEW.date_added, 1, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+END;
+
+CREATE TRIGGER history_sync_library_delete AFTER DELETE ON mangas
+WHEN OLD.favorite = 1 AND OLD.is_syncing = 0
+BEGIN
+    UPDATE history_sync_library_meta
+    SET logical_clock = max(logical_clock + 1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+    WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+    INSERT INTO history_sync_library_outbox(account_key,manga_id,source_id,manga_url,manga_title,date_added,included,event_clock)
+    SELECT S.account_key, OLD._id, OLD.source, OLD.url, OLD.title, OLD.date_added, 0, S.logical_clock
+    FROM history_sync_library_meta S
+    WHERE S.account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+END;
+
+initializeAccount:
+INSERT OR IGNORE INTO history_sync_library_meta(account_key)
+SELECT active_account FROM history_sync_meta WHERE slot = 1 AND active_account != '';
+
+getMeta:
+SELECT * FROM history_sync_library_meta
+WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
+observeClock:
+UPDATE history_sync_library_meta SET logical_clock = max(logical_clock, :observed), seeded = 1
+WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
+getRecords:
+SELECT * FROM history_sync_library_records
+WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY id;
+
+putRecord:
+INSERT INTO history_sync_library_records(account_key,id,json)
+SELECT active_account,:id,:json FROM history_sync_meta WHERE slot = 1 AND active_account != ''
+ON CONFLICT(account_key,id) DO UPDATE SET json = excluded.json;
+
+getBindings:
+SELECT * FROM history_sync_library_bindings
+WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY manga_id;
+
+putBinding:
+INSERT INTO history_sync_library_bindings(account_key,manga_id,source_id,manga_url,json)
+SELECT active_account,:mangaId,:sourceId,:mangaUrl,:json FROM history_sync_meta WHERE slot = 1 AND active_account != ''
+ON CONFLICT(account_key,manga_id) DO UPDATE SET source_id = excluded.source_id, manga_url = excluded.manga_url, json = excluded.json;
+
+getPending:
+SELECT * FROM history_sync_library_outbox
+WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1) ORDER BY _id;
+
+removePending:
+DELETE FROM history_sync_library_outbox WHERE _id = :id
+AND account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1);
+
+getPendingCount:
+SELECT (SELECT count(*) FROM history_sync_outbox WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1))
+     + (SELECT count(*) FROM history_sync_library_outbox WHERE account_key = (SELECT active_account FROM history_sync_meta WHERE slot = 1));
+
+getLocalMangas:
+SELECT _id,source,url,title,date_added,favorite FROM mangas ORDER BY _id;
+
+applyMembership:
+UPDATE mangas SET favorite = :included, date_added = :dateAdded, is_syncing = 1
+WHERE _id = :mangaId AND favorite = :expected;
+
+finishApplying:
+UPDATE mangas SET is_syncing = 0 WHERE _id = :mangaId;
+
+insertMaterialized:
+INSERT INTO mangas(source,url,title,artist,author,description,genre,status,thumbnail_url,
+favorite,initialized,viewer,chapter_flags,cover_last_modified,date_added,is_syncing,update_strategy,memo)
+VALUES(:source,:url,:title,:artist,:author,:description,:genre,:status,:thumbnailUrl,
+0,1,0,0,0,0,1,:updateStrategy,:memo)
+RETURNING _id;

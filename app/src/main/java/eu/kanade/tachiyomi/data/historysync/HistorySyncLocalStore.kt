@@ -25,7 +25,20 @@ class HistorySyncLocalStore(
     private val sourceManager: SourceManager,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
-    data class Result(val document: HistorySyncDocument, val applied: Int, val unmatched: Int)
+    data class Result(
+        val document: HistorySyncDocument,
+        val applied: Int,
+        val unmatched: Int,
+        val libraryApplied: Int = 0,
+        val libraryPending: Int = 0,
+        val libraryClockExhausted: Boolean = false,
+    )
+
+    private val sharedLibrary = HistorySyncLibraryStateStore(database, sourceManager, now)
+
+    suspend fun materializeLibrary(): Int = sharedLibrary.materialize()
+
+    internal fun libraryIssues(): List<HistorySyncLibraryStateStore.Issue> = sharedLibrary.issues
 
     private data class LocalChapter(
         val id: Long,
@@ -49,6 +62,7 @@ class HistorySyncLocalStore(
         val records: List<HistorySyncRecord>,
         val favorites: List<LocalFavorite>,
         val librarySnapshot: HistorySyncLibrarySnapshot?,
+        val libraryState: HistorySyncLibraryStateStore.Snapshot,
     )
 
     private data class LocalFavorite(
@@ -67,6 +81,7 @@ class HistorySyncLocalStore(
 
     suspend fun initialize() {
         database.historySyncQueries.initialize(UUID.randomUUID().toString())
+        database.historySyncLibraryQueries.initializeAccount()
     }
 
     /** Account journals are isolated; old unmatched records and pending actions
@@ -74,6 +89,7 @@ class HistorySyncLocalStore(
     suspend fun selectAccount(account: String) {
         initialize()
         database.historySyncQueries.selectAccount(account)
+        database.historySyncLibraryQueries.initializeAccount()
     }
 
     /** Capture again after network I/O, so actions made during a pull cannot be
@@ -97,7 +113,14 @@ class HistorySyncLocalStore(
             val identityCounts = resolved.values.filter { it.chapter.id in nativeIds }
                 .groupingBy { it.identity.recordId() }.eachCount()
             val unique = resolved.filterValues { (identityCounts[it.identity.recordId()] ?: 0) <= 1 }
-            val stored = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, replicaDevice, snapshot.records)
+            val libraryPlan = sharedLibrary.plan(snapshot.libraryState, replicaDevice, remote)
+            val stored = HistorySyncDocument(
+                HistorySyncProtocol.FORMAT,
+                1,
+                replicaDevice,
+                snapshot.records,
+                libraryState = libraryPlan.state,
+            )
             val normalized = HistorySyncSourcePolicy.normalizeDocuments(listOf(stored) + remote)
             val records = normalized.first().records.associateByTo(sortedMapOf()) { it.id }
             for (item in unique.values) {
@@ -135,7 +158,13 @@ class HistorySyncLocalStore(
                 )
                 records[id] = HistorySyncProtocol.mergeRecord(current, changed)
             }
-            val local = HistorySyncDocument(HistorySyncProtocol.FORMAT, 1, replicaDevice, records.values.toList())
+            val local = HistorySyncDocument(
+                HistorySyncProtocol.FORMAT,
+                1,
+                replicaDevice,
+                records.values.toList(),
+                libraryState = libraryPlan.state,
+            )
             val history = HistorySyncProtocol.merge(replicaDevice, local, *normalized.drop(1).toTypedArray())
             // A full native favorites list is independent of chapter records.
             // Never copy another installation's list under this writer's name.
@@ -147,12 +176,17 @@ class HistorySyncLocalStore(
                 .groupBy { it.identity.recordId() }
             var applied = 0
             var unmatched = 0
+            var libraryApplied = 0
+            var libraryPending = 0
             currentCoroutineContext().ensureActive()
             val committed = database.transactionWithResult {
                 val current = readSnapshot()
                 if (current != snapshot) return@transactionWithResult false
                 database.historySyncQueries.observeClock(HistorySyncProtocol.maxClock(merged.records))
                 database.historySyncQueries.putLibrarySnapshot(HistorySyncProtocol.json.encodeToString(library))
+                val membership = sharedLibrary.commit(snapshot.libraryState, libraryPlan, apply)
+                libraryApplied = membership.first
+                libraryPending = membership.second
                 // Alias migration replaces the active journal atomically, so an old
                 // credential-bearing record ID cannot survive the next upload.
                 database.historySyncQueries.clearRecords()
@@ -186,7 +220,16 @@ class HistorySyncLocalStore(
                 }
                 true
             }
-            if (committed) return Result(merged, applied, unmatched)
+            if (committed) {
+                return Result(
+                    merged,
+                    applied,
+                    unmatched,
+                    libraryApplied,
+                    libraryPending,
+                    libraryClockExhausted = libraryPlan.blockedNativeIds.isNotEmpty(),
+                )
+            }
         }
         error("History changed during synchronization; pending changes are preserved")
     }
@@ -226,6 +269,7 @@ class HistorySyncLocalStore(
             records,
             favorites,
             library,
+            sharedLibrary.readSnapshot(),
         )
     }
 
@@ -287,7 +331,7 @@ class HistorySyncLocalStore(
             source,
             manga,
             HistorySyncMetadata(
-                mangaTitle = favorite.title.takeIf(String::isNotEmpty),
+                mangaTitle = favorite.title.takeIf { it.isNotEmpty() && it.toByteArray(Charsets.UTF_8).size <= 16_384 },
                 mangaUrl = websiteURL?.takeIf {
                     website !=
                         null

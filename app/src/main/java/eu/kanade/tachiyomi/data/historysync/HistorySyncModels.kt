@@ -19,6 +19,8 @@ data class HistorySyncDocument(
     val records: List<HistorySyncRecord>,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val librarySnapshot: HistorySyncLibrarySnapshot? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val libraryState: HistorySyncLibraryState? = null,
 )
 
 @Serializable
@@ -80,6 +82,7 @@ object HistorySyncProtocol {
         require(objectValue is JsonObject && objectValue["librarySnapshot"] != JsonNull) {
             "An absent library snapshot is unknown; explicit null is invalid"
         }
+        require(objectValue["libraryState"] != JsonNull) { "An absent shared library is unknown; null is invalid" }
         return json.decodeFromJsonElement<HistorySyncDocument>(objectValue).also(::validate)
     }
 
@@ -94,6 +97,7 @@ object HistorySyncProtocol {
         require(document.format == FORMAT && document.version == VERSION) { "Unsupported history sync format" }
         require(isDeviceId(document.deviceId)) { "Invalid sync device ID" }
         document.librarySnapshot?.let { HistorySyncLibraryProtocol.validate(it, document.deviceId) }
+        document.libraryState?.let(HistorySyncLibraryStateProtocol::validate)
         require(document.records.size <= MAX_RECORDS) { "Too many history records" }
         val seen = HashSet<String>()
         document.records.forEach { record ->
@@ -154,7 +158,13 @@ object HistorySyncProtocol {
                 records[incoming.id] = records[incoming.id]?.let { mergeRecord(it, incoming) } ?: incoming
             }
         }
-        return HistorySyncDocument(FORMAT, VERSION, deviceId, records.values.toList()).also(::validate)
+        return HistorySyncDocument(
+            FORMAT,
+            VERSION,
+            deviceId,
+            records.values.toList(),
+            libraryState = HistorySyncLibraryStateProtocol.merge(documents.mapNotNull { it.libraryState }),
+        ).also(::validate)
     }
 
     fun mergeRecord(local: HistorySyncRecord, remote: HistorySyncRecord): HistorySyncRecord {

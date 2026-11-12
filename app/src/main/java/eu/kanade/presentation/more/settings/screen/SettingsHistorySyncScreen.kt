@@ -57,7 +57,7 @@ object SettingsHistorySyncScreen : SearchableSettings {
         val manager = remember { Injekt.get<HistorySyncManager>() }
         val status by manager.status.collectAsState()
         val enabled by manager.preferences.enabled.collectAsState()
-        return listOf(
+        return listOfNotNull(
             Preference.PreferenceItem.InfoPreference(stringResource(MR.strings.history_sync_description)),
             Preference.PreferenceItem.CustomPreference(title = stringResource(MR.strings.history_sync_account)) {
                 CredentialsForm(manager)
@@ -92,6 +92,27 @@ object SettingsHistorySyncScreen : SearchableSettings {
                     HistorySyncManager.Phase.DISABLED -> stringResource(MR.strings.history_sync_disabled)
                 },
             ),
+            if (status.phase == HistorySyncManager.Phase.SUCCESS) {
+                Preference.PreferenceItem.InfoPreference(
+                    stringResource(
+                        MR.strings.history_sync_library_status,
+                        status.libraryApplied,
+                        status.libraryPending,
+                    ) +
+                        (
+                            if (status.libraryClockExhausted) {
+                                "\n" + stringResource(
+                                    MR.strings.history_sync_library_clock,
+                                )
+                            } else {
+                                ""
+                            }
+                            ) +
+                        status.libraryIssues.take(20).joinToString(separator = "\n", prefix = "\n"),
+                )
+            } else {
+                null
+            },
         )
     }
 

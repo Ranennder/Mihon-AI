@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.39
+
+- Synchronize one shared library with Aidoku AI in both directions. Adding or removing a title on either phone propagates through the existing cloud account, including unread titles with no reading history.
+- Retain per-title removal tombstones and capture actual native favorite changes in a durable transaction outbox. Offline changes survive restarts and merge independently from chapter progress, reading dates and legacy full-library snapshots.
+- Resolve incoming titles by exact provider website identity, verify native source routes, and fetch real metadata and chapters before adding a missing Android title. Unresolved additions remain pending without blocking other changes.
+- Retry failed source requests with randomized exponential pauses; rate-limited providers cool down while other sources continue. Show applied and pending library counts in synchronization settings.
+- Keep the original-pixel AI processing pipeline and both model width settings from 0.1.37 unchanged.
+
+The hidden Google Drive app data contains reading history and shared library membership, including removals. No new Google permissions or OAuth registration are required. Downloads, chapter bookmarks and reading duration remain local.
+
 ## v0.1.38
 
 - Publish the complete current Android favorites list separately from chapter history, including unread titles with no chapters or reading records.

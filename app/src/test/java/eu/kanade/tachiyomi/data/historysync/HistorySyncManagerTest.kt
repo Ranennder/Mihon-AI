@@ -65,6 +65,61 @@ class HistorySyncManagerTest {
     }
 
     @Test
+    fun `membership-only removal uploads with unchanged chapter records and legacy snapshot`() = runTest {
+        val fixture = fixture()
+        val source = "mangabuff"
+        val manga = "/title"
+        val membership = HistorySyncLibraryRecord(
+            HistorySyncLibraryProtocol.titleId(source, manga),
+            source,
+            manga,
+            membership = HistorySyncLibraryMembership(true, 100, fixture.document.deviceId),
+        )
+        var document = fixture.document.copy(libraryState = HistorySyncLibraryStateProtocol.state(listOf(membership)))
+        coEvery { fixture.store.reconcile(any(), any()) } answers { HistorySyncLocalStore.Result(document, 2, 3) }
+        fixture.manager.syncNow()
+        document = document.copy(
+            libraryState = HistorySyncLibraryStateProtocol.state(
+                listOf(
+                    membership.copy(membership = membership.membership.copy(included = false, modifiedAt = 101)),
+                ),
+            ),
+        )
+        fixture.manager.syncNow()
+        fixture.manager.syncNow()
+        assertEquals(2, fixture.transport.pushes.size)
+        assertEquals(document, fixture.transport.pushes.last())
+    }
+
+    @Test
+    fun `pending library network work does not delay upload and disabling cancels it`() = runTest {
+        val fixture = fixture()
+        val started = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        coEvery { fixture.store.reconcile(any(), any()) } answers {
+            HistorySyncLocalStore.Result(fixture.document, 2, 3, libraryPending = 1)
+        }
+        coEvery { fixture.store.materializeLibrary() } coAnswers {
+            started.complete(Unit)
+            try {
+                CompletableDeferred<Unit>().await()
+                0
+            } finally {
+                cancelled.complete(Unit)
+            }
+        }
+        assertTrue(fixture.manager.syncNow())
+        runCurrent()
+        assertTrue(started.isCompleted)
+        assertEquals(1, fixture.transport.pushes.size)
+        assertEquals(HistorySyncManager.Phase.SUCCESS, fixture.manager.status.value.phase)
+        fixture.manager.setEnabled(false)
+        runCurrent()
+        assertTrue(cancelled.isCompleted)
+        assertEquals(HistorySyncManager.Phase.DISABLED, fixture.manager.status.value.phase)
+    }
+
+    @Test
     fun `opening syncs immediately and idle foreground pulls every ten seconds`() = runTest {
         val fixture = fixture()
         fixture.manager.foreground()
