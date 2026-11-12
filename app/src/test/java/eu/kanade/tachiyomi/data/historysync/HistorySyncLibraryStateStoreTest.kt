@@ -354,8 +354,8 @@ class HistorySyncLibraryStateStoreTest {
         assertEquals(1, store.materializeLibrary())
         val result = store.reconcile(listOf(incoming), apply = true)
         assertEquals(1, result.applied)
-        assertTrue(database.chaptersQueries.getChaptersByMangaId(1, false).awaitAsList().single().read)
-        assertEquals(4L, database.chaptersQueries.getChaptersByMangaId(1, false).awaitAsList().single().last_page_read)
+        assertTrue(database.chaptersQueries.getChaptersByMangaId(1, 0L).awaitAsList().single().read)
+        assertEquals(4L, database.chaptersQueries.getChaptersByMangaId(1, 0L).awaitAsList().single().last_page_read)
     }
 
     @Test
