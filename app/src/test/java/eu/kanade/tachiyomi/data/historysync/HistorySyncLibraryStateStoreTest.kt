@@ -309,8 +309,9 @@ class HistorySyncLibraryStateStoreTest {
         }.await()
         val document = store.reconcile().document
         assertEquals(1, requireNotNull(document.libraryState).records.size)
-        assertEquals(null, requireNotNull(document.libraryState).records.single().metadata.mangaTitle)
+        assertEquals("Title 1", requireNotNull(document.libraryState).records.single().metadata.mangaTitle)
         assertEquals(null, requireNotNull(document.librarySnapshot).entries.single().metadata.mangaTitle)
+        assertFalse(HistorySyncProtocol.encode(document).toString(Charsets.UTF_8).contains("T".repeat(17_000)))
     }
 
     @Test
