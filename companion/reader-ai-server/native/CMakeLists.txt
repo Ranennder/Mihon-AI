@@ -49,7 +49,7 @@ foreach(layer_source IN LISTS layer_sources)
     set(WITH_LAYER_${layer_name} OFF CACHE BOOL "" FORCE)
 endforeach()
 foreach(layer input convolution relu prelu split concat binaryop eltwise interp
-              packing cast padding pixelshuffle crop)
+              packing cast padding pixelshuffle crop gemm)
     set(WITH_LAYER_${layer} ON CACHE BOOL "" FORCE)
 endforeach()
 add_subdirectory("${MIHON_NCNN_SOURCE}" ncnn)

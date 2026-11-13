@@ -30,8 +30,8 @@ if not exist "%RUNTIME_DIR%\models\realesr-animevideov3-x2.bin" (
   exit /b 1
 )
 
-set "PYTHON_CMD=py -3"
-where py >nul 2>&1 || set "PYTHON_CMD=python"
+set "PYTHON_CMD=python"
+where python >nul 2>&1 || set "PYTHON_CMD=py -3"
 
 call %PYTHON_CMD% -m pip install --upgrade pip pillow pyinstaller
 if errorlevel 1 exit /b 1
