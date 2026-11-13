@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Version embedded in the standalone Companion (does not publish a release)
         required: true
-        default: v0.1.39
+        default: v0.1.40
         type: string
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
 jobs:
   companion:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       MIHON_AI_RELEASE_TAG: ${{ inputs.release_tag }}
     defaults:
@@ -42,6 +42,15 @@ jobs:
       - name: Build standalone Windows EXE
         shell: cmd
         run: build_windows_exe.bat
+      - name: Verify the modern native runtime inside the packaged EXE
+        shell: pwsh
+        run: |
+          python -m pip install pyinstaller
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $runtimeDir = $env:MIHONAI_RUNTIME_DIR
+          if (-not $runtimeDir) { $runtimeDir = Join-Path $env:TEMP 'mihon-realesrgan-runtime-ncnn20261020' }
+          python verify_packaged_runtime.py --executable dist/MihonAiCompanion.exe --runtime-dir $runtimeDir --proof dist/native-runtime-proof.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test frozen instance handoff
         shell: pwsh
         env:
@@ -57,9 +66,14 @@ jobs:
           Move-Item -LiteralPath 'dist/MihonAiCompanion.exe' -Destination $assetPath
           $asset = Get-Item -LiteralPath $assetPath
           $digest = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $runtimeProof = Get-Content -LiteralPath 'dist/native-runtime-proof.json' -Raw | ConvertFrom-Json
+          if ($runtimeProof.runtime_packaging_verified -cne $true) { throw 'Packaged native runtime was not verified' }
           @{ release_tag=$env:MIHON_AI_RELEASE_TAG; source_commit=$env:GITHUB_SHA; run_id=$env:GITHUB_RUN_ID;
-             file=$assetName; bytes=$asset.Length; sha256=$digest } |
-            ConvertTo-Json | Set-Content -LiteralPath 'dist/build-manifest.json' -Encoding utf8
+             file=$assetName; bytes=$asset.Length; sha256=$digest;
+             native_runtime_manifest=$runtimeProof.native_runtime_manifest;
+             packaged_runtime_manifest_sha256=$runtimeProof.packaged_runtime_manifest_sha256;
+             runtime_packaging_verified=$runtimeProof.runtime_packaging_verified } |
+            ConvertTo-Json -Depth 15 | Set-Content -LiteralPath 'dist/build-manifest.json' -Encoding utf8
       - name: Upload standalone EXE and provenance
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

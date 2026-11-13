@@ -41,6 +41,50 @@ If the runtime is bundled during the PyInstaller build, the `.exe` also works st
 
 Launching another Windows companion closes the previous companion on the configured port, including its active upscale and tunnel processes, before starting or installing an update. If another application occupies that port, it is left running and the companion reports the conflict.
 
+### Native engine in Companion 0.1.40
+
+The packaged engine is built from pinned Real-ESRGAN sources with NCNN
+20261020. The April 2022 archive supplies only the unchanged official model
+weights. The native application checks model loading, tensor allocation,
+inference and GPU submission results before continuing. Directory processing
+allocates an enlarged output only when its page reaches the compute worker,
+and keeps its native queues bounded. The Windows model-path formatting and
+modern Vulkan layer construction are corrected in the same build.
+
+The packaged `native-runtime-manifest.json` records dependency commits, source
+patches, model and binary hashes, and CPU model checks. CI also verifies these
+exact files inside the standalone EXE without launching GPU processing.
+
+### GPU fault handling
+
+The companion defaults to a 128-pixel inference tile and one NCNN compute
+worker (`1:1:1`). Existing configuration files with automatic tiles use 128;
+explicit tiles are bounded to 32–256 pixels. These
+settings change the amount of work submitted at once, while preserving the
+original source pixels, model, scale and final output width.
+
+If the native process reports a lost GPU, crashes or times out, the companion
+stops GPU processing for the entire session. It kills and waits for the child
+before freeing its processing slot, and rejects queued/new processing with
+HTTP 503. It does not automatically retry a failed driver. Previously finished
+pages remain available. A normal reader cancellation does not stop the GPU
+session.
+
+The native compute process also receives a private environment disabling
+implicit Vulkan layers, including the Steam overlay's own disable switch.
+Existing layer-disable filters are retained; forced layer-enable overrides are
+removed only from the compute child. This avoids injecting game/capture layers
+into a headless GPU job. It does not change registry settings, the environment
+of the running companion, or overlays in other applications. An overlay has
+not been established as the cause of the observed driver crash.
+
+The console and `companion.log` show the stopped state once. `/health` remains
+available and includes `gpu_available`, `gpu_state` and `gpu_error` so a reachable
+server can be distinguished from one whose processing stopped. Check the GPU
+driver after a fault; an explicit companion restart is required to resume.
+These controls contain repeated failures; they do not establish or repair the
+underlying cause of a Windows display-driver failure.
+
 For the beta direct route, enable `Companion downloads pages directly`. It works for individual pages and whole-chapter batches. The phone remains the controller and sends only the request data needed for each page (URL, headers, and matching cookies). If the source needs an unsupported request type or the PC cannot fetch a page, Mihon automatically falls back to uploading images from the phone.
 
 With v0.1.28, `Chapter Stream` has a separate `Chapter processing` choice:
@@ -192,11 +236,11 @@ Example config:
   "model_dir": "runtime/models",
   "output_format": "jpg",
   "scale": 2,
-  "tile_size": 0,
+  "tile_size": 128,
   "gpu_id": "auto",
   "prefer_discrete_gpu": true,
   "vulkan_driver_filter": "",
-  "jobs": "1:2:2",
+  "jobs": "1:1:1",
   "timeout_seconds": 180,
   "max_workers": 2,
   "max_request_megabytes": 32

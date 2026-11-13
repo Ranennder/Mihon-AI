@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.40
+
+- Rebuild the Windows AI runtime from pinned Real-ESRGAN sources with current NCNN instead of bundling the April 2022 executable. Keep the official Fast and Detailed model weights and the original-page inference pipeline.
+- Bound inference tiles and use one NCNN compute worker, including when an older configuration requests automatic tiles or multiple workers.
+- Stop native processing immediately on a GPU execution failure, return the failure to the reader, and stop queued GPU work until Companion is explicitly restarted. Reap canceled and failed child processes before another task may use the GPU.
+- Keep completed pages and connectivity diagnostics available after a GPU failure. Report effective runtime settings and stopped-GPU status without flooding the log with repeated driver errors.
+- Retain the shared library and reading-history synchronization from 0.1.39.
+
+Automated tests cover native runtime construction, CPU model inference and fault handling. Validation on the affected RTX 5080 is still required to confirm whether the original driver hang is resolved.
+
 ## v0.1.39
 
 - Synchronize one shared library with Aidoku AI in both directions. Adding or removing a title on either phone propagates through the existing cloud account, including unread titles with no reading history.

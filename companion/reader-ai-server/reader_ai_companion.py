@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import ctypes
 import errno
@@ -87,6 +88,11 @@ MAX_SINGLE_OUTPUT_DIMENSION = 65535
 MAX_CHUNK_OUTPUT_DIMENSION = 16384
 CHUNK_OVERLAP_INPUT_PIXELS = 32
 LOG_FILE_NAME = "companion.log"
+SAFE_GPU_TILE_SIZE = 256
+DEFAULT_GPU_TILE_SIZE = 128
+SAFE_GPU_JOBS = "1:1:1"
+MAX_SUBPROCESS_LOG_LINES = 64
+MAX_SUBPROCESS_LOG_LINE_LENGTH = 2048
 CHAPTER_ARCHIVE_FORMAT = "zip"
 CHAPTER_JOB_RETENTION_SECONDS = 1800
 CHAPTER_PAGE_STABILITY_SECONDS = 0.35
@@ -129,6 +135,16 @@ _DIRECT_PAGE_OPENER = build_opener(_SafePageRedirectHandler())
 
 class ChapterJobFailedError(RuntimeError):
     """A completed job cannot produce another result without a new upload."""
+
+
+class GPUUnavailableError(RuntimeError):
+    """GPU work stays stopped until the companion is explicitly restarted."""
+
+
+def _safe_gpu_tile_size(value: int) -> int:
+    # Automatic tiles can reserve most of the display GPU's memory. Preserve
+    # source resolution; bound the inference tile, not the image dimensions.
+    return min(SAFE_GPU_TILE_SIZE, max(32, int(value))) if int(value) > 0 else DEFAULT_GPU_TILE_SIZE
 
 
 def _source_page_origin(page_url: str) -> str:
@@ -217,11 +233,11 @@ class Config:
     model_name: str = "realesr-animevideov3"
     output_format: str = "jpg"
     scale: int = 2
-    tile_size: int = 0
+    tile_size: int = DEFAULT_GPU_TILE_SIZE
     gpu_id: str = "auto"
     prefer_discrete_gpu: bool = True
     vulkan_driver_filter: str = ""
-    jobs: str = "1:2:2"
+    jobs: str = SAFE_GPU_JOBS
     timeout_seconds: int = 180
     max_workers: int = 1
     batch_size: int = 1
@@ -238,6 +254,8 @@ class Config:
 
         merged = {**data, **{key: value for key, value in overrides.items() if value is not None}}
         config = cls(**merged)
+        config.tile_size = _safe_gpu_tile_size(config.tile_size)
+        config.jobs = SAFE_GPU_JOBS
         config.batch_size = _normalize_batch_size(config.batch_size)
         config.batch_wait_milliseconds = max(0, int(config.batch_wait_milliseconds))
         config.gpu_id = _normalize_gpu_id(config.gpu_id)
@@ -422,6 +440,9 @@ class ReaderAiServer(ThreadingHTTPServer):
         self._active_processes: dict[str, set[Any]] = {}
         self._active_processes_lock = threading.Lock()
         self._subprocess_slot = threading.Semaphore(1)
+        self._gpu_fault_lock = threading.Lock()
+        self._gpu_fault: str | None = None
+        self._closing_event = threading.Event()
         # Encoding a complete AI bitmap is CPU work, not a GPU lease. Keep one
         # bitmap active and cache final bytes on disk, never a chapter in RAM.
         self._delivery_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reader-ai-delivery")
@@ -436,6 +457,37 @@ class ReaderAiServer(ThreadingHTTPServer):
             )
             thread.start()
             self._worker_threads.append(thread)
+
+    def gpu_status(self) -> dict[str, Any]:
+        with self._gpu_fault_lock:
+            fault = self._gpu_fault
+        return {
+            "available": fault is None and not self._closing_event.is_set(),
+            "state": "faulted" if fault else ("closing" if self._closing_event.is_set() else "ready"),
+            "error": fault,
+        }
+
+    def ensure_gpu_available(self) -> None:
+        status = self.gpu_status()
+        if not status["available"]:
+            raise GPUUnavailableError(status["error"] or "Companion is closing")
+
+    def latch_gpu_fault(self, reason: str) -> str:
+        # Do not retain runtime output, paths or client data in health messages.
+        reasons = {"device_fault", "process_exit", "process_timeout", "process_cleanup_failed", "process_monitor_failed"}
+        safe_reason = reason if reason in reasons else "process_exit"
+        first_fault = False
+        with self._gpu_fault_lock:
+            if self._gpu_fault is None:
+                self._gpu_fault = (
+                    "GPU processing stopped after a runtime failure "
+                    f"({safe_reason}). Check the GPU driver, then restart Companion to resume."
+                )
+                first_fault = True
+            message = self._gpu_fault
+        if first_fault:
+            _emit_log_line(f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] {message}")
+        return message
 
     def process_image(
         self,
@@ -457,6 +509,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         if self.config.mode == "mock_copy":
             result = ProcessedImage(body, output_format)
             return _finish_width_output(result, model_name, output_format, body, target_width) if target_width else result
+
+        self.ensure_gpu_available()
 
         native_scale = _resolve_model_scale(
             model_name=model_name,
@@ -525,6 +579,8 @@ class ReaderAiServer(ThreadingHTTPServer):
         _validate_target_width(target_width)
         if self.config.mode == "mock_copy":
             raise RuntimeError("Chapter mode is not supported in mock_copy")
+
+        self.ensure_gpu_available()
 
         self._cleanup_expired_chapter_jobs()
         native_scale = _resolve_model_scale(
@@ -614,6 +670,7 @@ class ReaderAiServer(ThreadingHTTPServer):
         target_width: int = 0,
     ) -> ChapterUpscaleJob:
         """Register immediately, then download source images in the background."""
+        self.ensure_gpu_available()
         _validate_target_width(target_width)
         chapter_mode = _resolve_chapter_mode(chapter_mode)
         indexes = [int(item["page_index"]) for item in pages]
@@ -929,6 +986,7 @@ class ReaderAiServer(ThreadingHTTPServer):
                     snapshot.unlink(missing_ok=True)
 
     def _check_direct_download_active(self, job: ChapterUpscaleJob, stop_event: threading.Event) -> None:
+        self.ensure_gpu_available()
         if job.cancel_event.is_set() or self._is_scope_stale(job.client_id, job.scope_id):
             raise RuntimeError(str(job.error) if job.error is not None else "Chapter upscale was canceled")
         if stop_event.is_set():
@@ -1187,21 +1245,17 @@ class ReaderAiServer(ThreadingHTTPServer):
             self._pending_requests.pop(request.request_id, None)
 
     def _register_active_process(self, client_id: str | None, process: Any) -> None:
-        if not client_id:
-            return
         with self._active_processes_lock:
-            self._active_processes.setdefault(client_id, set()).add(process)
+            self._active_processes.setdefault(client_id or "", set()).add(process)
 
     def _unregister_active_process(self, client_id: str | None, process: Any) -> None:
-        if not client_id:
-            return
         with self._active_processes_lock:
-            processes = self._active_processes.get(client_id)
+            processes = self._active_processes.get(client_id or "")
             if not processes:
                 return
             processes.discard(process)
             if not processes:
-                self._active_processes.pop(client_id, None)
+                self._active_processes.pop(client_id or "", None)
 
     def _is_scope_stale(self, client_id: str | None, scope_id: int | None) -> bool:
         if not client_id or scope_id is None:
@@ -1375,6 +1429,7 @@ class ReaderAiServer(ThreadingHTTPServer):
 
             batch = [request]
             try:
+                self.ensure_gpu_available()
                 if request.batch_key is not None:
                     batch = self._collect_batch(request, backlog)
                     filtered_batch: list[PendingUpscaleRequest] = []
@@ -1749,6 +1804,13 @@ class ReaderAiServer(ThreadingHTTPServer):
             shutil.rmtree(job.workspace, ignore_errors=True)
 
     def server_close(self) -> None:
+        closing_event = getattr(self, "_closing_event", None)
+        if closing_event is not None:
+            closing_event.set()
+        with getattr(self, "_pending_requests_lock", threading.Lock()):
+            requests = list(getattr(self, "_pending_requests", {}).values())
+        for request in requests:
+            self._cancel_pending_request(request, "Companion was closed")
         try:
             super().server_close()
         finally:
@@ -1801,6 +1863,7 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             current_release_tag = _detect_current_release_tag()
+            gpu_status = self.server.gpu_status()
             payload = {
                 "ok": True,
                 "mode": self.server.config.mode,
@@ -1808,7 +1871,12 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "model_dir": self.server.config.model_dir,
                 "output_format": self.server.config.output_format,
                 "scale": self.server.config.scale,
-                "tile_size": self.server.config.tile_size,
+                "tile_size": _safe_gpu_tile_size(self.server.config.tile_size),
+                "jobs": SAFE_GPU_JOBS,
+                "gpu_available": gpu_status["available"],
+                "gpu_state": gpu_status["state"],
+                "gpu_error": gpu_status["error"],
+                "native_runtime": _gpu_runtime_metadata(Path(self.server.config.binary)),
                 "gpu_id": self.server.config.gpu_id,
                 "prefer_discrete_gpu": self.server.config.prefer_discrete_gpu,
                 "gpu_selection": _describe_gpu_selection(self.server.config),
@@ -2040,6 +2108,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
         if not self._authorize():
             self._reject_unauthorized()
             return
+        if self._reject_unavailable_gpu():
+            return
 
         content_length = self.headers.get("Content-Length")
         if not content_length:
@@ -2160,6 +2230,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 scope_id=scope_id,
                 target_width=target_width,
             )
+        except GPUUnavailableError as exc:
+            self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+            return
         except subprocess.TimeoutExpired as exc:
             self.log_message("[%s] Upscale timeout after %s seconds", request_id, exc.timeout)
             self._send_text(HTTPStatus.GATEWAY_TIMEOUT, f"Upscale process timed out after {exc.timeout} seconds")
@@ -2197,6 +2270,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
     def _handle_chapter_upscale_request(self) -> None:
         if not self._authorize():
             self._reject_unauthorized()
+            return
+        if self._reject_unavailable_gpu():
             return
 
         content_length = self.headers.get("Content-Length")
@@ -2279,6 +2354,9 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 priority_count=priority_count,
                 target_width=target_width,
             )
+        except GPUUnavailableError as exc:
+            self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+            return
         except ValueError as exc:
             self._send_text(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -2333,6 +2411,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
     def _handle_direct_chapter_upscale_request(self) -> None:
         if not self._authorize():
             self._reject_unauthorized()
+            return
+        if self._reject_unavailable_gpu():
             return
         try:
             target_width = _parse_target_width_header(self.headers.get("X-Reader-AI-Target-Width"))
@@ -2396,6 +2476,8 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
                 "target_width": chapter_job.target_width,
                 "reused_existing_job": False,
             })
+        except GPUUnavailableError as exc:
+            self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
         except Exception as exc:  # noqa: BLE001
             self.log_message("Direct chapter error: %s", exc)
             self._send_text(HTTPStatus.BAD_GATEWAY, str(exc))
@@ -2442,6 +2524,17 @@ class ReaderAiRequestHandler(BaseHTTPRequestHandler):
             "Invalid or missing X-Reader-AI-Token",
             headers={"Connection": "close"},
         )
+
+    def _reject_unavailable_gpu(self) -> bool:
+        try:
+            self.server.ensure_gpu_available()
+        except GPUUnavailableError as exc:
+            # The request body is deliberately unread; close this connection so
+            # its bytes cannot be interpreted as a subsequent HTTP request.
+            self.close_connection = True
+            self._send_text(HTTPStatus.SERVICE_UNAVAILABLE, str(exc), headers={"Connection": "close"})
+            return True
+        return False
 
     def _send_binary(self, status: HTTPStatus, body: bytes, output_format: str, target_width: int | None = None) -> None:
         mime = mimetypes.types_map.get(f".{output_format}", "application/octet-stream")
@@ -3062,24 +3155,46 @@ def _run_logged_subprocess(
     process_registry: ReaderAiServer | None = None,
 ) -> SubprocessRunResult:
     _set_request_display_label(request_id, display_label)
-    output_lines: list[str] = []
+    output_lines: deque[str] = deque(maxlen=MAX_SUBPROCESS_LOG_LINES)
+    fatal_output = threading.Event()
+    reader_failed = threading.Event()
     subprocess_slot = process_registry._subprocess_slot if process_registry is not None else None
     slot_acquired = False
     process: subprocess.Popen[str] | None = None
     reader_thread: threading.Thread | None = None
+    returncode: int | None = None
+    fault_error: GPUUnavailableError | None = None
+
+    def fault(reason: str) -> GPUUnavailableError:
+        message = (process_registry.latch_gpu_fault(reason) if process_registry is not None else
+                   "GPU processing stopped after a runtime failure. Check the GPU driver, then restart Companion to resume.")
+        return GPUUnavailableError(message)
+
     try:
+        if process_registry is not None:
+            process_registry.ensure_gpu_available()
         if subprocess_slot is not None:
             while not subprocess_slot.acquire(timeout=0.1):
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("Upscale process was canceled while queued")
+                process_registry.ensure_gpu_available()
             slot_acquired = True
         # Cancellation may arrive just as the preceding process releases its
         # slot. Never launch a delayed GPU process for an already canceled job.
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Upscale process was canceled while queued")
+        if process_registry is not None:
+            # Recheck under the GPU lease. Another process can fault while this
+            # request is waiting, and queued commands must never restart it.
+            process_registry.ensure_gpu_available()
+        command = _safe_gpu_command(command)
+        tile = command[command.index("-t") + 1] if "-t" in command else "unspecified"
+        jobs = command[command.index("-j") + 1] if "-j" in command else "unspecified"
+        runtime_version = _gpu_runtime_metadata(Path(command[0]))["runtime_version"]
         process = subprocess.Popen(
             command,
             cwd=str(cwd),
+            env=_gpu_subprocess_environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -3087,56 +3202,215 @@ def _run_logged_subprocess(
             errors="replace",
             bufsize=1,
         )
+        _emit_log_line(
+            f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] GPU runtime started: "
+            f"binary={Path(command[0]).name}, pid={getattr(process, 'pid', 'unknown')}, "
+            f"tile={tile}, jobs={jobs}, implicit_layers=disabled, "
+            f"runtime={runtime_version}",
+            console=False,
+        )
         if process_registry is not None:
             process_registry._register_active_process(client_id, process)
 
         def reader() -> None:
             if process is None or process.stdout is None:
                 return
-            for raw_line in process.stdout:
-                line = raw_line.rstrip()
-                if not line:
-                    continue
-                output_lines.append(line)
-                _emit_log_line(
-                    f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
-                    console=_should_surface_subprocess_console_line(request_id, line),
-                    log_file=_should_record_subprocess_log_line(request_id, line),
-                )
+            try:
+                for raw_line in process.stdout:
+                    line = raw_line.rstrip()
+                    if not line:
+                        continue
+                    fatal = "mihon_gpu_fault" in line.lower() or _should_retry_with_safe_vulkan_settings(line)
+                    line = line[:MAX_SUBPROCESS_LOG_LINE_LENGTH]
+                    output_lines.append(line)
+                    if fatal:
+                        # The old runtime can endlessly print DEVICE_LOST while
+                        # its process remains alive. Stop on the first line,
+                        # including when it subsequently returns exit code zero.
+                        fatal_output.set()
+                        fault("device_fault")
+                    _emit_log_line(
+                        f"[{time.strftime('%d/%b/%Y %H:%M:%S')}] [{request_id}] {line}",
+                        console=_should_surface_subprocess_console_line(request_id, line),
+                        log_file=_should_record_subprocess_log_line(request_id, line),
+                    )
+                    if fatal:
+                        return
+            except (OSError, ValueError):
+                reader_failed.set()
 
         reader_thread = threading.Thread(target=reader, name=f"reader-ai-log-{request_id}", daemon=True)
         reader_thread.start()
 
         deadline = time.monotonic() + timeout
         while True:
+            if fatal_output.is_set():
+                fault_error = fault("device_fault")
+                break
+            if reader_failed.is_set():
+                fault_error = fault("process_monitor_failed")
+                break
             returncode = process.poll()
             if returncode is not None:
                 break
             if cancel_event is not None and cancel_event.is_set():
-                process.kill()
-                process.wait(timeout=5)
-                returncode = process.returncode if process.returncode is not None else -9
+                break
+            if process_registry is not None and process_registry._closing_event.is_set():
                 break
             if time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(command, timeout)
+                fault_error = fault("process_timeout")
+                break
             time.sleep(0.05)
     except subprocess.TimeoutExpired:
+        fault_error = fault("process_timeout")
+    except BaseException:
+        # Failure to create the process (e.g. missing binary) does not diagnose
+        # the display driver. Any monitor failure after launch must stop retries.
         if process is not None:
-            process.kill()
+            fault("process_monitor_failed")
         raise
     finally:
+        reaped = True
+        if process is not None:
+            reaped = _stop_and_reap_gpu_process(process)
+            if not reaped:
+                fault_error = fault("process_cleanup_failed")
         if reader_thread is not None:
-            reader_thread.join(timeout=1)
-        if process is not None and process.stdout is not None:
-            process.stdout.close()
+            reader_thread.join(timeout=2)
+            if reader_thread.is_alive():
+                fault_error = fault("process_monitor_failed")
+        if fatal_output.is_set():
+            fault_error = fault("device_fault")
+        elif reader_failed.is_set():
+            fault_error = fault("process_monitor_failed")
+        if process is not None and reaped:
+            returncode = process.returncode
+            canceled = cancel_event is not None and cancel_event.is_set()
+            closing = process_registry is not None and process_registry._closing_event.is_set()
+            details = "\n".join(output_lines)
+            # A known encoder rejection may safely retry PNG. Unknown crashes
+            # (including Windows driver fail-fast exits) stop every GPU route.
+            encoder_rejected = returncode == 1 and _should_retry_with_png(details)
+            # A reader abort can race with an already dead native process. It
+            # must not disguise a Windows fail-fast/access-violation status as
+            # our ordinary cancellation (TerminateProcess uses exit code 1).
+            driver_crash = returncode is not None and (returncode < -128 or returncode >= 0x80000000)
+            if returncode != 0 and (driver_crash or (not canceled and not closing)) and not encoder_rejected:
+                fault_error = fault("process_exit")
+        if process is not None and process.stdout is not None and (reader_thread is None or not reader_thread.is_alive()):
+            try:
+                process.stdout.close()
+            except OSError:
+                fault_error = fault("process_monitor_failed")
         _set_request_display_label(request_id, None)
-        if process_registry is not None and process is not None:
+        if process_registry is not None and process is not None and reaped:
             process_registry._unregister_active_process(client_id, process)
         if subprocess_slot is not None and slot_acquired:
-            subprocess_slot.release()
+            if reaped:
+                subprocess_slot.release()
+            else:
+                # Do not grant the GPU lease while a failed child still exists.
+                # The latch lets queued callers fail immediately even while the
+                # reaper waits for a wedged driver's process to leave the kernel.
+                def release_after_exit() -> None:
+                    try:
+                        process.wait()
+                    except Exception:
+                        return
+                    if process_registry is not None:
+                        process_registry._unregister_active_process(client_id, process)
+                    if process.stdout is not None and (reader_thread is None or not reader_thread.is_alive()):
+                        try:
+                            process.stdout.close()
+                        except OSError:
+                            pass
+                    subprocess_slot.release()
+
+                threading.Thread(target=release_after_exit, name="reader-ai-gpu-reaper", daemon=True).start()
+
+    if fault_error is not None:
+        raise fault_error
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Remote AI work was canceled")
+    if process_registry is not None:
+        process_registry.ensure_gpu_available()
 
     details = "\n".join(output_lines).strip() or f"exit code {returncode}"
     return SubprocessRunResult(returncode=returncode, details=details)
+
+
+def _safe_gpu_command(command: list[str]) -> list[str]:
+    result = list(command)
+    for flag in ("-t", "-j"):
+        if flag in result:
+            index = result.index(flag) + 1
+            if index < len(result):
+                result[index] = str(_safe_gpu_tile_size(int(result[index]))) if flag == "-t" else SAFE_GPU_JOBS
+    return result
+
+
+def _gpu_subprocess_environment() -> dict[str, str]:
+    # Keep display/driver selection, while preventing unrelated implicit
+    # overlays from being injected into this headless compute child. All
+    # changes are child-local; games, the companion and system settings retain
+    # their original environment and overlay behavior.
+    environment = os.environ.copy()
+    disabled = [item.strip() for item in environment.get("VK_LOADER_LAYERS_DISABLE", "").split(",") if item.strip()]
+    if "~implicit~" not in disabled:
+        disabled.append("~implicit~")
+    environment["VK_LOADER_LAYERS_DISABLE"] = ",".join(disabled)
+    # These forced enable/allow lists take precedence over the disable filter.
+    # The compute CLI does not request or require any additional Vulkan layers.
+    for name in ("VK_LOADER_LAYERS_ENABLE", "VK_LOADER_LAYERS_ALLOW", "VK_INSTANCE_LAYERS",
+                 "ENABLE_VK_LAYER_VALVE_steam_overlay_1"):
+        environment.pop(name, None)
+    # The installed Steam layer's own manifest supports this on older loaders
+    # which predate VK_LOADER_LAYERS_DISABLE (Vulkan loader 1.3.234).
+    environment["DISABLE_VK_LAYER_VALVE_steam_overlay_1"] = "1"
+    return environment
+
+
+def _gpu_runtime_metadata(binary: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {"runtime_version": "unversioned"}
+    try:
+        with (binary.parent / "native-runtime-manifest.json").open("rb") as source:
+            body = source.read(65537)
+        if len(body) > 65536:
+            return result
+        manifest = json.loads(body)
+        if not isinstance(manifest, dict) or manifest.get("format") != "mihon-native-runtime" or type(manifest.get("version")) is not int or manifest["version"] != 1:
+            return result
+        version = manifest.get("runtime_version")
+        if not isinstance(version, str) or re.fullmatch(r"[a-zA-Z0-9._-]{1,80}", version) is None:
+            return result
+        result["runtime_version"] = version
+        pins = manifest.get("pins")
+        if isinstance(pins, dict):
+            result["pins"] = {name: value for name in ("realesrgan", "ncnn", "glslang", "webp")
+                              if isinstance(value := pins.get(name), str) and re.fullmatch(r"[a-fA-F0-9]{40}", value)}
+        files = manifest.get("files")
+        if isinstance(files, dict):
+            digest = files.get(binary.name)
+            if isinstance(digest, str) and re.fullmatch(r"[a-fA-F0-9]{64}", digest):
+                result["manifest_binary_sha256"] = digest.lower()
+    except (OSError, ValueError, TypeError, UnicodeError):
+        pass
+    return result
+
+
+def _stop_and_reap_gpu_process(process: Any) -> bool:
+    try:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                # It may have exited between poll and TerminateProcess. Always
+                # try wait even when kill reports that the handle has exited.
+                pass
+        process.wait(timeout=5)
+        return True
+    except Exception:
+        return False
 
 
 def _clear_workspace_files(workspace: Path) -> None:
@@ -3155,16 +3429,14 @@ def _should_retry_with_png(message: str) -> bool:
 def _should_retry_with_safe_vulkan_settings(message: str) -> bool:
     lowered = message.lower()
     return (
-        "vkqueuesubmit failed -4" in lowered or
-        "vkwaitforfences failed -4" in lowered or
+        re.search(r"\bvk(?:queuesubmit|waitforfences|queuewaitidle|devicewaitidle)\s+failed\s*[:=]?\s*-4\b", lowered) is not None or
         "vk_error_device_lost" in lowered or
         "device lost" in lowered
     )
 
 
 def _build_safe_vulkan_retry_config(config: Config) -> Config:
-    safe_tile_size = config.tile_size if config.tile_size > 0 else 256
-    return replace(config, tile_size=safe_tile_size, jobs="1:1:1", batch_size=1)
+    return replace(config, tile_size=_safe_gpu_tile_size(config.tile_size), jobs=SAFE_GPU_JOBS, batch_size=1)
 
 
 def _requires_chunked_upscale(body: bytes, native_scale: int, target_scale: int, target_width: int = 0) -> bool:
@@ -4886,6 +5158,7 @@ def main() -> int:
             _emit_log_line(f"Release version: {current_release_tag}", console=False)
         _emit_log_line(f"Mode: {config.mode}", console=False)
         _emit_log_line(f"Binary: {config.binary}", console=False)
+        _emit_log_line(f"Native runtime metadata: {json.dumps(_gpu_runtime_metadata(Path(config.binary)), sort_keys=True)}", console=False)
         _emit_log_line(f"Model dir: {config.model_dir}", console=False)
         _emit_log_line(f"GPU selection: {_describe_gpu_selection(config)}", console=False)
         _emit_log_line(f"Live logs: enabled -> {log_path}", console=False)

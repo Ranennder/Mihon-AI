@@ -7,11 +7,11 @@
   "model_dir": "runtime/models",
   "output_format": "jpg",
   "scale": 2,
-  "tile_size": 0,
+  "tile_size": 128,
   "gpu_id": "auto",
   "prefer_discrete_gpu": true,
   "vulkan_driver_filter": "",
-  "jobs": "1:2:2",
+  "jobs": "1:1:1",
   "timeout_seconds": 180,
   "max_workers": 2,
   "max_request_megabytes": 32
