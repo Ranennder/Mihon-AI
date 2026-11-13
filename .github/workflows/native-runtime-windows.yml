@@ -1,0 +1,30 @@
+name: Native GPU runtime preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/companion-native-runtime
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build modern runtime and run CPU model and native failure checks
+        shell: pwsh
+        run: |
+          ./companion/reader-ai-server/prepare_windows_runtime.ps1 -RuntimeDir "$env:RUNNER_TEMP/mihon-modern-native" -Force
+      - name: Upload native runtime and provenance
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: modern-native-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/mihon-modern-native
+          if-no-files-found: error

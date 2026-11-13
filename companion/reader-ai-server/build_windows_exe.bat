@@ -7,7 +7,7 @@ set "RELEASE_TAG=%MIHON_AI_RELEASE_TAG%"
 if defined RELEASE_TAG > "%BUILD_INFO_FILE%" echo RELEASE_TAG = "%RELEASE_TAG%"
 
 set "RUNTIME_DIR=%MIHONAI_RUNTIME_DIR%"
-if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime"
+if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime-ncnn20261020"
 set "CLOUDFLARED_EXE=%TEMP%\cloudflared.exe"
 
 if not exist "%CLOUDFLARED_EXE%" (
@@ -16,11 +16,9 @@ if not exist "%CLOUDFLARED_EXE%" (
   if errorlevel 1 exit /b 1
 )
 
-if not exist "%RUNTIME_DIR%\realesrgan-ncnn-vulkan.exe" (
-  echo Preparing Windows runtime in %RUNTIME_DIR%
-  powershell -ExecutionPolicy Bypass -File "%~dp0prepare_windows_runtime.ps1" -RuntimeDir "%RUNTIME_DIR%"
-  if errorlevel 1 exit /b 1
-)
+echo Verifying or building modern Windows runtime in %RUNTIME_DIR%
+powershell -ExecutionPolicy Bypass -File "%~dp0prepare_windows_runtime.ps1" -RuntimeDir "%RUNTIME_DIR%"
+if errorlevel 1 exit /b 1
 
 if not exist "%RUNTIME_DIR%\models\realesr-animevideov3-x2.bin" (
   echo Runtime models not found in %RUNTIME_DIR%
@@ -31,6 +29,7 @@ set "PYTHON_CMD=py -3"
 where py >nul 2>&1 || set "PYTHON_CMD=python"
 
 call %PYTHON_CMD% -m pip install --upgrade pip pillow pyinstaller
+if errorlevel 1 exit /b 1
 call %PYTHON_CMD% -m PyInstaller ^
   --clean ^
   --onefile ^
@@ -38,6 +37,7 @@ call %PYTHON_CMD% -m PyInstaller ^
   --add-data "%RUNTIME_DIR%;runtime" ^
   --add-binary "%CLOUDFLARED_EXE%;." ^
   reader_ai_companion.py
+if errorlevel 1 exit /b 1
 
 echo.
 echo Built exe: dist\MihonAiCompanion.exe
