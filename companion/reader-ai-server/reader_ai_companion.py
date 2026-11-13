@@ -3292,9 +3292,10 @@ def _run_logged_subprocess(
             # (including Windows driver fail-fast exits) stop every GPU route.
             encoder_rejected = returncode == 1 and _should_retry_with_png(details)
             # A reader abort can race with an already dead native process. It
-            # must not disguise a Windows fail-fast/access-violation status as
-            # our ordinary cancellation (TerminateProcess uses exit code 1).
-            driver_crash = returncode is not None and (returncode < -128 or returncode >= 0x80000000)
+            # must not disguise a Windows fail-fast/access-violation status or
+            # the rebuilt engine's explicit GPU fault as ordinary cancellation
+            # (TerminateProcess uses exit code 1).
+            driver_crash = returncode is not None and (returncode == 71 or returncode < -128 or returncode >= 0x80000000)
             if returncode != 0 and (driver_crash or (not canceled and not closing)) and not encoder_rejected:
                 fault_error = fault("process_exit")
         if process is not None and process.stdout is not None and (reader_thread is None or not reader_thread.is_alive()):

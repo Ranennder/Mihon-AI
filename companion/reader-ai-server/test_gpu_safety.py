@@ -219,7 +219,7 @@ class GpuSafetyTests(unittest.TestCase):
                 self.assertFalse(server.gpu_status()["available"])
 
     def test_concurrent_reader_cancellation_cannot_hide_a_windows_driver_crash(self):
-        for code in (-1073740791, 3221226505):
+        for code in (-1073740791, 3221226505, 71):
             with self.subTest(returncode=code):
                 server = companion.ReaderAiServer(("127.0.0.1", 0), companion.Config())
                 self.addCleanup(server.server_close)

@@ -8,7 +8,7 @@
 // exercises Real-ESRGAN's Vulkan preprocessing, inference and postprocessing.
 int main(int argc, char** argv)
 {
-    if (argc != 4 && argc != 5)
+    if (argc != 4 && argc != 5 && argc != 7)
         return 2;
     const int scale = std::atoi(argv[3]);
     if (scale < 2 || scale > 4)
@@ -23,22 +23,29 @@ int main(int argc, char** argv)
         return 4;
     if (net.load_model(argv[2]) != 0)
         return 6;
-    const bool reference = argc == 5;
-    const int width = reference ? 36 : 16;
-    ncnn::Mat input(width, width, 3);
+    const bool reference = argc >= 5;
+    const int source_width = argc == 7 ? std::atoi(argv[5]) : 16;
+    const int source_height = argc == 7 ? std::atoi(argv[6]) : 16;
+    if (source_width < 16 || source_height < 16 || source_width > 128 || source_height > 128)
+        return 2;
+    const int width = reference ? source_width + 20 : 16;
+    const int height = reference ? source_height + 20 : 16;
+    ncnn::Mat input(width, height, 3);
     for (int channel = 0; channel < 3; channel++)
     {
         float* values = input.channel(channel);
-        for (int pixel = 0; pixel < width * width; pixel++)
+        for (int pixel = 0; pixel < width * height; pixel++)
         {
             if (!reference)
                 values[pixel] = float((pixel * 7 + channel * 31) % 256) / 255.f;
             else
             {
                 // Match realesrgan_preproc.comp's reflect padding exactly for
-                // a single 16x16 tile and the CLI's ten-pixel prepadding.
-                const int x = 15 - std::abs(std::abs(pixel % width - 10) - 15);
-                const int y = 15 - std::abs(std::abs(pixel / width - 10) - 15);
+                // a complete source image and ten-pixel outer prepadding.
+                // The multi-tile comparison then independently checks seams
+                // against this single-pass full-image CPU reference.
+                const int x = source_width - 1 - std::abs(std::abs(pixel % width - 10) - (source_width - 1));
+                const int y = source_height - 1 - std::abs(std::abs(pixel / width - 10) - (source_height - 1));
                 values[pixel] = float((x * 17 + y * 11 + channel * 53) % 256) / 255.f;
             }
         }
@@ -47,7 +54,7 @@ int main(int argc, char** argv)
     ncnn::Extractor extractor = net.create_extractor();
     if (extractor.input("data", input) != 0 || extractor.extract("output", output) != 0)
         return 7;
-    if (output.empty() || output.w != width * scale || output.h != width * scale || output.c != 3)
+    if (output.empty() || output.w != width * scale || output.h != height * scale || output.c != 3)
         return 8;
     double checksum = 0;
     for (int channel = 0; channel < output.c; channel++)
@@ -67,9 +74,9 @@ int main(int argc, char** argv)
         FILE* image = std::fopen(argv[4], "wb");
         if (!image)
             return 11;
-        std::fprintf(image, "P6\n%d %d\n255\n", 16 * scale, 16 * scale);
-        for (int y = 0; y < 16 * scale; y++)
-            for (int x = 0; x < 16 * scale; x++)
+        std::fprintf(image, "P6\n%d %d\n255\n", source_width * scale, source_height * scale);
+        for (int y = 0; y < source_height * scale; y++)
+            for (int x = 0; x < source_width * scale; x++)
                 for (int channel = 0; channel < 3; channel++)
                 {
                     const float* values = output.channel(channel);

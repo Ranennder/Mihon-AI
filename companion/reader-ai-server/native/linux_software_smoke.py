@@ -22,6 +22,11 @@ CASES = [
     ("realesrgan-x4plus-anime", "realesrgan-x4plus-anime", 4),
     ("realesrgan-x4plus", "realesrgan-x4plus", 4),
 ]
+MULTI_TILE_CASES = [
+    ("realesr-animevideov3", "realesr-animevideov3-x2", 2, "RGB", 35, 73),
+    ("realesr-animevideov3", "realesr-animevideov3-x2", 2, "RGBA", 35, 73),
+    ("realesrgan-x4plus-anime", "realesrgan-x4plus-anime", 4, "RGB", 33, 35),
+]
 
 
 def run(command: list[str], log: Path, environment: dict[str, str], timeout: int = 600) -> dict:
@@ -33,11 +38,13 @@ def run(command: list[str], log: Path, environment: dict[str, str], timeout: int
             "log": log.name, "output": output}
 
 
-def validate_image(output: Path, mode: str, scale: int, reference: Path) -> dict:
+def validate_image(output: Path, mode: str, scale: int, reference: Path,
+                   source_size: tuple[int, int] = (16, 16), tile_size: int | None = None) -> dict:
+    comparison = {}
     with Image.open(output) as decoded, Image.open(reference) as expected:
         decoded.load()
         expected.load()
-        if decoded.size != (16 * scale, 16 * scale) or decoded.mode != mode:
+        if decoded.size != tuple(value * scale for value in source_size) or decoded.mode != mode:
             raise RuntimeError(f"Invalid native output geometry/mode: {decoded.size} {decoded.mode}")
         statistics = ImageStat.Stat(decoded.convert("RGB"))
         if not all(math.isfinite(value) for value in statistics.mean + statistics.var) or max(statistics.var) < 1:
@@ -53,8 +60,37 @@ def validate_image(output: Path, mode: str, scale: int, reference: Path) -> dict
         # bound catches channel/padding/shader corruption, not quality changes.
         if mean_error > 12 or max_error > 96:
             raise RuntimeError(f"CPU/Vulkan reference mismatch: mean={mean_error:.3f} max={max_error}")
-    return {"cpu_reference_mean_absolute_error": round(mean_error, 4),
-            "cpu_reference_max_absolute_error": max_error}
+        comparison.update({"cpu_reference_mean_absolute_error": round(mean_error, 4),
+                           "cpu_reference_max_absolute_error": max_error})
+        if tile_size is not None:
+            bands = []
+            band = 2 * scale
+            for source_x in range(tile_size, source_size[0], tile_size):
+                x = source_x * scale
+                bands.append(difference.crop((max(0, x - band), 0, min(decoded.width, x + band), decoded.height)))
+            for source_y in range(tile_size, source_size[1], tile_size):
+                y = source_y * scale
+                bands.append(difference.crop((0, max(0, y - band), decoded.width, min(decoded.height, y + band))))
+            if not bands:
+                raise RuntimeError("The multi-tile fixture did not cross a tile boundary")
+            band_statistics = [ImageStat.Stat(image) for image in bands]
+            samples = sum(image.width * image.height * 3 for image in bands)
+            seam_mean = sum(sum(statistic.sum) for statistic in band_statistics) / samples
+            seam_max = max(high for image in bands for _, high in image.getextrema())
+            if seam_mean > 12 or seam_max > 96:
+                raise RuntimeError(f"CPU/Vulkan seam mismatch: mean={seam_mean:.3f} max={seam_max}")
+            comparison.update({"seam_mean_absolute_error": round(seam_mean, 4),
+                               "seam_max_absolute_error": seam_max, "seam_band_count": len(bands),
+                               "seam_band_half_width_source_pixels": 2})
+    return comparison
+
+
+def write_source(path: Path, mode: str, width: int, height: int) -> None:
+    image = Image.new(mode, (width, height))
+    image.putdata([tuple(((x * 17 + y * 11 + channel * 53) % 256)
+                        for channel in range(3)) + ((64 + (x * 7 + y * 5) % 192,) if mode == "RGBA" else ())
+                   for y in range(height) for x in range(width)])
+    image.save(path)
 
 
 def smoke(root: Path) -> None:
@@ -85,7 +121,7 @@ def smoke(root: Path) -> None:
               "checkout_sha": os.environ["GITHUB_SHA"], "software_vulkan_only": True,
               "physical_gpu_tested": False, "icd": icds[0].name,
               "icd_sha256": hashlib.sha256(icds[0].read_bytes()).hexdigest(),
-              "cpu_models": [], "vulkan_cases": [], "directory_cases": []}
+              "cpu_models": [], "vulkan_cases": [], "directory_cases": [], "multi_tile_cases": []}
     result_path = proof / "software-vulkan-result.json"
     result["status"] = "running"
     result_path.write_text(json.dumps(result, indent=2) + "\n")
@@ -106,11 +142,7 @@ def smoke(root: Path) -> None:
 
         for mode in ("RGB", "RGBA"):
             source = root / f"source-{mode}.png"
-            image = Image.new(mode, (16, 16))
-            image.putdata([tuple(((x * 17 + y * 11 + channel * 53) % 256)
-                                for channel in range(3)) + ((64 + (x * 7 + y * 5) % 192,) if mode == "RGBA" else ())
-                           for y in range(16) for x in range(16)])
-            image.save(source)
+            write_source(source, mode, 16, 16)
             for model_name, model, scale in CASES:
                 label = f"{model}-{mode}"
                 output = root / f"output-{label}.png"
@@ -155,6 +187,39 @@ def smoke(root: Path) -> None:
             result["directory_cases"].append({"model": model, "images": images, **record})
             result_path.write_text(json.dumps(result, indent=2) + "\n")
             print(f"SOFTWARE_VULKAN_DIRECTORY_OK model={model} pages=2", flush=True)
+
+        # Non-square pages cross both tile axes, including a partial final row
+        # and column. Keep software execution small; do not enlarge tolerances
+        # or the CPU time budget if a real pipeline error is found.
+        for model_name, model, scale, mode, width, height in MULTI_TILE_CASES:
+            label = f"multi-{model}-{mode}-{width}x{height}"
+            source = root / f"source-{label}.png"
+            output = root / f"output-{label}.png"
+            reference = root / f"reference-{label}.ppm"
+            write_source(source, mode, width, height)
+            reference_record = run([str(build / "mihon-ncnn-smoke"), str(models / f"{model}.param"),
+                                    str(models / f"{model}.bin"), str(scale), str(reference), str(width), str(height)],
+                                   proof / f"cpu-reference-{label}.log", environment, timeout=120)
+            if reference_record["exit_code"] or not reference.is_file():
+                raise RuntimeError(f"CPU multi-tile reference failed: {label}")
+            command = [str(build / "realesrgan-ncnn-vulkan"), "-i", str(source), "-o", str(output),
+                       "-s", str(scale), "-t", "32", "-j", "1:1:1", "-g", "0", "-n", model_name,
+                       "-m", str(models), "-f", "png"]
+            record = run(command, proof / f"vulkan-{label}.log", environment, timeout=120)
+            if record["exit_code"] or re.search(r"MIHON_GPU_FAULT|failed -\d|VK_ERROR|device lost", record["output"], re.I):
+                raise RuntimeError(f"Software Vulkan multi-tile smoke failed: {label}; {record['log']}")
+            if not re.search(r"llvmpipe|lavapipe", record["output"], re.I):
+                raise RuntimeError(f"Native multi-tile CLI did not identify the selected software device: {label}")
+            comparison = validate_image(output, mode, scale, reference, (width, height), tile_size=32)
+            record.pop("output")
+            result["multi_tile_cases"].append({"model": model, "input_mode": mode, "scale": scale,
+                                                "source_size": [width, height], "output_size": [width * scale, height * scale],
+                                                "tile_size": 32, "tiles_x": math.ceil(width / 32),
+                                                "tiles_y": math.ceil(height / 32),
+                                                "output_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                                                **comparison, **record})
+            result_path.write_text(json.dumps(result, indent=2) + "\n")
+            print(f"SOFTWARE_VULKAN_MULTI_TILE_OK model={model} mode={mode} source={width}x{height} tile=32", flush=True)
 
         successful = run([str(build / "mihon-native-failure-test"), "success"], proof / "native-success.log", environment)
         failed = run([str(build / "mihon-native-failure-test")], proof / "native-injected-fault.log", environment)
