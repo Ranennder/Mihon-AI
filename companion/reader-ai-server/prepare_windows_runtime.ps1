@@ -16,6 +16,30 @@ $modelArchiveSha256 = "abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb
 $runtimeRoot = [System.IO.Path]::GetFullPath($RuntimeDir)
 $nativeRoot = Join-Path $PSScriptRoot "native"
 $manifestPath = Join-Path $runtimeRoot "native-runtime-manifest.json"
+$expectedFiles = @("realesrgan-ncnn-vulkan.exe", "licenses/Real-ESRGAN.txt", "licenses/NCNN.txt", "licenses/glslang.txt", "licenses/libwebp.txt")
+foreach ($modelName in @("realesr-animevideov3-x2", "realesr-animevideov3-x3", "realesr-animevideov3-x4", "realesrgan-x4plus-anime", "realesrgan-x4plus")) {
+    $expectedFiles += "models/$modelName.param", "models/$modelName.bin"
+}
+
+function Get-RuntimeRelativePath([string]$Path) {
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $rootPrefix = $runtimeRoot.TrimEnd('\') + '\'
+    if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Runtime file escaped its expected directory"
+    }
+    return $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+}
+
+# Never package stale DLLs, older aliases or arbitrary files from an explicitly
+# supplied old cache directory. Existing unknown files are preserved and rejected.
+if (Test-Path -LiteralPath $runtimeRoot) {
+    Get-ChildItem -LiteralPath $runtimeRoot -Recurse -File | ForEach-Object {
+        $relative = Get-RuntimeRelativePath $_.FullName
+        if ($relative -cne "native-runtime-manifest.json" -and $expectedFiles -cnotcontains $relative) {
+            throw "Unrecognized runtime file '$relative'. Choose a new empty MIHONAI_RUNTIME_DIR. Existing files were preserved."
+        }
+    }
+}
 $buildInputs = [ordered]@{}
 foreach ($name in @("CMakeLists.txt", "patch_runtime.py", "cpu_model_smoke.cpp", "native_failure_test.cpp")) {
     $buildInputs[$name] = (Get-FileHash -LiteralPath (Join-Path $nativeRoot $name) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -23,10 +47,14 @@ foreach ($name in @("CMakeLists.txt", "patch_runtime.py", "cpu_model_smoke.cpp",
 
 if (-not $Force -and (Test-Path -LiteralPath $manifestPath)) {
     $cached = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $cacheValid = $cached.runtime_version -ceq $runtimeVersion
+    $cacheValid = $cached.format -ceq "mihon-native-runtime" -and $cached.version -eq 1 -and $cached.runtime_version -ceq $runtimeVersion -and $cached.model_archive_sha256 -ceq $modelArchiveSha256
+    $cachedFiles = @($cached.files.PSObject.Properties.Name)
+    $cacheValid = $cacheValid -and $cachedFiles.Count -eq $expectedFiles.Count
+    foreach ($name in $expectedFiles) { $cacheValid = $cacheValid -and ($cachedFiles -ccontains $name) }
     foreach ($pin in $pins.Keys) { $cacheValid = $cacheValid -and ($cached.pins.$pin -ceq $pins[$pin]) }
     foreach ($name in $buildInputs.Keys) { $cacheValid = $cacheValid -and ($cached.build_inputs.$name -ceq $buildInputs[$name]) }
     foreach ($file in $cached.files.PSObject.Properties) {
+        if ($expectedFiles -cnotcontains $file.Name) { $cacheValid = $false; continue }
         $path = Join-Path $runtimeRoot $file.Name
         $cacheValid = $cacheValid -and (Test-Path -LiteralPath $path -PathType Leaf)
         if ($cacheValid) { $cacheValid = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $file.Value }
@@ -119,9 +147,11 @@ try {
     Copy-Item -LiteralPath (Join-Path $webpSource "COPYING") -Destination (Join-Path $licenses "libwebp.txt")
     $files = [ordered]@{}
     Get-ChildItem -LiteralPath $runtimeRoot -Recurse -File | Where-Object { $_.Name -ne "native-runtime-manifest.json" } | Sort-Object FullName | ForEach-Object {
-        $relative = $_.FullName.Substring($runtimeRoot.TrimEnd('\').Length + 1).Replace('\', '/')
+        $relative = Get-RuntimeRelativePath $_.FullName
+        if ($expectedFiles -cnotcontains $relative) { throw "Unexpected new runtime file: $relative" }
         $files[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
+    if ($files.Count -ne $expectedFiles.Count) { throw "Incomplete runtime file inventory" }
     [ordered]@{ format="mihon-native-runtime"; version=1; runtime_version=$runtimeVersion;
         pins=$pins; build_inputs=$buildInputs; model_archive_sha256=$modelArchiveSha256;
         native_patches=(Get-Content -LiteralPath (Join-Path $patched "patch-manifest.json") -Raw | ConvertFrom-Json);

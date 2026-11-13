@@ -1,14 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 cmake_policy(SET CMP0091 NEW)
+# NCNN/glslang/libwebp have older cmake_minimum_required scopes. Keep their
+# CRT selection consistent with our executable instead of reverting to /MD.
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 project(mihon_native_runtime LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-if(NOT WIN32)
-    message(FATAL_ERROR "The packaged runtime is built on Windows CI")
-endif()
 foreach(required MIHON_NCNN_SOURCE MIHON_WEBP_SOURCE MIHON_APP_SOURCE)
+    # Untyped -D values from PowerShell retain Windows backslashes. Normalize
+    # before CMake re-expands them as source paths (otherwise \U is an escape).
+    file(TO_CMAKE_PATH "${${required}}" normalized_source)
+    set(${required} "${normalized_source}")
     if(NOT IS_DIRECTORY "${${required}}")
         message(FATAL_ERROR "Missing pinned source: ${required}")
     endif()
@@ -93,10 +97,19 @@ add_executable(realesrgan-ncnn-vulkan
     ${shader_headers})
 target_include_directories(realesrgan-ncnn-vulkan PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}" "${MIHON_WEBP_SOURCE}/src")
-target_link_libraries(realesrgan-ncnn-vulkan PRIVATE ncnn webp ole32 windowscodecs)
+target_link_libraries(realesrgan-ncnn-vulkan PRIVATE ncnn webp)
+if(WIN32)
+    target_link_libraries(realesrgan-ncnn-vulkan PRIVATE ole32 windowscodecs)
+endif()
 target_compile_definitions(realesrgan-ncnn-vulkan PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
 
-add_executable(mihon-ncnn-smoke cpu_model_smoke.cpp)
+if(WIN32)
+    add_executable(mihon-ncnn-smoke cpu_model_smoke.cpp)
+else()
+    # The software Vulkan preflight shares the exact application, NCNN,
+    # shaders and patch set with the packaged Windows build.
+    add_executable(mihon-ncnn-smoke linux_cpu_model_smoke.cpp)
+endif()
 target_link_libraries(mihon-ncnn-smoke PRIVATE ncnn)
 target_compile_definitions(mihon-ncnn-smoke PRIVATE _CRT_SECURE_NO_WARNINGS)
 

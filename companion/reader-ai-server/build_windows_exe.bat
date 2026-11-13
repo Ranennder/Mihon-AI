@@ -4,7 +4,10 @@ cd /d "%~dp0"
 
 set "BUILD_INFO_FILE=%~dp0companion_build_info.py"
 set "RELEASE_TAG=%MIHON_AI_RELEASE_TAG%"
-if defined RELEASE_TAG > "%BUILD_INFO_FILE%" echo RELEASE_TAG = "%RELEASE_TAG%"
+if defined RELEASE_TAG (
+  > "%BUILD_INFO_FILE%" echo RELEASE_TAG = "%RELEASE_TAG%"
+  if errorlevel 1 exit /b 1
+)
 
 set "RUNTIME_DIR=%MIHONAI_RUNTIME_DIR%"
 if not defined RUNTIME_DIR set "RUNTIME_DIR=%TEMP%\mihon-realesrgan-runtime-ncnn20261020"
@@ -17,7 +20,9 @@ if not exist "%CLOUDFLARED_EXE%" (
 )
 
 echo Verifying or building modern Windows runtime in %RUNTIME_DIR%
-powershell -ExecutionPolicy Bypass -File "%~dp0prepare_windows_runtime.ps1" -RuntimeDir "%RUNTIME_DIR%"
+set "RUNTIME_POWERSHELL=pwsh"
+where pwsh >nul 2>&1 || set "RUNTIME_POWERSHELL=powershell"
+%RUNTIME_POWERSHELL% -NoProfile -ExecutionPolicy Bypass -File "%~dp0prepare_windows_runtime.ps1" -RuntimeDir "%RUNTIME_DIR%"
 if errorlevel 1 exit /b 1
 
 if not exist "%RUNTIME_DIR%\models\realesr-animevideov3-x2.bin" (
@@ -41,3 +46,4 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo Built exe: dist\MihonAiCompanion.exe
+exit /b 0

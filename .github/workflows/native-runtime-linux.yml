@@ -1,0 +1,36 @@
+name: Native software Vulkan preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/companion-native-runtime
+
+permissions:
+  contents: read
+
+jobs:
+  software-vulkan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install software Vulkan and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build libvulkan1 mesa-vulkan-drivers vulkan-tools glslang-tools
+          python -m pip install Pillow==11.3.0
+      - name: Build the shared pinned native runtime
+        run: python companion/reader-ai-server/native/linux_prepare_runtime.py --work-root "$RUNNER_TEMP/mihon-linux-native"
+      - name: Run CPU models and actual Vulkan pipeline on Mesa lavapipe
+        run: python companion/reader-ai-server/native/linux_software_smoke.py --work-root "$RUNNER_TEMP/mihon-linux-native"
+      - name: Upload software Vulkan proof and logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-software-vulkan-${{ github.sha }}
+          path: ${{ runner.temp }}/mihon-linux-native/proof
+          if-no-files-found: warn
