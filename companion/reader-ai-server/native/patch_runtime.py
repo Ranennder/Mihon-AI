@@ -17,7 +17,7 @@ import shutil
 REAL_ESRGAN_COMMIT = "37026f49824c5cf84062e7c6a5dd71445dcf610f"
 NCNN_COMMIT = "7e36d25cb153092ba87a60530455c7376fedf452"
 GLSLANG_COMMIT = "780b6a209132dc74e99458f62ebe5fa7e57c41cf"
-WEBP_COMMIT = "b7e29b9d75bd31422b00c2a446d49d7af06c328d"
+WEBP_COMMIT = "4fa21912338357f89e4fd51cf2368325b59e9bd9"
 RUNTIME_VERSION = "ncnn-20261020-mihon1"
 
 CHECK_HEADER = r'''#ifndef MIHON_RUNTIME_CHECKS_H
@@ -123,7 +123,28 @@ def patch_main(text: str) -> tuple[str, dict[str, int]]:
                   "wide_model_path_corrections": 2, "checked_page_and_model": 2}
 
 
-def prepare(source: Path, destination: Path) -> dict:
+def patch_ncnn_gpu(source: Path) -> dict:
+    path = source / "src" / "gpu.cpp"
+    text = path.read_text(encoding="utf-8")
+    before = '    const bool support_VK_VERSION_1_1 = physicalDeviceProperties.apiVersion >= VK_MAKE_VERSION(1, 1, 0);'
+    disabled = (
+        "VK_KHR_cooperative_matrix", "VK_EXT_cooperative_matrix_maintenance1",
+        "VK_NV_cooperative_matrix", "VK_NV_cooperative_matrix2", "VK_NV_cooperative_vector",
+    )
+    block = (
+        "    // Mihon: these models use ordinary convolution shaders, never cooperative\n"
+        "    // matrix/vector instructions. Avoid querying unused driver extension\n"
+        "    // properties (including the NVIDIA 50-series initialization path in\n"
+        "    // upstream ncnn issue #6843). This precedes feature/property probes.\n"
+        + "".join(f"    support_{extension} = 0;\n" for extension in disabled) + "\n" + before
+    )
+    text = replace_exact(text, before, block, 1)
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return {"disabled_optional_driver_queries": list(disabled),
+            "gpu_cpp_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def prepare(source: Path, destination: Path, ncnn_source: Path | None = None) -> dict:
     source = source.resolve()
     destination = destination.resolve()
     if destination == source or destination in source.parents or source in destination.parents:
@@ -142,6 +163,8 @@ def prepare(source: Path, destination: Path) -> dict:
     checks = {"runtime_version": RUNTIME_VERSION, "core": core_checks, "main": main_checks,
               "patched_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                   for path in (cpp_path, main_path, destination / "mihon_runtime_checks.h")}}
+    if ncnn_source is not None:
+        checks["ncnn_gpu"] = patch_ncnn_gpu(ncnn_source)
     (destination / "patch-manifest.json").write_text(json.dumps(checks, indent=2) + "\n", encoding="utf-8")
     return checks
 
@@ -150,5 +173,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--ncnn-source", type=Path)
     arguments = parser.parse_args()
-    print(json.dumps(prepare(arguments.source, arguments.destination), indent=2))
+    print(json.dumps(prepare(arguments.source, arguments.destination, arguments.ncnn_source), indent=2))

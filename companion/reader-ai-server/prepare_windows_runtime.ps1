@@ -9,7 +9,7 @@ $pins = [ordered]@{
     realesrgan = "37026f49824c5cf84062e7c6a5dd71445dcf610f"
     ncnn = "7e36d25cb153092ba87a60530455c7376fedf452"
     glslang = "780b6a209132dc74e99458f62ebe5fa7e57c41cf"
-    webp = "b7e29b9d75bd31422b00c2a446d49d7af06c328d"
+    webp = "4fa21912338357f89e4fd51cf2368325b59e9bd9"
 }
 $modelUrl = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip"
 $modelArchiveSha256 = "abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb412802d"
@@ -67,7 +67,7 @@ try {
     Get-PinnedGit "https://github.com/nihui/glslang.git" $pins.glslang (Join-Path $ncnnSource "glslang")
     Get-PinnedGit "https://github.com/webmproject/libwebp.git" $pins.webp $webpSource
     $patched = Join-Path $workRoot "patched"
-    Invoke-Checked $python @((Join-Path $nativeRoot "patch_runtime.py"), "--source", $realSource, "--destination", $patched)
+    Invoke-Checked $python @((Join-Path $nativeRoot "patch_runtime.py"), "--source", $realSource, "--destination", $patched, "--ncnn-source", $ncnnSource)
 
     $build = Join-Path $workRoot "build"
     Invoke-Checked "cmake" @("-S", $nativeRoot, "-B", $build, "-G", "Visual Studio 17 2022", "-A", "x64",
